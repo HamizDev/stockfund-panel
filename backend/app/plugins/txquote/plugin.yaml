@@ -1,0 +1,14 @@
+# txquote — 腾讯/新浪免费行情插件
+# 无需 API Key (runtime: none)。提供分钟K与五档盘口, 补齐免费数据源能力。
+# 数据源: 腾讯 qt.gtimg.cn (五档盘口/分时) + 新浪 quotes.sina.cn (分钟K)。
+# 注意: 均为页面级公开接口, 非官方 API, 结构变化时插件会软失败(返回空)而非抛错。
+
+name: txquote
+display_name: "txquote"
+runtime: none
+entry: app.plugins.txquote.provider:TxQuoteProvider
+check: app.plugins.txquote.provider:availability
+datasets: [minute, depth5]
+description: "腾讯/新浪免费行情: 五档盘口(腾讯 q= 批量, 买1-5/卖1-5 价格与量, 量为手) 与分钟K(新浪 5/15/30/60 分钟 K 线; 1m 用腾讯当日分时逐分钟聚合, 仅当日)。无需 Key。周末/休市返回上一交易日数据。"
+install_hint: "无需安装, 直接可用"
+homepage: "https://qt.gtimg.cn"

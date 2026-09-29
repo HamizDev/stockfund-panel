@@ -1,0 +1,254 @@
+# stockfund-panel - one-shot launcher for backend + frontend (Windows / PowerShell)
+#
+# Usage:
+#   .\dev.ps1
+#   .\dev.ps1 -BackendPort 8000 -FrontendPort 5173
+#   $env:BACKEND_PORT='8000'; .\dev.ps1
+#
+# Ctrl-C closes both processes.
+#
+# If you see "running scripts is disabled":
+#   Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+
+[CmdletBinding()]
+param(
+    [int]$BackendPort  = 0,
+    [int]$FrontendPort = 0
+)
+
+$ErrorActionPreference = 'Stop'
+
+$Root        = Split-Path -Parent $MyInvocation.MyCommand.Path
+$BackendDir  = Join-Path $Root 'backend'
+$FrontendDir = Join-Path $Root 'frontend'
+$EnvFile     = Join-Path $Root '.env'
+
+# Read only launcher-owned keys. Do not execute .env as PowerShell code.
+function Read-DotEnvValue($Path, $Name) {
+    if (-not (Test-Path $Path)) { return $null }
+    $escaped = [Regex]::Escape($Name)
+    foreach ($line in Get-Content $Path) {
+        if ($line -match "^\s*$escaped\s*=\s*(.*?)\s*$") {
+            $value = $Matches[1].Trim()
+            $value = ($value -replace '\s+#.*$', '').Trim()
+            if ($value.Length -ge 2 -and
+                (($value.StartsWith('"') -and $value.EndsWith('"')) -or
+                 ($value.StartsWith("'") -and $value.EndsWith("'")))) {
+                return $value.Substring(1, $value.Length - 2)
+            }
+            return $value
+        }
+    }
+    return $null
+}
+
+$DotEnvHost = Read-DotEnvValue $EnvFile 'HOST'
+$DotEnvPort = Read-DotEnvValue $EnvFile 'PORT'
+$BindAddress = if ($env:HOST) { $env:HOST } elseif ($DotEnvHost) { $DotEnvHost } else { '0.0.0.0' }
+$DisplayHost = if ($BindAddress -in @('0.0.0.0', '::')) { 'localhost' } else { $BindAddress }
+
+# Port precedence: CLI arg > BACKEND_PORT env > PORT env > .env PORT > default
+if ($BackendPort -le 0) {
+    if ($env:BACKEND_PORT) { $BackendPort = [int]$env:BACKEND_PORT }
+    elseif ($env:PORT)     { $BackendPort = [int]$env:PORT }
+    elseif ($DotEnvPort)   { $BackendPort = [int]$DotEnvPort }
+    else                   { $BackendPort = 3018 }
+}
+if ($FrontendPort -le 0) { $FrontendPort = if ($env:FRONTEND_PORT) { [int]$env:FRONTEND_PORT } else { 3011 } }
+
+# Force UTF-8 console output so child process logs aren't garbled
+try {
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    $OutputEncoding           = New-Object System.Text.UTF8Encoding $false
+} catch {}
+
+function Log-Info($m) { Write-Host "[dev] $m" -ForegroundColor DarkGray }
+function Log-Ok  ($m) { Write-Host "[dev] $m" -ForegroundColor Green }
+function Log-Warn($m) { Write-Host "[dev] $m" -ForegroundColor Yellow }
+function Log-Err ($m) { Write-Host "[dev] $m" -ForegroundColor Red }
+
+# ===== 1. Dependency check =====
+function Require-Cmd($cmd, $hint) {
+    if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
+        Log-Err "$cmd not found"
+        Write-Host "       install via: $hint"
+        exit 1
+    }
+}
+
+Require-Cmd 'uv'   'powershell -c "irm https://astral.sh/uv/install.ps1 | iex"   OR   winget install --id=astral-sh.uv'
+Require-Cmd 'pnpm' 'npm i -g pnpm   OR   corepack enable; corepack prepare pnpm@9 --activate'
+
+# ===== 2. Port check - preserve any service already listening =====
+function Assert-PortAvailable($name, $port) {
+    $conns = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue
+    if (-not $conns) { return }
+    Log-Err "port $port ($name) is already listening; existing service was left untouched."
+    Write-Host '       Try: .\dev.ps1 -BackendPort 3020 -FrontendPort 3021'
+    exit 1
+}
+
+Assert-PortAvailable 'backend'  $BackendPort
+Assert-PortAvailable 'frontend' $FrontendPort
+
+# ===== 3. Dependency install =====
+# Match Docker's whitespace-separated BACKEND_EXTRAS behavior so old CPUs can
+# select Polars' rtcompat runtime before the backend starts.
+$BackendExtras = $env:BACKEND_EXTRAS
+if (-not (Test-Path Env:BACKEND_EXTRAS)) {
+    $BackendExtras = Read-DotEnvValue $EnvFile 'BACKEND_EXTRAS'
+}
+
+$BackendExtraArgs = @()
+if (-not [string]::IsNullOrWhiteSpace($BackendExtras)) {
+    foreach ($extra in ($BackendExtras -split '\s+' | Where-Object { $_ })) {
+        $BackendExtraArgs += '--extra', $extra
+    }
+}
+
+if (-not (Test-Path (Join-Path $BackendDir '.venv')) -or $BackendExtraArgs.Count) {
+    if ($BackendExtraArgs.Count) {
+        Log-Info "syncing Python deps with extras: $BackendExtras"
+    } else {
+        Log-Info 'first run - installing Python deps (1-2 min)...'
+    }
+    Push-Location $BackendDir
+    try { & uv sync --frozen @BackendExtraArgs } finally { Pop-Location }
+    if ($LASTEXITCODE -ne 0) { Log-Err 'uv sync failed'; exit 1 }
+    Log-Ok 'backend deps installed'
+}
+
+if (-not (Test-Path (Join-Path $FrontendDir 'node_modules'))) {
+    Log-Info 'first run - installing Node deps...'
+    Push-Location $FrontendDir
+    try { & pnpm install } finally { Pop-Location }
+    if ($LASTEXITCODE -ne 0) { Log-Err 'pnpm install failed'; exit 1 }
+    Log-Ok 'frontend deps installed'
+}
+
+# ===== 4. Banner (ASCII so it renders on any codepage) =====
+Write-Host ''
+Write-Host '+----------------------------------------------+' -ForegroundColor Blue
+Write-Host '|  stockfund-panel                            |' -ForegroundColor Blue
+Write-Host '|                                              |' -ForegroundColor Blue
+Write-Host "|  backend   http://${DisplayHost}:$BackendPort"  -ForegroundColor Blue
+Write-Host "|  frontend  http://${DisplayHost}:$FrontendPort" -ForegroundColor Blue
+Write-Host '|                                              |' -ForegroundColor Blue
+Write-Host '|  Ctrl-C closes both                          |' -ForegroundColor Blue
+Write-Host '+----------------------------------------------+' -ForegroundColor Blue
+Write-Host ''
+
+# ===== 5. Launch jobs =====
+# Each job writes its $PID to a temp file so the main thread can find the
+# child powershell.exe and taskkill /T the whole process tree on exit.
+$backendPidFile  = [System.IO.Path]::GetTempFileName()
+$frontendPidFile = [System.IO.Path]::GetTempFileName()
+
+$backendJob = Start-Job -Name 'backend' -ScriptBlock {
+    param($pidFile, $dir, $envFile, $bindAddress, $port)
+    # Start-Job 开的是全新 powershell.exe 子进程, 不继承主进程的 UTF-8 设置,
+    # 默认用系统 ANSI (中文 Windows = GBK/cp936) 解码后端 UTF-8 输出 → 中文乱码。
+    # 这里强制子进程用 UTF-8, 与 app/__init__.py 的 stdout/stderr 编码对齐。
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    $OutputEncoding           = New-Object System.Text.UTF8Encoding $false
+    $PID | Out-File -FilePath $pidFile -Encoding ascii -Force
+    $env:PYTHONUNBUFFERED = '1'
+    Set-Location $dir
+    $envArgs = if (Test-Path $envFile) { @('--env-file', $envFile) } else { @() }
+    & .\.venv\Scripts\python.exe -m uvicorn app.main:app @envArgs --reload --host $bindAddress --port $port 2>&1
+} -ArgumentList $backendPidFile, $BackendDir, $EnvFile, $BindAddress, $BackendPort
+
+$frontendJob = Start-Job -Name 'frontend' -ScriptBlock {
+    param($pidFile, $dir, $bindAddress, $backendPort, $port)
+    # 同上: job 子进程默认 GBK, pnpm/前端工具链也是 UTF-8 输出, 需对齐。
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    $OutputEncoding           = New-Object System.Text.UTF8Encoding $false
+    $PID | Out-File -FilePath $pidFile -Encoding ascii -Force
+    Set-Location $dir
+    $env:BACKEND_HOST = $bindAddress
+    $env:BACKEND_PORT = [string]$backendPort
+    & pnpm dev --host $bindAddress --port $port 2>&1
+} -ArgumentList $frontendPidFile, $FrontendDir, $BindAddress, $BackendPort, $FrontendPort
+
+# Wait up to 5 seconds for the PID files to materialise
+function Read-JobPid($file) {
+    for ($i = 0; $i -lt 50; $i++) {
+        try {
+            $c = (Get-Content $file -ErrorAction SilentlyContinue) -as [string]
+            if ($c -and $c.Trim()) { return [int]$c.Trim() }
+        } catch {}
+        Start-Sleep -Milliseconds 100
+    }
+    return $null
+}
+$backendChildPid  = Read-JobPid $backendPidFile
+$frontendChildPid = Read-JobPid $frontendPidFile
+
+# ===== 6. Cleanup =====
+$script:cleaning = $false
+function Cleanup-All {
+    if ($script:cleaning) { return }
+    $script:cleaning = $true
+    Write-Host ''
+    Log-Info 'shutting down...'
+
+    foreach ($p in @($backendChildPid, $frontendChildPid)) {
+        if ($p) {
+            # /T kills the whole process tree (the job's powershell + uvicorn/vite)
+            $null = & cmd /c "taskkill /F /T /PID $p 2>nul"
+        }
+    }
+    foreach ($j in @($backendJob, $frontendJob)) {
+        if ($j) {
+            Stop-Job   $j -ErrorAction SilentlyContinue
+            Remove-Job $j -Force -ErrorAction SilentlyContinue
+        }
+    }
+    foreach ($f in @($backendPidFile, $frontendPidFile)) {
+        Remove-Item $f -Force -ErrorAction SilentlyContinue
+    }
+    Log-Ok 'bye'
+}
+
+# ===== 7. Main loop - pump output, handle Ctrl-C =====
+# Treat Ctrl-C as input so try/finally is guaranteed to run.
+$prevCtrlC = [Console]::TreatControlCAsInput
+try {
+    [Console]::TreatControlCAsInput = $true
+
+    while ($true) {
+        if ([Console]::KeyAvailable) {
+            $key = [Console]::ReadKey($true)
+            if (($key.Modifiers -band [ConsoleModifiers]::Control) -and $key.Key -eq 'C') {
+                break
+            }
+        }
+
+        $bOut = Receive-Job $backendJob -ErrorAction SilentlyContinue
+        if ($bOut) {
+            foreach ($line in $bOut) {
+                Write-Host '[backend ] ' -NoNewline -ForegroundColor Blue
+                Write-Host $line
+            }
+        }
+
+        $fOut = Receive-Job $frontendJob -ErrorAction SilentlyContinue
+        if ($fOut) {
+            foreach ($line in $fOut) {
+                Write-Host '[frontend] ' -NoNewline -ForegroundColor Green
+                Write-Host $line
+            }
+        }
+
+        if ($backendJob.State -ne 'Running' -or $frontendJob.State -ne 'Running') {
+            Log-Warn 'one of the processes exited; closing the other...'
+            break
+        }
+
+        Start-Sleep -Milliseconds 150
+    }
+}
+finally {
+    [Console]::TreatControlCAsInput = $prevCtrlC
+    Cleanup-All
+}

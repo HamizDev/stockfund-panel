@@ -1,0 +1,33 @@
+# Phase 0 单 service:FastAPI 启动后既跑 API 又托管前端 dist。
+# 见 ADR-17 / §8.1。
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BACKEND_EXTRAS: ${BACKEND_EXTRAS:-}
+        CODEX_CLI_VERSION: ${CODEX_CLI_VERSION:-0.144.3}
+    container_name: stockfund-panel
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${PORT:-3018}:3018"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    environment:
+      # 容器内监听所有接口；宿主机的开放范围由 BIND_HOST 决定。
+      - HOST=0.0.0.0
+      # 强制固定为容器内绝对路径, 防止 .env 里的 DATA_DIR=./data(开发模式用)
+      # 被 env_file 原样传入容器后按错误的相对路径解析, 写到未挂载卷的目录,
+      # 导致每次 up --build 重建容器都丢数据。environment 优先级高于 env_file,
+      # 无论 .env 怎么写这里都以容器路径为准。
+      - DATA_DIR=/app/data
+      # 将主机 Codex Desktop 的 loopback local-access 端点映射到 Docker host gateway。
+      - CODEX_DOCKER_HOST=host.docker.internal
+    volumes:
+      - ./data:/app/data
+      - ./tiers.yaml:/app/tiers.yaml:ro
+      # 保留原始 dotenv 值供首次密码初始化读取，避免 Compose 展开密码中的 $VAR。
+      - ./.env:/app/.env:ro
+    restart: unless-stopped
