@@ -1,8 +1,6 @@
 # stockfund-panel
 
-股票与基金数据看板，提供自选、行情与 K 线、策略筛选、回测、基金中心及可选的 AI 分析。项目以本地运行为主，数据和密钥由使用者自行管理。
-
-> 本项目基于 [tick-stock-panel](https://github.com/shy3130/tick-stock-panel) 开发。原项目及本项目的版权声明见 [LICENSE](LICENSE)。行情数据和 AI 服务分别受各自提供方的条款约束。
+**HamizDev 独立维护 · MIT 开源。** stockfund-panel 是股票与基金数据看板，提供自选、行情与 K 线、策略筛选、回测、基金中心及可选的 AI 分析。项目以本地运行为主，数据和密钥由使用者自行管理。
 
 ## 功能
 
@@ -28,7 +26,7 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
-**打开 <http://127.0.0.1:3018> 即可访问。** 上面是 macOS/Linux 命令；Windows PowerShell 请看方式 A。宿主机需要 Git 和 Docker Compose，无须另装 Python 或 Node.js。当前没有本项目的 GHCR 现成镜像，Compose 会在本机从源码构建；不要使用上游项目的镜像。
+**打开 <http://127.0.0.1:3018> 即可访问。** 上面是 macOS/Linux 命令；Windows PowerShell 请看方式 A。宿主机需要 Git 和 Docker Compose，无须另装 Python 或 Node.js。当前没有本项目的 GHCR 现成镜像，Compose 会在本机从源码构建；不要使用其他项目的镜像。
 
 | 方式 | 适合谁 | 前置要求 |
 | --- | --- | --- |
@@ -119,8 +117,8 @@ bin/                   可选的 AkShare 本地辅助服务
 docs/                  使用与二次开发文档
 ```
 
-改动代码前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)；扩展机制和上游升级注意事项见 [docs/secondary-development.md](docs/secondary-development.md)。
+改动代码前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)；扩展机制和版本升级注意事项见 [docs/secondary-development.md](docs/secondary-development.md)。
 
 ## 许可证与来源
 
-项目代码按 [MIT License](LICENSE) 发布，并保留上游 `tick-stock-panel contributors` 的版权与许可声明。本项目与 TickFlow、扶摇、AkShare、OpenAI 等数据或 AI 服务方无官方隶属关系；这些名称用于说明可选集成。第三方依赖和数据接口仍须遵守各自许可与服务条款。
+项目代码按 [MIT License](LICENSE) 发布。本仓库由 HamizDev 独立维护；[LICENSE](LICENSE) 保留适用于仓库代码的版权与许可声明。本项目与 TickFlow、扶摇、AkShare、OpenAI 等数据或 AI 服务方无官方隶属关系；这些名称用于说明可选集成。第三方依赖和数据接口仍须遵守各自许可与服务条款。
