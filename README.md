@@ -17,11 +17,9 @@
 
 选股和选基结果用于研究。页面会标出行情时间、来源和已知缺失字段；不要把历史收益、策略命中或模型文字当成交易结论。
 
-## 快速开始
+## 🚀 快速开始
 
-### Docker Compose
-
-需要 Docker Desktop 或 Docker Engine。克隆仓库后先创建自己的配置文件：
+<p align="center"><strong>已安装 Docker？从源码构建并启动 ⬇️</strong></p>
 
 ```bash
 git clone https://github.com/HamizDev/stockfund-panel.git
@@ -30,20 +28,55 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
-Windows PowerShell 中使用 `Copy-Item .env.example .env`。默认打开 <http://127.0.0.1:3018>。Compose 默认只向宿主机回环地址发布端口，运行数据保存在项目的 `data/`，不会写入 Git。启动前检查端口 3018 是否已被其他服务使用；需要改端口时修改 `.env` 中的 `PORT`。需要让其他设备访问时，先设置访问密码，再自行调整 `BIND_HOST` 与网络防火墙。
+**打开 <http://127.0.0.1:3018> 即可访问。** 上面是 macOS/Linux 命令；Windows PowerShell 请看方式 A。宿主机需要 Git 和 Docker Compose，无须另装 Python 或 Node.js。当前没有本项目的 GHCR 现成镜像，Compose 会在本机从源码构建；不要使用上游项目的镜像。
 
-Docker 镜像默认不安装可选的 `stock-sdk` 数据插件，也不会挂载宿主机 Codex 登录文件。AI 分析可在设置页配置外部 API；使用本机 Codex CLI 时，建议按下述本地开发方式在已登录的同一用户环境中运行。不要把 `~/.codex/auth.json` 复制进镜像或提交到仓库。
+| 方式 | 适合谁 | 前置要求 |
+| --- | --- | --- |
+| **A · Compose 本地构建** ⭐ 推荐 | 想运行看板，不打算改源码 | Git、Docker Desktop 或 Docker Engine + Compose 插件 |
+| **B · 本机 AI 代部署** | 希望 AI 编程助手检查环境、执行部署步骤 | 能操作本机文件和终端的 AI 编程助手；由其确认所需依赖 |
+| **C · Dev 模式** | 修改前后端、调试和二次开发 | Git、Python ≥ 3.11、Node.js ≥ 20、pnpm 9、uv |
 
-### 本地开发
+### 方式 A：Docker Compose 本地构建
 
-需要 Python 3.11+、Node.js 20、pnpm 9 和 uv。Windows 可运行 `./dev.ps1`，macOS/Linux 可运行 `./dev.sh`。脚本发现后端或前端端口已被占用时会安全退出并提示更换端口，不会结束已有服务。
+在 Windows PowerShell 中逐条执行：
+
+```powershell
+git clone https://github.com/HamizDev/stockfund-panel.git
+Set-Location stockfund-panel
+Copy-Item .env.example .env
+docker compose up --build -d
+```
+
+macOS/Linux 使用上方的快速启动命令。若宿主机端口 `3018` 已被占用，**先**在新仓库的 `.env` 中修改 `PORT`，再运行最后一条命令；不要停止已有服务。默认 `BIND_HOST=127.0.0.1`，只允许本机访问。运行数据保存在新仓库的 `data/`，不会写入 Git；密钥由使用者在设置页或自己的 `.env` 中填写。
+
+镜像默认不安装可选的 `stock-sdk` 插件，也不挂载宿主机 Codex 登录文件。要在看板中使用本机 Codex CLI，建议采用方式 C，并在运行看板的同一用户环境中登录；外部 AI API 可在设置页单独配置。
+
+### 方式 B：本机 AI 代部署
+
+把下面整段提示词交给**能够操作你本机文件和终端**的 AI 编程助手。它会先检查环境和已有服务，再向你确认具体操作；无需把 API Key、密码或 Codex 登录文件粘贴进对话。
+
+```text
+请在我的电脑上部署 https://github.com/HamizDev/stockfund-panel ，优先使用仓库自带的 Docker Compose 本地构建。
+
+先只读检查操作系统、Git、Docker、目标目录和端口 3018，并在线阅读仓库的 README.md、docs/deployment.md、docker-compose.yml 与 .env.example。列出准备执行的命令、目标目录、端口和对现有服务的影响，得到我确认后再克隆仓库、安装依赖、创建配置或启动服务。
+
+如果目标目录已有 .env 或 data/，保留它们并先给出备份方案；如果 3018 被占用，给新部署选其他端口，不要停止或覆盖已有看板。不要重装或重置 Docker/WSL，不要清理容器、镜像或数据，也不要修改其他项目。
+
+密钥和登录信息由我在本机设置页填写；不要索取、打印、上传或提交 API Key、密码、私钥、Codex 登录文件或个人数据。完成后检查 docker compose ps、/health 和首页 HTTP 响应，告诉我实际访问地址、数据目录、已启用功能及仍需我配置的项目。若 Docker 不可用，先说明原因和可选的本地开发方案，不要自行修复系统环境。
+```
+
+AI 助手需要本机文件和终端权限才能代为执行；只有聊天能力的助手可以指导你，但无法直接完成安装。首次启用数据源和 AI 服务仍需要你自己的账号或 Key。
+
+### 方式 C：Dev 模式
+
+需要 Python 3.11+、Node.js 20+、pnpm 9 和 uv。先克隆仓库并从 `.env.example` 建立自己的 `.env`；然后在 Windows 运行 `./dev.ps1`，在 macOS/Linux 运行 `./dev.sh`。例如，Windows 上已有服务占用默认端口时：
 
 ```powershell
 Copy-Item .env.example .env
 ./dev.ps1 -BackendPort 3020 -FrontendPort 3021
 ```
 
-开发模式后端和前端分别监听脚本输出的端口。需要单独检查构建时，在 `frontend/` 执行 `pnpm install --frozen-lockfile` 与 `pnpm build`；在 `backend/` 执行 `uv sync --frozen --extra dev` 与 `uv run --frozen pytest -q tests`。
+开发脚本遇到端口占用会安全退出，不会结束已有服务。前后端分别监听脚本输出的端口。单独验证构建时，在 `frontend/` 执行 `pnpm install --frozen-lockfile` 与 `pnpm build`；在 `backend/` 执行 `uv sync --frozen --extra dev` 与 `uv run --frozen pytest -q tests`。
 
 ## 数据源与密钥
 
