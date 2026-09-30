@@ -126,6 +126,8 @@ def fund_rank(fund_type: str, limit: int = 100, sort_by: str = "1y") -> list[dic
                 "code": str(r["基金代码"]).strip(),
                 "name": str(r["基金简称"]).strip(),
                 "nav": r.get("单位净值"),
+                "nav_date": str(r.get("日期", "")),
+                "purchase_fee_text": str(r.get("手续费", "")),
                 "growth_1w": r.get("近1周"),
                 "growth_1m": r.get("近1月"),
                 "growth_3m": r.get("近3月"),

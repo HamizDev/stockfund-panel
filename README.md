@@ -86,7 +86,8 @@ Copy-Item .env.example .env
 | --- | --- | --- |
 | [TickFlow](https://tickflow.org/) | 在其官网注册并获取 API Key | 股票数据能力随账号档位变化；部分历史日线能力可在未填 Key 时使用 |
 | [扶摇](https://fuyao.aicubes.cn/docs/quickstart/) | 登录扶摇后，在 API Key 管理页创建 Key | 基金及部分增强行情接口需要 Key；未配置时相关请求可能显示 503 |
-| AkShare | 见 [AkShare 项目](https://github.com/akfamily/akshare) | `bin/akshare-proxy.py` 是可选的本地基金数据辅助服务，需自行安装 `akshare`；目前仅支持与后端在同一主机运行。默认 Docker Compose 无法连接宿主机上的代理，AI 选基的部分榜单会因此不可用；第三方接口可用性会变化 |
+| AkShare | 见 [AkShare 项目](https://github.com/akfamily/akshare) | `bin/akshare-proxy.py` 是可选的本地基金数据辅助服务，需自行安装 `akshare`；目前仅支持与后端在同一主机运行。默认 Docker Compose 无法连接宿主机代理；基金榜单和单位净值有东方财富直接回退，其他资料仍取决于可用来源 |
+| 东方财富 / 天天基金公开档案 | [免费基金研究数据](docs/fund-public-data.md) | 无需 Key：费率条件、披露股票持仓、相关报告公告、区间观测回撤和单位净值；不保证实时、完整或持续可用 |
 | `stock-sdk` 插件 | 见 `backend/app/plugins/stocksdk/` | 可选插件，不随 Docker 默认构建安装；使用前核对数据来源条款 |
 | 市场资金流、概念与行业 | [shy313.com](https://shy313.com/) 的公开接口 | 对应页面和预设数据会请求 `shy313.com/api/plugins/market_flow/exports`；接口失败时相关内容可能为空 |
 | 币安公开行情 | [币安开发者文档](https://developers.binance.com/en/docs/products/spot/rest-api) | 数字资产研究模拟仅访问公开现货及 U 本位合约行情，无需 Key；接口可用性和合约风险口径见 [数据源状态](docs/data-source-status.md) |
@@ -100,7 +101,7 @@ Copy-Item .env.example .env
 - **Codex CLI**：先按 [Codex 官方登录说明](https://learn.chatgpt.com/docs/auth) 在运行看板的同一用户环境完成 `codex login`，再在设置页选择 Codex CLI。登录态属于个人敏感信息，不在本项目中分发。Docker 默认不提供主机登录态，因此不能仅因镜像中有 `codex` 命令就认为已连接。
 - **API 模式**：到所选服务的官方网站申请 API Key，在设置页或自己的 `.env` 中配置地址、模型和 Key。仓库只提供空白示例，不附带可用额度或账号。
 
-AI 选股的候选来自已有策略计算，不是模型自行发现的股票；模型负责可选的个股分析。AI 选基先读取历史业绩候选，再生成对比文字。基金榜单可能缺少统计截止日、费率、回撤和持仓，因此页面会提示这些缺口。
+AI 选股的候选来自已有策略计算，不是模型自行发现的股票；模型负责可选的个股分析。AI 选基先读取历史业绩候选，再补充免费公开费率、观测回撤、披露持仓和日期后生成对比文字。回撤窗口、持仓报告期、公告日期与缺口分别标注；统一榜单统计截止日、实时完整持仓等未公开信息不会推测补齐。详见 [数据口径](docs/fund-public-data.md)。
 
 ## 数据与安全
 

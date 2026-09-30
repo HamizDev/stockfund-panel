@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +96,7 @@ _SYSTEM_PROMPT = """你是一位拥有 15 年公募基金研究经验的基金�
 """
 
 
-def _build_user_prompt(nav_tail, profile, thscode, name, focus="", holdings=None, estimate=None):
+def _build_user_prompt(nav_tail, profile, thscode, name, focus="", holdings=None, estimate=None, research=None):
     """构建用户消息: 基金代码 + 名称 + 净值 JSON + 资料 + 持仓 + 估值 + 关注点。"""
     parts = [
         "基金代码: " + thscode,
@@ -124,19 +123,26 @@ def _build_user_prompt(nav_tail, profile, thscode, name, focus="", holdings=None
     if holdings and holdings.get("items"):
         parts.extend([
             "",
-            "以下是该基金十大重仓股(JSON,含代码、名称、持仓占比):",
+            "以下是该基金已披露股票持仓(JSON,含代码、名称、持仓占比,不代表实时完整组合):",
             "```json",
             json.dumps(holdings["items"], ensure_ascii=False),
             "```",
-            f"前十大合计占比: {holdings.get('total_weight', 'N/A')}%",
+            f"可用披露股票合计占比: {holdings.get('coverage_weight_pct', 'N/A')}%",
+            f"本消息所列 {len(holdings['items'])} 只, 可能截取了权重前10只; 全表合计不等于所列合计。",
+            f"持仓报告期: {holdings.get('report_date') or '未知'}; 非实时、非完整组合。",
         ])
     if estimate and estimate.get("estimate"):
         est = estimate["estimate"]
         parts.extend([
             "",
             "以下是该基金当日盘中估值:",
-            f"估算涨跌幅: {est.get('pct', 'N/A')}%, 估算净值: {est.get('nav', 'N/A')}",
+            f"估算涨跌幅(小数制): {est.get('change_pct', 'N/A')}, 估算净值: {est.get('est_nav', 'N/A')}",
         ])
+    if research:
+        parts.extend(["", "公开研究资料 (费率、观测回撤、持仓报告/公告日期及缺失字段):",
+                      json.dumps(research, ensure_ascii=False),
+                      "null 不等于 0; 费率需按条件/渠道核对; 回撤的窗口与采样局限必须说明。",
+                      "单位净值未经复权, 分红可能影响其回撤; 累计净值不等于复权净值。"])
     if focus:
         parts.extend(["", "用户特别关注: " + focus])
     return "\n".join(parts)
@@ -146,7 +152,11 @@ def _calc_stats(nav):
     """计算净值序列的简单统计: 区间涨跌幅、最大回撤、波动率、历史分位。"""
     import math
 
-    vals = [float(r.get("unit_nav") or 0) for r in nav if r.get("unit_nav")]
+    from app.custom.fund.public_data import number
+
+    valid = [(row, number(row.get("unit_nav"))) for row in nav]
+    valid = [(row, value) for row, value in valid if value is not None and value > 0]
+    vals = [value for _, value in valid]
     if len(vals) < 2:
         return {}
     stats = {}
@@ -166,6 +176,9 @@ def _calc_stats(nav):
     stats["最大回撤%"] = round(max_dd * 100, 2)
     stats["最新净值"] = vals[-1]
     stats["样本天数"] = len(vals)
+    stats["统计口径"] = "单位净值样本, 未经复权; 分红可能影响回撤, 不代表总收益回撤"
+    stats["统计起始日"] = valid[0][0].get("nav_date") or valid[0][0].get("date")
+    stats["统计截止日"] = valid[-1][0].get("nav_date") or valid[-1][0].get("date")
     # 历史分位: 当前净值在样本中的位置 (0-100, 越高越接近历史高点)
     sorted_vals = sorted(vals)
     pos = sorted_vals.index(vals[-1]) if vals[-1] in sorted_vals else 0
@@ -186,7 +199,7 @@ def _calc_stats(nav):
     return stats
 
 
-async def analyze_fund_stream(nav_rows, profile, thscode, name, focus="", holdings=None, estimate=None):
+async def analyze_fund_stream(nav_rows, profile, thscode, name, focus="", holdings=None, estimate=None, research=None):
     """流式基金分析: yield 出每个 NDJSON 事件。
 
     协议(与 stock_analyzer 一致):
@@ -207,7 +220,7 @@ async def analyze_fund_stream(nav_rows, profile, thscode, name, focus="", holdin
     summary = (
         "最新净值 " + str(stats.get("最新净值"))
         + ", 近1年 " + str(stats.get("近1年", "N/A")) + "%"
-        + ", 最大回撤 " + str(stats.get("最大回撤%", "N/A")) + "%"
+        + ", 单位净值样本回撤 " + str(stats.get("最大回撤%", "N/A")) + "% (未复权)"
     )
 
     yield json.dumps({
@@ -228,7 +241,10 @@ async def analyze_fund_stream(nav_rows, profile, thscode, name, focus="", holdin
             }
             for r in nav_tail
         ]
-        user_prompt = _build_user_prompt(clean_nav, profile, thscode, name, focus, holdings, estimate)
+        from app.custom.fund.service import research_model_context
+
+        prompt_holdings = {**holdings, "items": holdings["items"][:10]} if holdings else None
+        user_prompt = _build_user_prompt(clean_nav, profile, thscode, name, focus, prompt_holdings, estimate, research_model_context(research))
         async for delta in stream_ai_text(
             [
                 {"role": "system", "content": _SYSTEM_PROMPT},

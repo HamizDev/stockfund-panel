@@ -65,7 +65,7 @@ export interface FundNavPoint {
   adj_nav: number | null
 }
 
-export type FundDataSource = 'fuyao' | 'akshare'
+export type FundDataSource = 'fuyao' | 'akshare' | 'eastmoney'
 
 export interface FundProfile {
   thscode: string | null
@@ -121,10 +121,66 @@ export interface HoldingItem {
   asset_type: string
 }
 
+export interface FeeRule {
+  condition: string
+  rate_text: string
+  discount_text: string | null
+}
+
+export interface FundResearch {
+  thscode: string
+  source: 'eastmoney'
+  retrieved_at_ms: number
+  horizon: string
+  nav_date: string | null
+  fees: {
+    status: 'ok' | 'partial' | 'unavailable'
+    management_pct: number | null
+    custody_pct: number | null
+    sales_service_pct: number | null
+    subscription_rules: FeeRule[]
+    redemption_rules: FeeRule[]
+    source_url: string
+    as_of: null
+    note: string
+  }
+  risk: {
+    status: 'ok' | 'unavailable'
+    basis: 'source_return_series' | 'unit_nav' | null
+    max_drawdown_pct: number | null
+    start_date: string | null
+    end_date: string | null
+    observations: number
+    note: string
+    source_url: string
+  }
+  holdings: {
+    status: 'ok' | 'unavailable'
+    report_date: string | null
+    publication_date: null
+    items: HoldingItem[]
+    coverage_weight_pct: number | null
+    report_note: string
+    source_url: string
+    related_reports: Array<{
+      title: string
+      publication_date: string
+      report_date: string
+      source_url: string
+    }>
+  }
+  missing_fields: string[]
+  warnings: string[]
+}
+
 export interface FundRankItem {
   code: string
   name: string
   share_class: string
+  nav: number | null
+  nav_date: string | null
+  purchase_fee_text: string | null
+  research?: FundResearch
   growth_1w: number | null
   growth_1m: number | null
   growth_3m: number | null
@@ -135,8 +191,12 @@ export interface FundRankItem {
 }
 
 export interface AiPickEvent {
-  type: 'meta' | 'delta' | 'error' | 'done' | 'ping'
+  type: 'meta' | 'research' | 'delta' | 'error' | 'done' | 'ping'
   candidates?: FundRankItem[]
+  code?: string
+  research?: FundResearch
+  completed?: number
+  total?: number
   source?: string
   data_as_of?: string | null
   retrieved_at_ms?: number
@@ -270,6 +330,9 @@ export const fundApi = {
   },
   nav(thscode: string, range = 'year'): Promise<{ thscode: string; nav: FundNavPoint[]; source?: FundDataSource }> {
     return req(`/nav/${encodeURIComponent(thscode)}?range=${range}`)
+  },
+  research(thscode: string, horizon = '1y'): Promise<FundResearch> {
+    return req(`/research/${encodeURIComponent(thscode)}?horizon=${encodeURIComponent(horizon)}`)
   },
   profile(thscode: string): Promise<{ profile: FundProfile | null; source?: FundDataSource }> {
     return req(`/profile/${encodeURIComponent(thscode)}`)

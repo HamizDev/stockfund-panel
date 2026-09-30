@@ -16,12 +16,14 @@ import { EChartsCandlestick } from '@/components/EChartsCandlestick'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import { PageHeader } from '@/components/PageHeader'
 import { FundScreener } from './FundScreener'
+import { FundResearchPanel } from './FundResearchPanel'
 import { cn } from '@/lib/cn'
 import {
   fundApi,
   pctText,
   type FundEstimate,
   type FundEstimateCurve,
+  type FundDataSource,
   type FundNavPoint,
   type FundPortfolioItem,
   type FundProfile,
@@ -538,13 +540,13 @@ function FundAnalysisDialog({
   )
 }
 
-function FundDetail({ item, onBack }: { item: FundWatchItem | FundSearchItem; onBack: () => void }) {
+function FundDetail({ item, onBack, researchHorizon }: { item: FundWatchItem | FundSearchItem; onBack: () => void; researchHorizon: string }) {
   const thscode = item.thscode
   const tradable = isTradable('kind_label' in item ? item.kind_label : '')
   const [quote, setQuote] = useState<FundQuote | null>(null)
   const [kline, setKline] = useState<{ adjusted: string; bars: { date: string; open: number | null; high: number | null; low: number | null; close: number | null; volume: number | null }[] } | null>(null)
   const [nav, setNav] = useState<FundNavPoint[] | null>(null)
-  const [navSource, setNavSource] = useState<'fuyao' | 'akshare' | null>(null)
+  const [navSource, setNavSource] = useState<FundDataSource | null>(null)
   const [navLoading, setNavLoading] = useState(true)
   const [profile, setProfile] = useState<FundProfile | null>(null)
   const [err, setErr] = useState('')
@@ -706,7 +708,7 @@ function FundDetail({ item, onBack }: { item: FundWatchItem | FundSearchItem; on
       )}
       {!tradable && (
         <Card>
-          <div className="flex flex-wrap items-center justify-between gap-2"><SectionTitle icon={LineChart} title="净值走势（近一年）" /><span className="text-xs text-muted">{navSource === 'akshare' ? '东方财富 · AKShare' : navSource === 'fuyao' ? '扶摇' : '数据源待确认'}{nav?.length ? ` · 更新至 ${nav[nav.length - 1].nav_date}` : ''}</span></div>
+          <div className="flex flex-wrap items-center justify-between gap-2"><SectionTitle icon={LineChart} title="净值走势（近一年）" /><span className="text-xs text-muted">{navSource === 'eastmoney' ? '东方财富公开净值（单位净值，未复权）' : navSource === 'akshare' ? '东方财富 · AKShare' : navSource === 'fuyao' ? '扶摇' : '数据源待确认'}{nav?.length ? ` · 更新至 ${nav[nav.length - 1].nav_date}` : ''}</span></div>
           {nav && nav.length > 0 ? (
             <NavChart nav={nav} />
           ) : (
@@ -716,6 +718,7 @@ function FundDetail({ item, onBack }: { item: FundWatchItem | FundSearchItem; on
           )}
         </Card>
       )}
+      {!tradable && <FundResearchPanel thscode={thscode} horizon={researchHorizon} />}
     </div>
   )
 }
@@ -783,10 +786,12 @@ export function FundPage() {
   const etfItems = items.filter((w) => isTradable(w.kind_label))
   const otcItems = items.filter((w) => !isTradable(w.kind_label))
   const [tab, setTab] = useState<'watch' | 'screener'>('watch')
+  const requestedResearchHorizon = searchParams.get('research_horizon') ?? '1y'
+  const researchHorizon = ['1m', '3m', '6m', '1y', '2y', '3y'].includes(requestedResearchHorizon) ? requestedResearchHorizon : '1y'
 
   if (selected) {
     return (
-      <><PageHeader title="基金详情" className="pl-14 sm:pl-5" subtitle={selected.name || selected.thscode} right={<Link to="/ai-fund-screener" className="inline-flex items-center gap-1.5 rounded-btn border border-accent/35 bg-accent/10 px-3 py-1.5 text-xs text-accent"><Sparkles className="h-3.5 w-3.5" />AI 选基</Link>} /><div className="space-y-4 px-5 py-5 md:px-8"><FundDetail item={selected} onBack={closeFund} /></div></>
+      <><PageHeader title="基金详情" className="pl-14 sm:pl-5" subtitle={selected.name || selected.thscode} right={<Link to="/ai-fund-screener" className="inline-flex items-center gap-1.5 rounded-btn border border-accent/35 bg-accent/10 px-3 py-1.5 text-xs text-accent"><Sparkles className="h-3.5 w-3.5" />AI 选基</Link>} /><div className="space-y-4 px-5 py-5 md:px-8"><FundDetail item={selected} onBack={closeFund} researchHorizon={researchHorizon} /></div></>
     )
   }
 
@@ -916,7 +921,7 @@ export function FundPage() {
       />
 
       <p className="text-xs leading-5 text-muted">
-        场外基金净值优先读取扶摇，未配置或暂不可用时使用本机 AKShare 服务；两者都不可用会显示明确错误。ETF 行情和穿透估值依赖扶摇对应接口，基金净值以页面标注的更新日期为准。
+        场外基金净值优先读取扶摇，未配置或暂不可用时使用公开净值来源；页面标注具体数据来源、单位净值口径和更新日期。ETF 行情和穿透估值依赖扶摇对应接口。
       </p>
         </>
       )}

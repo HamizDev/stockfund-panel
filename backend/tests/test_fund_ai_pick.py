@@ -10,10 +10,21 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.custom.fund import routes, service
+
+
+@pytest.fixture(autouse=True)
+def isolated_research(monkeypatch):
+    monkeypatch.setattr(routes, "_cache", service.TTLCache())
+    monkeypatch.setattr(routes, "_research_cache", service.TTLCache(max_entries=96))
+    monkeypatch.setattr(service, "fund_research", lambda *_args, **_kwargs: {
+        "fees": {"status": "unavailable"}, "risk": {"status": "unavailable"},
+        "holdings": {"status": "unavailable"},
+    })
 
 
 def test_rank_preserves_missing_values_and_percent_units(monkeypatch):

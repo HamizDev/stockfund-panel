@@ -20,6 +20,17 @@ from app.custom.fund.client import FundError, FuyaoFundClient
 from app.plugins.fuyao import client as fc
 from app.plugins.fuyao.provider import FuyaoProvider
 
+
+@pytest.fixture(autouse=True)
+def isolated_research(monkeypatch):
+    monkeypatch.setattr(fund_routes, "_cache", svc.TTLCache())
+    monkeypatch.setattr(fund_routes, "_research_cache", svc.TTLCache(max_entries=96))
+    monkeypatch.setattr(svc, "eastmoney_nav", lambda *a: [])
+    monkeypatch.setattr(svc, "fund_research", lambda *_args, **_kwargs: {
+        "fees": {"status": "unavailable"}, "risk": {"status": "unavailable"},
+        "holdings": {"status": "unavailable"},
+    })
+
 # ---------- map_quote ----------
 
 _FUND_ROW = {

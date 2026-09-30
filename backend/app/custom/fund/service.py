@@ -251,6 +251,9 @@ def map_holdings(data: dict) -> dict:
         "total_stock_ratio_pct": _to_float(data.get("total_stock_ratio_pct")),
         "concentration_ratio": _to_float(data.get("concentration_ratio")),
         "report_note": "季报披露持仓，非实时",
+        "report_date": None,
+        "publication_date": None,
+        "coverage_weight_pct": round(sum(row["hold_ratio"] for row in items), 4),
         "items": items,
         "skipped": skipped,
     }
@@ -530,13 +533,25 @@ _NAV_RANGE_DAYS = {
 
 def akshare_nav(thscode: str, range_: str) -> list[dict]:
     """场外基金单位净值回退。代理不提供复权净值, 故 adj_nav 保持 None。"""
-    from datetime import date
-
     if not thscode.endswith(".OF"):
         return []
     rows = _akshare_proxy_json(
         "/fund/nav", {"code": thscode.split(".")[0]}, timeout=20
     ).get("nav") or []
+    return _map_public_nav(rows, range_)
+
+
+def eastmoney_nav(thscode: str, range_: str) -> list[dict]:
+    from app.custom.fund.public_nav import fetch_nav
+
+    if not thscode.endswith(".OF"):
+        return []
+    return _map_public_nav(fetch_nav(thscode), range_)
+
+
+def _map_public_nav(rows: list[dict], range_: str) -> list[dict]:
+    from datetime import date
+
     out = []
     for row in rows:
         raw_date = str(row.get("date") or "")[:10]
@@ -585,10 +600,20 @@ def akshare_profile(thscode: str) -> dict | None:
 
 def akshare_rank(fund_type: str, sort_by: str = "1y", limit: int = 200) -> list[dict]:
     """基金历史收益榜单; 百分数字段保持百分数原值。"""
-    payload = _akshare_proxy_json(
-        "/fund/rank", {"type": fund_type, "sort_by": sort_by, "limit": limit}, timeout=30
-    )
-    items = payload.get("items") or []
+    source = "akshare"
+    try:
+        payload = _akshare_proxy_json(
+            "/fund/rank", {"type": fund_type, "sort_by": sort_by, "limit": limit}, timeout=30
+        )
+        items = payload.get("items") or []
+        if not isinstance(items, list) or not items:
+            raise ValueError("Local fund rank returned no rows")
+    except Exception:
+        from app.custom.fund.public_nav import fetch_rank
+
+        logger.warning("Local fund rank unavailable; trying Eastmoney public source")
+        items = fetch_rank(fund_type)
+        source = "eastmoney"
     if not isinstance(items, list):
         return []
     out = []
@@ -598,13 +623,42 @@ def akshare_rank(fund_type: str, sort_by: str = "1y", limit: int = 200) -> list[
         if not code.isdigit() or len(code) != 6 or not name:
             continue
         item = {"code": code, "name": name, "share_class": name[-1] if name[-1] in "AC" else ""}
+        item["source"] = source
+        from app.custom.fund.public_data import iso_date
+
+        item["nav"] = _to_float(row.get("nav"))
+        item["nav_date"] = iso_date(row.get("nav_date"))
+        fee = str(row.get("purchase_fee_text") or "").strip()
+        item["purchase_fee_text"] = fee if fee not in {"", "nan", "None", "—"} else None
         for period in ("1w", "1m", "3m", "6m", "1y", "2y", "3y"):
             value = row.get(f"growth_{period}")
             if isinstance(value, str):
                 value = value.strip().removesuffix("%").replace(",", "")
             item[f"growth_{period}"] = _to_float(value)
         out.append(item)
-    return out
+    field = f"growth_{sort_by}"
+    out.sort(key=lambda row: row.get(field) if row.get(field) is not None else float("-inf"), reverse=True)
+    return out[:max(1, min(limit, 200))]
+
+
+def fund_research(thscode: str, horizon: str = "1y") -> dict:
+    """Credential-free, date-labelled public fund disclosures and research statistics."""
+    from app.custom.fund.public_data import fetch_research
+
+    return fetch_research(thscode, horizon)
+
+
+def research_model_context(research: dict | None) -> dict | None:
+    """Bound LLM input while the API/UI retain the complete disclosed list."""
+    if research is None:
+        return None
+    holdings = research["holdings"]
+    items = holdings.get("items") or []
+    return {**research, "holdings": {
+        **holdings, "items": items[:10], "available_holdings_count": len(items),
+        "model_items_weight_pct": round(sum(row["hold_ratio"] for row in items[:10]), 4),
+        "model_note": "模型仅收到权重前10只; coverage_weight_pct 为全表已披露股票权重, 不等于模型所列合计。",
+    }}
 
 
 def map_search(rows: list[dict], skip_akshare: bool = False) -> list[dict]:
@@ -639,9 +693,12 @@ def map_search(rows: list[dict], skip_akshare: bool = False) -> list[dict]:
 class TTLCache:
     """线程安全 TTL 缓存 (key → (expire_ts, value))。"""
 
-    def __init__(self) -> None:
+    def __init__(self, max_entries: int | None = None) -> None:
+        if max_entries is not None and max_entries < 1:
+            raise ValueError("max_entries must be positive")
         self._lock = threading.Lock()
         self._store: dict[str, tuple[float, object]] = {}
+        self._max_entries = max_entries
 
     def get(self, key: str):
         with self._lock:
@@ -656,7 +713,14 @@ class TTLCache:
 
     def set(self, key: str, value: object, ttl_s: float) -> None:
         with self._lock:
-            self._store[key] = (time.monotonic() + ttl_s, value)
+            now = time.monotonic()
+            if self._max_entries is not None:
+                for stale in [key for key, (expires, _) in self._store.items() if expires <= now]:
+                    del self._store[stale]
+                self._store.pop(key, None)
+                while len(self._store) >= self._max_entries:
+                    del self._store[next(iter(self._store))]
+            self._store[key] = (now + ttl_s, value)
 
     def invalidate(self, prefix: str) -> None:
         with self._lock:

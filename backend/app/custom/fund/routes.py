@@ -20,6 +20,8 @@ from app.custom.fund.client import FundError, FundNotConfiguredError, FuyaoFundC
 logger = logging.getLogger(__name__)
 
 _cache = svc.TTLCache()
+_research_cache = svc.TTLCache(max_entries=96)
+_research_locks = [threading.Lock() for _ in range(16)]
 _client_lock = threading.Lock()
 _client: FuyaoFundClient | None = None
 
@@ -86,12 +88,17 @@ class AiPickIn(BaseModel):
 
 
 _AI_PICK_PROMPT = """你是公募基金研究助手。
-仅根据提供的历史收益榜单, 从候选中挑选最多 5 只值得进一步研究的基金, 并说明依据与局限。
+仅根据提供的历史收益榜单和 research 公开资料, 从候选中挑选最多 5 只值得进一步研究的基金, 并说明依据与局限。
 
 严格要求:
-- 只能引用候选清单内的代码、名称和历史收益数字。
-  不得编造费率、回撤、规模、持仓、经理、净值日期或未来收益。
-- 数据源没有提供榜单统计截止日期, 明确写出这一限制。
+- 只能引用候选清单内的数值, 包括 research 中实际可用的费率、回撤、持仓和日期。
+  null/不可用不等于 0; 不得编造缺失费用、规模、经理、日期或未来收益。
+- nav_date 为每只基金榜单净值日期, 不代表统一榜单统计截止日。retrieved_at_ms 仅为抓取时间。
+- 管理/托管/销售服务费为年费率; 申购赎回费用按条件变化, 平台折扣不代表所有渠道。
+- 回撤是指定时间窗内来源累计收益曲线的观测回撤, 可能因稀疏采样低估每日回撤;
+  不得把累计净值当复权净值, 不得把单位净值回撤写成总收益回撤。
+- 持仓是报告期披露股票, 非实时/完整组合。相关公告发布日期不是已确认的持仓表发布日期。
+  比较基金时列出日期、窗口及 missing_fields, 不得因某只资料较全就假定其风险更低。
 - A/C 份额不得仅凭名称假定费率; 同一基金的不同份额应指出需核对实际费用。
 - 不能给买入、卖出或具体仓位建议; 历史涨幅不是未来收益预测。
 - 输出 Markdown: 先写筛选范围与数据限制, 再列出最多 5 只研究候选。
@@ -266,6 +273,7 @@ def build_router() -> APIRouter:
             raise HTTPException(status_code=422, detail="当前筛选条件下没有可核对收益数据的基金")
 
         async def _gen():
+            import asyncio
             import json
 
             yield json.dumps(
@@ -275,19 +283,43 @@ def build_router() -> APIRouter:
                     "fund_type": req.fund_type,
                     "horizon": req.horizon,
                     "share": req.share,
-                    "source": "东方财富基金排名 (经 AKShare)",
+                    "source": "东方财富公开基金排名" + (" (经 AKShare)" if candidates[0].get("source", "akshare") == "akshare" else " (直接回退)"),
                     "retrieved_at_ms": round(time.time() * 1000),
                     "data_as_of": None,
                 },
                 ensure_ascii=False,
             ) + "\n"
+            semaphore = asyncio.Semaphore(4)
+
+            async def enrich(row):
+                async with semaphore:
+                    try:
+                        row["research"] = await run_in_threadpool(research, f"{row['code']}.OF", req.horizon)
+                    except Exception:
+                        logger.exception("Fund research unavailable for %s", row["code"])
+                        row["research"] = None
+                    return row
+
+            tasks = [asyncio.create_task(enrich(row)) for row in candidates]
+            try:
+                for completed, task in enumerate(asyncio.as_completed(tasks), 1):
+                    row = await task
+                    yield json.dumps({"type": "research", "code": row["code"], "research": row["research"],
+                                      "completed": completed, "total": len(candidates)}, ensure_ascii=False) + "\n"
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
             try:
                 async for delta in stream_ai_text(
                     [
                         {"role": "system", "content": _AI_PICK_PROMPT},
                         {"role": "user", "content": json.dumps({
                             "fund_type": req.fund_type, "horizon": req.horizon,
-                            "share": req.share, "candidates": candidates,
+                            "share": req.share, "candidates": [
+                                {**row, "research": svc.research_model_context(row.get("research"))}
+                                for row in candidates
+                            ],
                         }, ensure_ascii=False)},
                     ],
                     temperature=0.2,
@@ -439,12 +471,18 @@ def build_router() -> APIRouter:
                 source = "akshare"
             except Exception as e:
                 logger.warning("Local fund NAV failed for %s: %s", thscode, e)
+        if not mapped and thscode.endswith(".OF"):
+            try:
+                mapped = svc.eastmoney_nav(thscode, range)
+                source = "eastmoney"
+            except Exception as e:
+                logger.warning("Eastmoney public fund NAV failed for %s: %s", thscode, e)
         if not mapped:
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "基金净值不可用: 本机基金数据服务未返回净值, 且扶摇未配置 API Key"
-                    if client is None else "基金净值不可用: 扶摇与本机基金数据服务均未返回可用净值"
+                    "基金净值不可用: 本机基金数据服务与东方财富均未返回净值, 且扶摇未配置 API Key"
+                    if client is None else "基金净值不可用: 扶摇与本机基金数据服务、东方财富均未返回可用净值"
                 ),
             )
         out = {"thscode": thscode, "nav": mapped, "source": source}
@@ -486,6 +524,29 @@ def build_router() -> APIRouter:
         _cache.set(key, out, ttl_s=86400)
         return out
 
+    @router.get("/research/{thscode}")
+    def research(thscode: str, horizon: str = "1y") -> dict:
+        """免费公开费率/观测回撤/股票持仓, 含明确口径与缺失字段。"""
+        from app.custom.fund.public_data import HORIZONS, fund_code
+
+        try:
+            thscode = f"{fund_code(thscode)}.OF"
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        if horizon not in HORIZONS:
+            raise HTTPException(status_code=400, detail="不支持的研究区间")
+        key = f"research:{thscode}:{horizon}"
+        # Coalesce simultaneous detail/estimate/screener misses without an
+        # ever-growing map of locks. A stripe may serialize unrelated funds.
+        with _research_locks[hash(key) % len(_research_locks)]:
+            hit = _research_cache.get(key)
+            if hit is not None:
+                return hit
+            out = svc.fund_research(thscode, horizon)
+            available = out["fees"]["status"] != "unavailable" or out["risk"]["status"] == "ok" or out["holdings"]["status"] == "ok"
+            _research_cache.set(key, out, ttl_s=21600 if available and not out.get("warnings") else 60)
+            return out
+
     @router.get("/holdings/{thscode}")
     def holdings(thscode: str) -> dict:
         """基金重仓持仓 (季报披露, 非实时)。持仓缓存 24h。"""
@@ -494,12 +555,21 @@ def build_router() -> APIRouter:
         hit = _cache.get(key)
         if hit is not None:
             return hit
-        client = _client_or_503()
-        try:
-            data = client.holdings(thscode)
-        except FundError as e:
-            raise HTTPException(status_code=502, detail=str(e)) from e
-        out = {"thscode": thscode, **svc.map_holdings(data)}
+        client = _optional_client()
+        out = None
+        if client is not None:
+            try:
+                mapped = svc.map_holdings(client.holdings(thscode))
+                if mapped["items"]:
+                    out = {"thscode": thscode, "source": "fuyao", **mapped}
+            except FundError:
+                logger.warning("Fuyao fund holdings unavailable for %s", thscode)
+        if out is None:
+            public = research(thscode)["holdings"]
+            if public["status"] != "ok":
+                raise HTTPException(status_code=503, detail="基金披露股票持仓暂不可用; 非实时持仓")
+            out = {"thscode": thscode, "source": "eastmoney", "stock_ratio_pct": None,
+                   "total_stock_ratio_pct": None, "concentration_ratio": None, "skipped": [], **public}
         _cache.set(key, out, ttl_s=86400)
         return out
 
@@ -515,7 +585,6 @@ def build_router() -> APIRouter:
         hit = _cache.get(key)
         if hit is not None:
             return hit
-        client = _client_or_503()
         # holdings 和 nav 并行; holdings 复用 /holdings 接口的 1 天缓存
         import concurrent.futures
 
@@ -525,18 +594,14 @@ def build_router() -> APIRouter:
         def _get_holdings():
             if hhit is not None:
                 return hhit
-            data = client.holdings(thscode)
-            out = {"thscode": thscode, **svc.map_holdings(data)}
-            _cache.set(hkey, out, ttl_s=86400)
-            return out
+            return holdings(thscode)
 
         def _get_nav():
             try:
-                rows = client.nav(thscode, range_="week", nav_type="unit")
-                nav_list = svc.map_nav(rows)
+                nav_list = nav(thscode, range="week", nav_type="unit")["nav"]
                 if nav_list:
                     return nav_list[-1]["unit_nav"], nav_list[-1]["nav_date"]
-            except FundError:
+            except HTTPException:
                 pass
             return None, None
 
@@ -547,14 +612,17 @@ def build_router() -> APIRouter:
                 h_out = fut_hold.result()
             except FundError as e:
                 raise HTTPException(status_code=502, detail=str(e)) from e
-            holdings = {"thscode": thscode, "items": h_out["items"], "total_weight": h_out.get("total_weight")}
+            estimate_items = [row for row in h_out["items"] if svc._to_qq_symbol(row["thscode"])][:10]
+            holdings_data = {"thscode": thscode, "items": estimate_items,
+                             "coverage_weight_pct": sum(row["hold_ratio"] for row in estimate_items),
+                             "report_date": h_out.get("report_date"), "source": h_out.get("source")}
             prev_nav, nav_date = fut_nav.result()
         # estimate_nav 和 estimate_curve 并行 (各约 2-4s, 串行要 6-8s)
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            fut_est = pool.submit(svc.estimate_nav, holdings, prev_nav)
-            fut_curve = pool.submit(svc.estimate_curve, holdings, prev_nav)
+            fut_est = pool.submit(svc.estimate_nav, holdings_data, prev_nav)
+            fut_curve = pool.submit(svc.estimate_curve, holdings_data, prev_nav)
             est = fut_est.result()
             curve = fut_curve.result()
         out = {
@@ -563,7 +631,7 @@ def build_router() -> APIRouter:
             "nav_date": nav_date,
             "estimate": est,
             "curve": curve,
-            "holdings": holdings,
+            "holdings": holdings_data,
         }
         _cache.set(key, out, ttl_s=60)
         return out
@@ -571,52 +639,48 @@ def build_router() -> APIRouter:
     @router.post("/analyze")
     async def analyze(req: AnalyzeIn):
         """AI 基金分析 (流式 NDJSON，与 /api/stock-analysis/analyze 协议一致)。"""
+        from fastapi.concurrency import run_in_threadpool
         from fastapi.responses import StreamingResponse
 
         from app.custom.fund import analyzer as fund_analyzer
         from app.services.ndjson_heartbeat import with_heartbeat
 
         thscode = req.thscode.strip().upper()
-        client = _optional_client()
 
-        # 与详情页共用 Fuyao → 本机代理回退及缓存口径。
-        try:
-            nav_rows = nav(thscode, range="year", nav_type="unit,adj")["nav"]
-        except HTTPException:
-            nav_rows = []
-
-        # 资料
-        try:
-            profile_data = profile(thscode)["profile"]
-        except HTTPException:
-            profile_data = None
-
-        # 名称 (自选表 > AkShare > thscode)
-        name = _watchlist_names().get(thscode) or svc._akshare_name(thscode) or thscode
-
-        # 持仓 (用于穿透分析)
-        holdings = None
-        if client is not None:
+        def collect():
+            # Blocking public HTTP work stays off the event loop and within the
+            # heartbeat stream, so other settings/market requests stay responsive.
             try:
-                h_data = client.holdings(thscode)
-                holdings = svc.map_holdings(h_data)
-            except FundError:
-                pass
-
-        # 当日估值 (用于估值分析, 失败不阻塞)
-        estimate = None
-        try:
-            if holdings:
-                prev_nav = nav[-1]["unit_nav"] if nav else None
-                est = svc.estimate_nav(holdings, prev_nav)
-                estimate = {"estimate": est}
-        except Exception:
-            pass
+                nav_rows = nav(thscode, range="year", nav_type="unit,adj")["nav"]
+            except HTTPException:
+                nav_rows = []
+            try:
+                profile_data = profile(thscode)["profile"]
+            except HTTPException:
+                profile_data = None
+            name = _watchlist_names().get(thscode) or svc._akshare_name(thscode) or thscode
+            try:
+                holdings_data = holdings(thscode)
+            except HTTPException:
+                holdings_data = None
+            try:
+                research_data = research(thscode)
+            except HTTPException:
+                research_data = None
+            estimate_data = None
+            try:
+                if holdings_data:
+                    prev_nav = nav_rows[-1]["unit_nav"] if nav_rows else None
+                    estimate_data = {"estimate": svc.estimate_nav(holdings_data, prev_nav)}
+            except Exception:
+                logger.warning("Fund estimate unavailable during analysis for %s", thscode)
+            return nav_rows, profile_data, name, holdings_data, research_data, estimate_data
 
         async def _gen():
+            nav_rows, profile_data, name, holdings_data, research_data, estimate_data = await run_in_threadpool(collect)
             async for chunk in fund_analyzer.analyze_fund_stream(
                 nav_rows, profile_data, thscode, name, req.focus or "",
-                holdings=holdings, estimate=estimate,
+                holdings=holdings_data, estimate=estimate_data, research=research_data,
             ):
                 yield chunk + "\n"
 
