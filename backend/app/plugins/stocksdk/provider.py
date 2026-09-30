@@ -18,14 +18,14 @@ from datetime import time as dtime
 import polars as pl
 
 from app.data_providers.base import AssetType
-from app.data_providers.normalizer import normalize_adj_factors, normalize_daily
+from app.data_providers.normalizer import normalize_daily
 from app.plugins.stocksdk import bridge
 from app.tickflow.rate_limits import chunked
 
 logger = logging.getLogger(__name__)
 
-# stock-sdk 支持的数据集(financial 不支持 → 不声明, 自动回退 tickflow)
-_DATASETS = ("daily", "adj_factor", "minute", "realtime")
+# stock-sdk 可提供的数据集。它的 hfq_close/raw_close 累计比例不是事件因子。
+_DATASETS = ("daily", "minute", "realtime")
 
 # 每次桥接调用的符号数。桥接内部按 concurrency 并发, 分批仅为进度反馈与超时控制。
 _BATCH = 40
@@ -105,35 +105,18 @@ class StockSDKProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: str = "stock",  # noqa: ARG002
+        asset_type: str = "stock",
         on_chunk_done=None,
     ) -> pl.DataFrame:
         if not symbols:
-            return pl.DataFrame()
-        frames: list[pl.DataFrame] = []
-        chunks = chunked(symbols, _BATCH)
-        for i, chunk in enumerate(chunks):
-            job = {
-                "op": "adj",
-                "symbols": chunk,
-                "start": _yyyymmdd(start_time),
-                "end": _yyyymmdd(end_time),
-            }
-            try:
-                result = bridge.run_job(job, timeout=240)
-            except bridge.StockSDKBridgeError as e:
-                logger.warning("stock-sdk adj 拉取失败(%d symbols): %s", len(chunk), e)
-                result = {"rows": {}}
-            flat: list[dict] = []
-            for rows in (result.get("rows") or {}).values():
-                flat.extend(rows or [])
-            if flat:
-                df = normalize_adj_factors(flat, source=self.name)
-                if not df.is_empty():
-                    frames.append(df)
-            if on_chunk_done:
-                on_chunk_done(i + 1, len(chunks))
-        return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+            return pl.DataFrame(schema={
+                "symbol": pl.String,
+                "trade_date": pl.Date,
+                "ex_factor": pl.Float64,
+            })
+        raise NotImplementedError(
+            "stock-sdk 的 hfq_close/raw_close 累计比例不是事件除权因子; 请改用事件因子源。"
+        )
 
     # ---- minute ----
     def get_minute(

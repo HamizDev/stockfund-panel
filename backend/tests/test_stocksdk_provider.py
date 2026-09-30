@@ -1,7 +1,7 @@
 """StockSDKProvider 归一化与桥接契约测试。
 
 不依赖真实 node / 网络: mock bridge.run_job 返回样例 payload, 只验证 Python 侧的
-归一化、除权因子合成对齐、符号回显、空结果处理与注册接线。
+归一化、符号回显、空结果处理、因子能力 fail-closed 与注册接线。
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import shutil
 import subprocess
 
 import polars as pl
+import pytest
 
 from app.plugins.stocksdk import bridge
 from app.plugins.stocksdk import provider as sp
@@ -45,21 +46,14 @@ def test_get_daily_normalizes_and_echoes_symbol(monkeypatch):
     assert df.schema["close"] == pl.Float64
 
 
-def test_get_adj_factors_from_bridge_ratio(monkeypatch):
-    # 桥接内部已算好 ex_factor = close_hfq/close_none, 这里验证 Python 侧归一化。
-    _patch_run_job(monkeypatch, {
-        "adj": {"ok": True, "op": "adj", "rows": {
-            "600519.SH": [
-                {"symbol": "600519.SH", "trade_date": "2020-01-02", "ex_factor": 5.29},
-                {"symbol": "600519.SH", "trade_date": "2020-01-03", "ex_factor": 5.30},
-            ],
-        }},
-    })
-    df = StockSDKProvider().get_adj_factors(["600519.SH"], None, None)
-    assert df.columns == ["symbol", "trade_date", "ex_factor"]
-    assert df.height == 2
-    assert df.schema["trade_date"] == pl.Date
-    assert abs(df["ex_factor"][0] - 5.29) < 1e-9
+def test_get_adj_factors_fails_closed_without_bridge(monkeypatch):
+    def unexpected_bridge_call(*_args, **_kwargs):
+        raise AssertionError("event factors must not be inferred through the bridge")
+
+    monkeypatch.setattr(sp.bridge, "run_job", unexpected_bridge_call)
+
+    with pytest.raises(NotImplementedError, match="改用事件因子源"):
+        StockSDKProvider().get_adj_factors(["600519.SH"], None, None)
 
 
 def test_get_minute_datetime_is_beijing_wall_clock(monkeypatch):
@@ -111,7 +105,13 @@ def test_get_instruments_flatten_compatible(monkeypatch):
 def test_empty_symbols_returns_empty():
     p = StockSDKProvider()
     assert p.get_daily([], None, None).is_empty()
-    assert p.get_adj_factors([], None, None).is_empty()
+    adj_factors = p.get_adj_factors([], None, None)
+    assert adj_factors.is_empty()
+    assert adj_factors.schema == {
+        "symbol": pl.String,
+        "trade_date": pl.Date,
+        "ex_factor": pl.Float64,
+    }
     assert p.get_minute([], None, None).is_empty()
 
 
@@ -210,6 +210,7 @@ def test_plugin_discovered_in_loader():
     assert plugins["stocksdk"]["runtime"] == "node"
     assert "daily" in plugins["stocksdk"]["datasets"]
     assert "realtime" in plugins["stocksdk"]["datasets"]
+    assert "adj_factor" not in plugins["stocksdk"]["datasets"]
     assert "financial" not in plugins["stocksdk"]["datasets"]
     assert cs.is_builtin("stocksdk")
     # 内置源不出现在用户自定义源列表
@@ -230,6 +231,7 @@ def test_plugin_registered_when_available(monkeypatch):
     assert cs.is_custom_provider("stocksdk")
     assert cs.provider_has_dataset("stocksdk", "daily")
     assert cs.provider_has_dataset("stocksdk", "realtime")
+    assert not cs.provider_has_dataset("stocksdk", "adj_factor")
     assert not cs.provider_has_dataset("stocksdk", "financial")
 
 

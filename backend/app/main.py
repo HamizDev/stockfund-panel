@@ -51,6 +51,7 @@ from app.extensions.loader import (
     configure_backend_extensions,
     current_extension_context,
     start_backend_extensions,
+    stop_backend_extensions,
 )
 from app.jobs import daily_pipeline
 from app.services.matrix_prewarm_owner import MatrixCachePrewarmOwner
@@ -362,6 +363,10 @@ async def _application_lifespan(app: FastAPI):
     try:
         yield
     finally:
+        stop_backend_extensions(
+            current_extension_context(data_dir=store.data_dir, repository=repo),
+            extension_registry,
+        )
         repo._on_refresh_done = None  # noqa: SLF001
         wd = getattr(app.state, "watchdog", None)
         if wd:

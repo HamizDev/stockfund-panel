@@ -1,0 +1,10 @@
+# Optional, free BaoStock adjustment-factor source. It does not provide K lines.
+name: baostock
+display_name: "BaoStock"
+runtime: python
+entry: app.plugins.baostock.provider:BaoStockProvider
+check: app.plugins.baostock.provider:availability
+datasets: [adj_factor]
+description: "BaoStock 免费复权因子；仅支持沪深股票，不提供日线或分钟线。"
+install_hint: "在数据源设置中安装插件依赖 baostock，或在 backend 目录安装 app/plugins/baostock/requirements.txt。"
+homepage: "https://www.baostock.com/"

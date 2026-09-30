@@ -11,3 +11,15 @@ def setup(registrar: BackendExtensionRegistrar) -> None:
     from app.custom.crypto_paper.routes import build_router
 
     registrar.include_router(build_router())
+
+
+def startup(context) -> None:
+    from app.custom.crypto_paper import auto
+
+    auto.start(context.data_dir)
+
+
+def shutdown(context) -> None:
+    from app.custom.crypto_paper import auto
+
+    auto.shutdown(context.data_dir)

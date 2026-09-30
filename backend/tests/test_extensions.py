@@ -11,7 +11,7 @@ from app.extensions.contracts import (
     NotificationFormatContext,
     NotificationFormatter,
 )
-from app.extensions.loader import configure_backend_extensions
+from app.extensions.loader import configure_backend_extensions, stop_backend_extensions
 from app.extensions.registry import BackendExtensionRegistrar, BackendExtensionRegistry
 from app.services.quote_service import QuoteService
 
@@ -155,3 +155,27 @@ def test_loader_isolates_failed_setup_and_registers_valid_route(
     client = TestClient(app)
     response = client.get("/api/custom/valid/status")
     assert response.status_code == 200
+
+
+def test_shutdown_calls_only_registered_extensions_and_isolates_failures(monkeypatch):
+    from app.extensions.loader import current_extension_context
+
+    calls = []
+    modules = {}
+    for name in ("a", "b", "not_registered"):
+        module = types.ModuleType(f"app.custom.{name}")
+        module.EXTENSION_ID = f"test.{name}"
+        def shutdown(context, name=name):
+            calls.append(name)
+            if name == "b":
+                raise RuntimeError("shutdown failed")
+        module.shutdown = shutdown
+        modules[module.__name__] = module
+    registry = BackendExtensionRegistry()
+    registry.register(_registrar("test.a"))
+    registry.register(_registrar("test.b"))
+    registry.freeze()
+    monkeypatch.setattr("app.extensions.loader._custom_module_names", lambda: list(modules))
+    monkeypatch.setattr("app.extensions.loader.importlib.import_module", lambda name: modules[name])
+    stop_backend_extensions(current_extension_context(data_dir=None, repository=None), registry)
+    assert calls == ["b", "a"]

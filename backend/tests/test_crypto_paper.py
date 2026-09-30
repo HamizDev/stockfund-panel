@@ -1,6 +1,7 @@
 """Crypto research ledger: no real exchange or user account calls."""
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -152,3 +153,61 @@ def test_replay_survives_quote_outage_and_requires_request_id(tmp_path: Path, mo
     assert api.post("/api/custom/crypto-paper/orders", json={k: v for k, v in body.items() if k != "request_id"}).status_code == 422
     assert len(ledger.load(tmp_path)["trades"]) == 1
     assert api.get("/api/custom/crypto-paper/quote/spot/NOTREAL").status_code == 400
+
+
+def test_twenty_x_gap_liquidation_does_not_spend_free_cash(tmp_path):
+    _, book = _trade(tmp_path, market="usdm", action="open_long", leverage=20,
+                     quote=_quote("usdm", "100", "100"))
+    free_cash = book["usdm"]["cash"]
+    assert ledger.value_account(book, {("usdm", "BTCUSDT"): {"mark": "1"}})["usdm"]["equity"] == free_cash
+    assert ledger.liquidate(book, "BTCUSDT", "1", 2000)
+    assert book["usdm"]["cash"] == free_cash
+    assert book["spot"]["cash"] == "10000"
+    assert book["trades"][-1]["realized_pnl"] == "-5"
+    assert not ledger.liquidate(book, "BTCUSDT", "1", 2000)
+
+
+@pytest.mark.parametrize("side, rate", [("long", "0.0001"), ("short", "-0.0001")])
+def test_funding_is_debit_once_and_isolated(side, rate):
+    book = ledger._empty()
+    ledger.execute(book, market="usdm", symbol="BTCUSDT", action=f"open_{side}", quantity="1",
+                   leverage=20, quote=_quote("usdm", "100", "100"), request_id="opening", at_ms=1000)
+    cash = book["usdm"]["cash"]
+    events = [{"funding_time_ms": 2000, "rate": rate, "mark_price": "100"}]
+    ledger.settle_funding(book, "BTCUSDT", events, 2000)
+    ledger.settle_funding(book, "BTCUSDT", events, 3000)
+    assert book["usdm"]["cash"] == cash
+    assert book["usdm"]["positions"]["BTCUSDT"]["margin"] == "4.9900"
+    assert len([item for item in book["trades"] if item["kind"] == "funding"]) == 1
+
+
+def test_funding_credit_and_debit_cap_do_not_create_cross_wallet_losses():
+    book = ledger._empty()
+    ledger.execute(book, market="usdm", symbol="BTCUSDT", action="open_long", quantity="1",
+                   leverage=20, quote=_quote("usdm", "100", "100"), request_id="opening", at_ms=1000)
+    cash = book["usdm"]["cash"]
+    ledger.settle_funding(book, "BTCUSDT", [{"funding_time_ms": 2000, "rate": "-0.01", "mark_price": "100"}], 2000)
+    assert book["usdm"]["positions"]["BTCUSDT"]["margin"] == "6.00"
+    ledger.settle_funding(book, "BTCUSDT", [{"funding_time_ms": 3000, "rate": "1", "mark_price": "100"}], 3000)
+    assert book["usdm"]["cash"] == cash
+    assert book["usdm"]["positions"] == {}
+    event = book["trades"][-2]
+    assert Decimal(event["funding_amount"]) == 6
+    assert Decimal(event["scheduled_funding_amount"]) == 100
+
+
+def test_strategy_api_creates_paused_comparison_and_checks_missing_account(tmp_path):
+    app = FastAPI()
+    app.include_router(build_router())
+    app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    api = TestClient(app)
+    body = {"name": "compare", "market": "usdm", "symbol": "BTCUSDT", "strategy_id": "ema_trend",
+            "request_id": "compare"}
+    response = api.post("/api/custom/crypto-paper/strategy-accounts/compare", json=body)
+    assert response.status_code == 200
+    rows = response.json()["accounts"]
+    assert [row["leverage"] for row in rows] == [1, 5, 10, 20]
+    assert all(row["enabled"] is False for row in rows)
+    assert api.get("/api/custom/crypto-paper/strategy-accounts").json()["runtime"]["running"] is False
+    assert api.post(f"/api/custom/crypto-paper/strategy-accounts/{rows[0]['id']}/enabled", json={"enabled": "true"}).status_code == 422
+    assert api.get("/api/custom/crypto-paper/strategy-accounts/absent").status_code == 404

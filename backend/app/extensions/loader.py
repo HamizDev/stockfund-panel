@@ -109,3 +109,17 @@ def current_extension_context(*, data_dir, repository) -> ExtensionContext:
         data_dir=data_dir,
         repository=repository,
     )
+
+
+def stop_backend_extensions(context: ExtensionContext, registry: BackendExtensionRegistry) -> None:
+    """Stop custom background work before releasing the process data lock."""
+    for module_name in reversed(_custom_module_names()):
+        try:
+            module = importlib.import_module(module_name)
+            if getattr(module, "EXTENSION_ID", None) not in registry.extension_ids():
+                continue
+            shutdown = getattr(module, "shutdown", None)
+            if callable(shutdown):
+                shutdown(context)
+        except Exception:
+            logger.exception("backend extension shutdown failed %s", module_name)

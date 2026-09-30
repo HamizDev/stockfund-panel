@@ -21,12 +21,106 @@ export interface CryptoTrade {
   at: string
   market: CryptoMarket
   symbol: CryptoSymbol
-  action: CryptoAction
-  quantity: string
-  price: string
-  fee: string
-  realized_pnl: string
-  leverage: number | null
+  action: CryptoAction | 'funding' | 'liquidation'
+  quantity?: string
+  price?: string
+  fee?: string
+  funding_amount?: string
+  realized_pnl?: string
+  leverage?: number | null
+  kind?: 'trade' | 'funding' | 'liquidation'
+}
+
+export type CryptoStrategyId = 'ema_trend' | 'channel_breakout'
+export type CryptoStrategyInterval = '1h' | '4h'
+
+export interface CryptoStrategyDefinition {
+  id: CryptoStrategyId
+  name: string
+  description: string
+}
+
+export interface CryptoStrategyModel {
+  maintenance_margin_rate: string
+  liquidation_fee_rate: string
+  slippage_bps: number
+  poll_seconds: number
+}
+
+export interface CryptoStrategyAccount {
+  id: string
+  name: string
+  market: CryptoMarket
+  symbol: CryptoSymbol
+  strategy_id: CryptoStrategyId
+  interval: CryptoStrategyInterval
+  leverage: number
+  initial_cash: string
+  allocation_pct: number
+  stop_loss_pct: number
+  take_profit_pct: number
+  enabled: boolean
+  status: string
+  last_error: string | null
+  last_check_ms: number | null
+  last_signal: string | null
+  last_bar_time_ms: number | null
+  cash: string
+  equity: string | null
+  total_pnl: string | null
+  return_pct: number | null
+  max_drawdown_pct: number | null
+  fee_total: string
+  funding_total: string
+  liquidation_count: number
+  trade_count: number
+  positions: Record<string, unknown>
+}
+
+export interface CryptoStrategyAccountsResult {
+  accounts: CryptoStrategyAccount[]
+  runtime: { running: boolean; poll_seconds: number }
+  model: CryptoStrategyModel
+}
+
+export interface CryptoStrategyNavPoint {
+  at_ms: number
+  equity: string
+}
+
+export type CryptoStrategyTrade = Partial<Omit<CryptoTrade, 'id'>> & Pick<CryptoTrade, 'id'> & {
+  at?: string
+  at_ms?: number
+  action?: string
+}
+
+export interface CryptoStrategyAccountDetail {
+  account: CryptoStrategyAccount
+  trades: CryptoStrategyTrade[]
+  nav: CryptoStrategyNavPoint[]
+}
+
+export type CryptoStrategyRunResult =
+  | { account: CryptoStrategyAccount; busy?: false; stopped?: false; processed?: number }
+  | { account?: CryptoStrategyAccount; busy: true; stopped?: false; processed?: number }
+  | { account?: CryptoStrategyAccount; stopped: true; busy?: false; processed?: number }
+
+export interface CryptoStrategyAccountCreate {
+  name: string
+  market: CryptoMarket
+  symbol: CryptoSymbol
+  strategy_id: CryptoStrategyId
+  interval: CryptoStrategyInterval
+  leverage: number
+  initial_cash: number
+  allocation_pct: number
+  stop_loss_pct: number
+  take_profit_pct: number
+  request_id: string
+}
+
+export interface CryptoStrategyAccountCompare extends Omit<CryptoStrategyAccountCreate, 'leverage'> {
+  leverage_list: number[]
 }
 
 export interface CryptoAccount {
@@ -84,4 +178,61 @@ export const cryptoApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
+  strategies: async () => {
+    const result = await request<{ strategies: CryptoStrategyDefinition[]; model: CryptoStrategyModel }>('/strategies')
+    if (!Array.isArray(result?.strategies)) throw new Error('策略目录响应格式无效')
+    return result
+  },
+  strategyAccounts: async () => {
+    const result = await request<CryptoStrategyAccountsResult>('/strategy-accounts')
+    if (!Array.isArray(result?.accounts) || !result?.runtime || !result?.model) {
+      throw new Error('策略模拟账户响应格式无效')
+    }
+    return result
+  },
+  createStrategyAccount: async (body: CryptoStrategyAccountCreate) => {
+    const result = await request<{ account: CryptoStrategyAccount }>('/strategy-accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!result?.account?.id) throw new Error('策略模拟账户创建响应格式无效')
+    return result
+  },
+  compareStrategyAccounts: async (body: CryptoStrategyAccountCompare) => {
+    const result = await request<{ accounts: CryptoStrategyAccount[] }>('/strategy-accounts/compare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!Array.isArray(result?.accounts)) throw new Error('杠杆对照组创建响应格式无效')
+    return result
+  },
+  setStrategyAccountEnabled: async (id: string, enabled: boolean) => {
+    const result = await request<{ account: CryptoStrategyAccount }>(`/strategy-accounts/${encodeURIComponent(id)}/enabled`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    })
+    if (!result?.account?.id) throw new Error('策略启停响应格式无效')
+    return result
+  },
+  runStrategyAccount: async (id: string) => {
+    const result = await request<CryptoStrategyRunResult>(`/strategy-accounts/${encodeURIComponent(id)}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    if (!result || typeof result !== 'object') throw new Error('策略账户检查响应格式无效')
+    if (result.busy || result.stopped) return result
+    if (!result.account?.id) throw new Error('策略账户检查响应格式无效')
+    return result
+  },
+  strategyAccountDetail: async (id: string) => {
+    const result = await request<CryptoStrategyAccountDetail>(`/strategy-accounts/${encodeURIComponent(id)}`)
+    if (!result?.account?.id || !Array.isArray(result.trades) || !Array.isArray(result.nav)) {
+      throw new Error('策略账户明细响应格式无效')
+    }
+    return result
+  },
 }

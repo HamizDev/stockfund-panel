@@ -1,7 +1,8 @@
 """Small, isolated USDT paper ledger for spot and one-way USD-M positions.
 
-This is a research simulator: top-of-book fills, fixed example fees, no funding
-settlement and no exchange-accurate liquidation. It cannot place live orders.
+This is a research simulator: top-of-book fills and fixed example fees.
+Funding and isolated liquidation use a disclosed flat maintenance model, not
+Binance's account-specific maintenance tiers. It cannot place live orders.
 """
 from __future__ import annotations
 
@@ -19,6 +20,9 @@ _LOCK = threading.RLock()
 INITIAL_USDT = Decimal("10000")
 SPOT_FEE = Decimal("0.001")
 FUTURES_FEE = Decimal("0.0005")
+MAINTENANCE_RATE = Decimal("0.005")
+LIQUIDATION_FEE = Decimal("0.005")
+MAX_NOTIONAL = Decimal("100000")
 
 
 def _num(value: object, *, positive: bool = False) -> Decimal:
@@ -106,7 +110,11 @@ def value_account(state: dict, quotes: dict[tuple[str, str], dict]) -> dict:
         for symbol, position in futures["positions"].items()
     ), Decimal("0"))
     spot_equity = _num(spot["cash"]) + spot_value
-    futures_equity = _num(futures["cash"]) + futures_margin + futures_unrealized
+    futures_equity = _num(futures["cash"]) + sum((max(Decimal("0"),
+        _num(position["margin"]) +
+        (_num(quotes[("usdm", symbol)]["mark"], positive=True) - _num(position["entry"], positive=True))
+        * _num(position["qty"], positive=True) * (1 if position["side"] == "long" else -1))
+        for symbol, position in futures["positions"].items()), Decimal("0"))
     return {
         "spot": {"equity": str(spot_equity), "holdings_value": str(spot_value),
                  "total_pnl": str(spot_equity - INITIAL_USDT)},
@@ -152,8 +160,8 @@ def _trade_usdm(wallet: dict, symbol: str, action: str, qty: Decimal,
                 price: Decimal, leverage: int) -> dict:
     if action not in ("open_long", "open_short", "close_long", "close_short"):
         raise ValueError("合约方向无效")
-    if isinstance(leverage, bool) or not isinstance(leverage, int) or not 1 <= leverage <= 5:
-        raise ValueError("研究模拟仅支持 1 至 5 倍杠杆")
+    if isinstance(leverage, bool) or not isinstance(leverage, int) or not 1 <= leverage <= 20:
+        raise ValueError("研究模拟仅支持 1 至 20 倍杠杆")
     cash = _num(wallet["cash"])
     positions = wallet["positions"]
     current = positions.get(symbol)
@@ -162,6 +170,8 @@ def _trade_usdm(wallet: dict, symbol: str, action: str, qty: Decimal,
     if action.startswith("open_"):
         if current:
             raise ValueError("该合约已有持仓; 请先平仓")
+        if qty * price > MAX_NOTIONAL:
+            raise ValueError("单仓名义金额超过研究模型上限 100000 USDT")
         margin = qty * price / leverage
         if margin + fee > cash:
             raise ValueError("合约虚拟保证金不足")
@@ -181,8 +191,11 @@ def _trade_usdm(wallet: dict, symbol: str, action: str, qty: Decimal,
         entry = _num(current["entry"], positive=True)
         margin_out = _num(current["margin"]) * qty / old_qty
         gross = (price - entry) * qty * (1 if side == "long" else -1)
-        realized = gross - fee
-        cash += margin_out + realized
+        # Isolated research positions cannot spend unrelated free wallet cash
+        # when a quote gaps beyond their allocated collateral.
+        proceeds = max(Decimal("0"), margin_out + gross - fee)
+        realized = proceeds - margin_out
+        cash += proceeds
         remain = old_qty - qty
         if remain:
             current["qty"] = str(remain)
@@ -194,8 +207,10 @@ def _trade_usdm(wallet: dict, symbol: str, action: str, qty: Decimal,
     return {"fee": str(fee), "realized_pnl": str(realized)}
 
 
-def trade(data_dir: Path, *, market: str, symbol: str, action: str,
-          quantity: object, leverage: int, quote: dict, request_id: str) -> tuple[dict, dict]:
+def execute(state: dict, *, market: str, symbol: str, action: str,
+            quantity: object, leverage: int, quote: dict, request_id: str,
+            at_ms: int | None = None, slippage_bps: int = 0) -> dict:
+    """Mutate an isolated candidate ledger; the caller owns locking/commit."""
     if market not in ("spot", "usdm") or symbol not in ("BTCUSDT", "ETHUSDT", "SOLUSDT"):
         raise ValueError("不支持的市场或交易对")
     if quote.get("market") != market or quote.get("symbol") != symbol:
@@ -206,32 +221,128 @@ def trade(data_dir: Path, *, market: str, symbol: str, action: str,
         raise ValueError("请求标识无效")
     qty = _num(quantity, positive=True)
     _validate_qty(qty, quote)
+    if isinstance(slippage_bps, bool) or not isinstance(slippage_bps, int) or not 0 <= slippage_bps <= 100:
+        raise ValueError("滑点参数无效")
+    old = next((item for item in state["trades"] if item.get("request_id") == request_id), None)
+    if old:
+        if (any(old.get(k) != v for k, v in (("market", market), ("symbol", symbol),
+                                           ("action", action), ("quantity", str(qty))))
+                or (market == "usdm" and old.get("leverage") != leverage)):
+            raise ValueError("请求标识已用于另一笔订单")
+        return old
+    buying = action in ("buy", "open_long", "close_short")
+    price = _num(quote["ask" if buying else "bid"], positive=True)
+    price *= Decimal("1") + Decimal(slippage_bps) / 10000 * (1 if buying else -1)
+    minimum = _num(quote["min_notional"])
+    maximum = _num(quote.get("max_qty") or "1e30", positive=True)
+    if qty > maximum:
+        raise ValueError("数量超过交易对模拟上限")
+    if qty * price < minimum and not (market == "usdm" and action.startswith("close_")):
+        raise ValueError(f"订单名义金额低于 {minimum} USDT")
+    wallet = state[market]
+    result = (_trade_spot(wallet, symbol, action, qty, price) if market == "spot"
+              else _trade_usdm(wallet, symbol, action, qty, price, leverage))
+    now_ms = at_ms if at_ms is not None else int(datetime.now(UTC).timestamp() * 1000)
+    if market == "usdm" and action.startswith("open_"):
+        wallet["positions"][symbol].update(opened_ms=now_ms, funding_cursor_ms=now_ms)
+    record = {
+        "id": f"cp_{uuid.uuid4().hex[:16]}", "request_id": request_id,
+        "kind": "trade", "at": datetime.fromtimestamp(now_ms / 1000, UTC).isoformat(),
+        "market": market, "symbol": symbol, "action": action, "quantity": str(qty),
+        "price": str(price), "leverage": leverage if market == "usdm" else None,
+        **result,
+    }
+    state["trades"].append(record)
+    return record
+
+
+def trade(data_dir: Path, *, market: str, symbol: str, action: str,
+          quantity: object, leverage: int, quote: dict, request_id: str) -> tuple[dict, dict]:
     with _LOCK:
-        current = load(data_dir)
-        old = next((item for item in current["trades"] if item.get("request_id") == request_id), None)
-        if old:
-            if (any(old[k] != v for k, v in (("market", market), ("symbol", symbol),
-                                             ("action", action), ("quantity", str(qty))))
-                    or (market == "usdm" and old.get("leverage") != leverage)):
-                raise ValueError("请求标识已用于另一笔订单")
-            return old, current
-        # Work on a copy so a rejected order never mutates the in-memory state.
-        state = copy.deepcopy(current)
-        price_key = "ask" if action in ("buy", "open_long", "close_short") else "bid"
-        price = _num(quote[price_key], positive=True)
-        minimum = _num(quote["min_notional"])
-        if qty * price < minimum:
-            raise ValueError(f"订单名义金额低于 {minimum} USDT")
-        wallet = state[market]
-        result = (_trade_spot(wallet, symbol, action, qty, price) if market == "spot"
-                  else _trade_usdm(wallet, symbol, action, qty, price, leverage))
-        record = {
-            "id": f"cp_{uuid.uuid4().hex[:16]}", "request_id": request_id,
-            "at": datetime.now(UTC).isoformat(), "market": market,
-            "symbol": symbol, "action": action, "quantity": str(qty),
-            "price": str(price), "leverage": leverage if market == "usdm" else None,
-            **result,
-        }
-        state["trades"].append(record)
+        state = copy.deepcopy(load(data_dir))
+        record = execute(state, market=market, symbol=symbol, action=action,
+                         quantity=quantity, leverage=leverage, quote=quote, request_id=request_id)
         _save(data_dir, state)
         return record, state
+
+
+def liquidate(state: dict, symbol: str, mark: object, at_ms: int) -> bool:
+    """Flat-rate isolated liquidation, only at observed mark prices."""
+    wallet = state["usdm"]
+    position = wallet["positions"].get(symbol)
+    if not position:
+        return False
+    price = _num(mark, positive=True)
+    qty = _num(position["qty"], positive=True)
+    margin = _num(position["margin"])
+    gross = (price - _num(position["entry"], positive=True)) * qty * (1 if position["side"] == "long" else -1)
+    collateral = margin + gross
+    if collateral > qty * price * (MAINTENANCE_RATE + LIQUIDATION_FEE):
+        return False
+    fee = min(max(collateral, Decimal("0")), qty * price * LIQUIDATION_FEE)
+    proceeds = max(Decimal("0"), collateral - fee)
+    realized = proceeds - margin
+    wallet["cash"] = str(_num(wallet["cash"]) + proceeds)
+    wallet["realized_pnl"] = str(_num(wallet["realized_pnl"]) + realized)
+    wallet["positions"].pop(symbol)
+    state["trades"].append({
+        "id": f"cp_{uuid.uuid4().hex[:16]}", "kind": "liquidation",
+        "at": datetime.fromtimestamp(at_ms / 1000, UTC).isoformat(),
+        "market": "usdm", "symbol": symbol, "action": "liquidation",
+        "quantity": str(qty), "price": str(price), "fee": str(fee),
+        "realized_pnl": str(realized), "leverage": position["leverage"],
+    })
+    return True
+
+
+def settle_funding(state: dict, symbol: str, events: list[dict], through_ms: int) -> None:
+    """Charge actual published funding events once against isolated margin."""
+    wallet = state["usdm"]
+    position = wallet["positions"].get(symbol)
+    if not position:
+        return
+    opened = position.get("opened_ms")
+    if opened is None:
+        entry = next((item for item in reversed(state["trades"])
+                      if item.get("market") == "usdm" and item.get("symbol") == symbol
+                      and item.get("action") in ("open_long", "open_short")), None)
+        if not entry:
+            raise ValueError("旧合约缺少开仓时间; 无法核对资金费")
+        opened = int(datetime.fromisoformat(entry["at"]).timestamp() * 1000)
+        position["opened_ms"] = opened
+    cursor = position.get("funding_cursor_ms", opened)
+    previous = -1
+    for event in events:
+        stamp = event["funding_time_ms"]
+        if not isinstance(stamp, int) or stamp <= previous:
+            raise ValueError("资金费事件时间无效")
+        previous = stamp
+        if not cursor < stamp <= through_ms:
+            continue
+        rate = _num(event["rate"])
+        price = _num(event["mark_price"], positive=True)
+        # Historical observations are not an intrabar reconstruction. If the
+        # observed mark already liquidates this isolated position, settle that
+        # exit first rather than charging a wallet that no longer has a position.
+        if liquidate(state, symbol, price, stamp):
+            return
+        qty = _num(position["qty"], positive=True)
+        side = 1 if position["side"] == "long" else -1
+        expected = qty * price * rate * side
+        collateral = _num(position["margin"]) + qty * (price - _num(position["entry"])) * side
+        amount = min(expected, max(Decimal("0"), collateral)) if expected > 0 else expected
+        position["margin"] = str(_num(position["margin"]) - amount)
+        wallet["realized_pnl"] = str(_num(wallet["realized_pnl"]) - amount)
+        state["trades"].append({
+            "id": f"cp_{uuid.uuid4().hex[:16]}", "kind": "funding",
+            "at": datetime.fromtimestamp(stamp / 1000, UTC).isoformat(),
+            "market": "usdm", "symbol": symbol, "action": "funding",
+            "quantity": position["qty"], "price": str(price), "fee": "0",
+            "funding_amount": str(amount), "realized_pnl": str(-amount),
+            "scheduled_funding_amount": str(expected),
+            "leverage": position["leverage"],
+        })
+        position["funding_cursor_ms"] = stamp
+        if liquidate(state, symbol, price, stamp):
+            return
+    position["funding_cursor_ms"] = through_ms

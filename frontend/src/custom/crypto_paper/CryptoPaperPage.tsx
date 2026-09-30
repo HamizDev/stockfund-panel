@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Coins, RefreshCcw } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { cryptoApi, type CryptoAccount, type CryptoAction, type CryptoMarket, type CryptoQuote, type CryptoSymbol, type CryptoValuation } from './client'
+import { StrategyAccountsPanel } from './StrategyAccountsPanel'
 
 const SYMBOLS: CryptoSymbol[] = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
 const ACTIONS: Record<CryptoMarket, { value: CryptoAction; label: string }[]> = {
@@ -28,43 +29,73 @@ export function CryptoPaperPage() {
   const [quote, setQuote] = useState<CryptoQuote | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const pendingId = useRef<string | null>(null)
+  const refreshRef = useRef<(() => Promise<void>) | null>(null)
+  const contextRef = useRef(`${market}:${symbol}`)
+  contextRef.current = `${market}:${symbol}`
 
-  const refresh = async () => {
-    try {
-      const [nextAccount, nextQuote, nextValuation] = await Promise.all([
-        cryptoApi.account(), cryptoApi.quote(market, symbol), cryptoApi.valuation(),
-      ])
-      setAccount(nextAccount)
-      setQuote(nextQuote)
-      setValuation(nextValuation)
-      setError('')
-    } catch (cause) {
-      setQuote(null)
-      setValuation(null)
-      setError(cause instanceof Error ? cause.message : '行情暂不可用')
-    }
-  }
+  const refresh = () => { void refreshRef.current?.() }
 
   useEffect(() => {
     let alive = true
+    let inFlight = false
+    let queuedRefresh = false
+    let timer: number | undefined
     setQuote(null)
     setValuation(null)
-    Promise.all([cryptoApi.account(), cryptoApi.quote(market, symbol), cryptoApi.valuation()])
-      .then(([nextAccount, nextQuote, nextValuation]) => {
-        if (!alive) return
-        setAccount(nextAccount)
-        setQuote(nextQuote)
-        setValuation(nextValuation)
-        setError('')
-      })
-      .catch((cause) => { if (alive) { setValuation(null); setError(cause instanceof Error ? cause.message : '行情暂不可用') } })
-    const timer = window.setInterval(() => {
-      cryptoApi.quote(market, symbol)
-        .then(nextQuote => { if (alive) { setQuote(nextQuote); setError('') } })
-        .catch(cause => { if (alive) { setQuote(null); setError(cause instanceof Error ? cause.message : '行情暂不可用') } })
-    }, 15_000)
-    return () => { alive = false; window.clearInterval(timer) }
+    setError('')
+    setLoading(true)
+
+    const refreshCycle = async () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer)
+        timer = undefined
+      }
+      if (!alive) return
+      if (inFlight) {
+        queuedRefresh = true
+        return
+      }
+      inFlight = true
+      setRefreshing(true)
+      const [accountResult, quoteResult, valuationResult] = await Promise.allSettled([
+        cryptoApi.account(), cryptoApi.quote(market, symbol), cryptoApi.valuation(),
+      ])
+      if (alive) {
+        const errors: string[] = []
+        if (accountResult.status === 'fulfilled') setAccount(accountResult.value)
+        else errors.push(accountResult.reason instanceof Error ? accountResult.reason.message : '账本暂不可用')
+        if (quoteResult.status === 'fulfilled') setQuote(quoteResult.value)
+        else {
+          setQuote(null)
+          errors.push(quoteResult.reason instanceof Error ? quoteResult.reason.message : '行情暂不可用')
+        }
+        if (valuationResult.status === 'fulfilled') setValuation(valuationResult.value)
+        else {
+          setValuation(null)
+          errors.push(valuationResult.reason instanceof Error ? valuationResult.reason.message : '估值暂不可用')
+        }
+        setError(errors.join('；'))
+        setLoading(false)
+        setRefreshing(false)
+      }
+      inFlight = false
+      if (alive) {
+        const nextDelay = queuedRefresh ? 0 : 15_000
+        queuedRefresh = false
+        timer = window.setTimeout(() => { void refreshCycle() }, nextDelay)
+      }
+    }
+
+    refreshRef.current = refreshCycle
+    void refreshCycle()
+    return () => {
+      alive = false
+      if (timer !== undefined) window.clearTimeout(timer)
+      if (refreshRef.current === refreshCycle) refreshRef.current = null
+    }
   }, [market, symbol])
 
   const selectMarket = (next: CryptoMarket) => {
@@ -76,18 +107,21 @@ export function CryptoPaperPage() {
   const place = async () => {
     if (!quote || busy || !Number.isFinite(Number(quantity)) || Number(quantity) <= 0) return
     setBusy(true)
+    const context = `${market}:${symbol}`
     const requestId = pendingId.current || crypto.randomUUID()
     pendingId.current = requestId
     try {
       const result = await cryptoApi.order({ market, symbol, action, quantity, leverage, request_id: requestId })
-      setAccount(result.account)
-      setValuation(null)
-      setQuantity('')
-      setError('')
-      pendingId.current = null
-      void refresh()
+      if (contextRef.current === context) {
+        setAccount(result.account)
+        setValuation(null)
+        setQuantity('')
+        setError('')
+        pendingId.current = null
+      }
+      void refreshRef.current?.()
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '模拟订单失败')
+      if (contextRef.current === context) setError(cause instanceof Error ? cause.message : '模拟订单失败')
     } finally {
       setBusy(false)
     }
@@ -101,8 +135,7 @@ export function CryptoPaperPage() {
   return <div className="space-y-4 p-4 md:p-6">
     <PageHeader title="数字资产模拟" subtitle="币安公开行情 · 现货与 U 本位合约独立虚拟账本" titleExtra={<Coins className="h-4 w-4 text-accent" />} />
     <div className="rounded-card border border-amber-500/35 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-300">
-      研究模拟，绝不连接真实账户。使用盘口最优价及固定示例手续费；未计盘口深度、资金费率、真实阶梯保证金与强平。
-      合约结果不能视为币安实际成交或风险结果。行情中断时停止下单。
+      研究模拟，绝不连接真实账户。手动订单使用盘口最优价及固定示例手续费；U 本位持仓的资金费用由后台按已公布的历史资金费率事件结算。风险核算采用简化逐仓维持保证金与强平模型，不包含交易所真实阶梯保证金和盘口深度。数据接口失败时，后台可能暂停本轮资金费与风险记账；模拟结果不代表实盘，10x/20x 收益不能推断可盈利。行情中断时停止下单。
     </div>
     <div className="flex flex-wrap gap-2">
       {(['spot', 'usdm'] as const).map(item => <button key={item} onClick={() => selectMarket(item)}
@@ -125,13 +158,15 @@ export function CryptoPaperPage() {
           <div className="rounded-btn border border-border p-2">标记 {market === 'usdm' ? money(quote?.mark ?? undefined, 4) : '—'}</div>
         </div>
         <p className="mt-2 text-[11px] text-muted">{quote ? `更新于 ${new Date(quote.asof_ms).toLocaleString()} · 最小数量 ${quote.min_qty} · 步长 ${quote.step_size}` : '等待公开行情'}</p>
-        {market === 'usdm' && <p className="mt-1 text-[11px] text-muted">最新资金费率 {quote?.last_funding_rate ?? '—'}（仅展示，模拟账本暂不扣收）</p>}
+        {market === 'usdm' && <p className="mt-1 text-[11px] text-muted">最新资金费率 {quote?.last_funding_rate ?? '—'}（仅展示最新费率；持仓资金费按已公布历史事件由后台结算）</p>}
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
           <label className="text-xs text-muted">数量<input value={quantity} onChange={event => { setQuantity(event.target.value); pendingId.current = null }} inputMode="decimal" placeholder={quote?.min_qty ?? '0.001'} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>
-          {market === 'usdm' && <label className="text-xs text-muted">杠杆（研究模拟 1–5 倍）<select value={leverage} onChange={event => { setLeverage(Number(event.target.value)); pendingId.current = null }} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{[1, 2, 3, 4, 5].map(item => <option key={item} value={item}>{item}x</option>)}</select></label>}
+          {market === 'usdm' && <label className="text-xs text-muted">杠杆（研究模拟）<select value={leverage} onChange={event => { setLeverage(Number(event.target.value)); pendingId.current = null }} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{[1, 2, 3, 5, 10, 20].map(item => <option key={item} value={item}>{item}x</option>)}</select></label>}
         </div>
         <p className="mt-2 text-xs text-muted">参考成交价 {money(quotePrice, 4)} USDT · 名义金额约 {quantity && quotePrice ? money(Number(quantity) * Number(quotePrice), 2) : '—'} USDT</p>
         <button disabled={!quote || busy || !quantity} onClick={place} className="mt-3 rounded-btn bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{busy ? '处理中…' : '提交虚拟订单'}</button>
+        {loading && <p className="mt-2 text-xs text-muted">正在同步模拟账本、公开行情和账户估值…</p>}
+        {!loading && refreshing && <p className="mt-2 text-xs text-muted">正在同步最新账本与估值…</p>}
       </section>
       <section className="rounded-card border border-border bg-surface p-4">
         <h2 className="text-sm font-semibold">{market === 'spot' ? '现货' : '合约'}虚拟账户</h2>
@@ -149,9 +184,10 @@ export function CryptoPaperPage() {
       </section>
     </div>
     <section className="rounded-card border border-border bg-surface p-4">
-      <h2 className="text-sm font-semibold">虚拟成交记录</h2>
-      <div className="mt-2 overflow-x-auto"><table className="w-full min-w-[640px] text-left text-xs"><thead className="border-b border-border text-muted"><tr><th className="py-2">时间</th><th>市场</th><th>交易对</th><th>方向</th><th>数量</th><th>价格</th><th>手续费</th><th>已实现盈亏</th></tr></thead><tbody>{account?.trades.slice(-30).reverse().map(item => <tr key={item.id} className="border-b border-border/50"><td className="py-2">{new Date(item.at).toLocaleString()}</td><td>{item.market}</td><td>{item.symbol}</td><td>{item.action}</td><td>{item.quantity}</td><td>{money(item.price, 4)}</td><td>{money(item.fee, 4)}</td><td>{money(item.realized_pnl)}</td></tr>)}</tbody></table></div>
+      <h2 className="text-sm font-semibold">虚拟账本事件</h2>
+      <div className="mt-2 overflow-x-auto"><table className="w-full min-w-[760px] text-left text-xs"><thead className="border-b border-border text-muted"><tr><th className="py-2">时间</th><th>市场</th><th>交易对</th><th>事件 / 方向</th><th>数量</th><th>价格</th><th>手续费</th><th>资金费用</th><th>已实现盈亏</th></tr></thead><tbody>{account?.trades.slice(-30).reverse().map(item => <tr key={item.id} className="border-b border-border/50"><td className="py-2">{new Date(item.at).toLocaleString()}</td><td>{item.market}</td><td>{item.symbol}</td><td>{item.kind === 'funding' ? '资金费' : item.kind === 'liquidation' ? '强平' : item.action}</td><td>{item.quantity ?? '—'}</td><td>{money(item.price, 4)}</td><td>{money(item.fee, 4)}</td><td>{money(item.funding_amount, 4)}</td><td>{money(item.realized_pnl)}</td></tr>)}</tbody></table></div>
       {!account?.trades.length && <p className="mt-3 text-xs text-muted">尚无虚拟成交</p>}
     </section>
+    <StrategyAccountsPanel />
   </div>
 }
