@@ -8,10 +8,11 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.strategy import paper
 
@@ -39,6 +40,23 @@ class AccountModel(BaseModel):
     stamp_tax_pct: float = paper.DEFAULT_STAMP_TAX_PCT
     slippage_bps: float = paper.DEFAULT_SLIPPAGE_BPS
     queue_limit_orders: bool = False
+
+
+class StrategyAccountModel(BaseModel):
+    strategy_id: str
+    initial_cash: float = Field(default=200_000, gt=0, allow_inf_nan=False)
+    entry_pct: float = Field(default=10, gt=0, le=100, allow_inf_nan=False)
+
+
+def _monitor_has_both_sides(monitor: dict | None) -> bool:
+    if monitor is None:
+        return False
+    events = set(monitor.get("notify_events") or [])
+    return bool(events & {"buy_signal", "pool_entry"}) and bool(events & {"sell_signal", "pool_exit"})
+
+
+def _paper_monitor_id(account_id: str) -> str:
+    return f"paper_strategy_{account_id}"
 
 
 class OrderModel(BaseModel):
@@ -117,6 +135,80 @@ def create_account(request: Request, body: AccountModel):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {"account": acc}
+
+
+@router.post("/strategy_accounts")
+def create_strategy_account(request: Request, body: StrategyAccountModel):
+    """Create one isolated paper account per monitored strategy.
+
+    Entry and exit use separate direction-aware rules. Creating the account
+    also enables its strategy monitor so subsequent live signals can be seen.
+    Existing user-managed monitor rules are left untouched.
+    """
+    from app.strategy import monitor_rules, paper_auto
+
+    engine = getattr(request.app.state, "strategy_engine", None)
+    if engine is None or not engine.has(body.strategy_id):
+        raise HTTPException(status_code=400, detail="策略不存在")
+    strategy = engine.get(body.strategy_id)
+    meta = strategy.meta
+    if meta.get("research_only") or "1d" not in meta.get("timeframes", ["1d"]):
+        raise HTTPException(status_code=400, detail="该策略不支持日线模拟交易")
+    asset_types = set(meta.get("asset_types", ["stock"]))
+    if not asset_types.intersection({"stock", "etf"}):
+        raise HTTPException(status_code=400, detail="目前仅支持股票和 ETF 策略")
+    data_dir = _data_dir(request)
+    with paper.PAPER_LOCK:
+        existing_id = next(
+            (aid for aid in paper.list_account_ids(data_dir)
+             if (paper.get_account(data_dir, aid) or {}).get("strategy_id") == body.strategy_id),
+            None,
+        )
+        account_id = existing_id or f"strat_{uuid.uuid4().hex[:16]}"
+        monitor_id = _paper_monitor_id(account_id)
+        monitor = monitor_rules.load_one(data_dir, monitor_id)
+        if monitor and monitor.get("enabled") and not _monitor_has_both_sides(monitor):
+            raise HTTPException(status_code=409, detail="策略模拟仓监控缺少买入或卖出事件。请先在监控中心补齐")
+        try:
+            account = paper.create_account(
+                data_dir, body.initial_cash, account_id=account_id,
+                name=f"策略 · {meta.get('name') or body.strategy_id}",
+                strategy_id=body.strategy_id,
+            )
+            rules = paper_auto.load_auto_rules(data_dir, account_id)
+            for side, size_mode, size_value, cooldown in (
+                ("buy", "pct_equity", body.entry_pct, 5),
+                ("sell", "full_position", 1, 0),
+            ):
+                if not any(r.get("match_kind") == "strategy" and
+                           r.get("match_id") == body.strategy_id and r.get("side") == side
+                           for r in rules):
+                    rules.append(paper_auto.create_auto_rule(data_dir, {
+                        "name": f"{meta.get('name') or body.strategy_id} · {'买入' if side == 'buy' else '卖出'}",
+                        "match_kind": "strategy", "match_id": body.strategy_id,
+                        "side": side, "size_mode": size_mode, "size_value": size_value,
+                        "order_type": "next_open", "cooldown_days": cooldown,
+                    }, account_id))
+
+            if monitor is None:
+                monitor = monitor_rules.normalize({
+                    "id": monitor_id,
+                    "name": f"策略模拟仓监控 · {meta.get('name') or body.strategy_id}",
+                    "type": "strategy", "scope": "all",
+                    "asset_type": "stock" if "stock" in asset_types else "etf",
+                    "strategy_id": body.strategy_id, "direction": "entry",
+                    "notify_events": ["buy_signal", "sell_signal", "pool_entry", "pool_exit"],
+                    "conditions": [], "cooldown_seconds": 0, "enabled": True,
+                })
+                monitor_rules.validate(monitor)
+                monitor_rules.save_one(data_dir, monitor)
+            monitor_engine = getattr(request.app.state, "monitor_engine", None)
+            if monitor_engine is not None:
+                monitor_engine.set_rules(monitor_rules.load_all(data_dir))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"account": account, "rules": rules,
+            "monitor_enabled": monitor.get("enabled") is True and _monitor_has_both_sides(monitor)}
 
 
 @router.get("/overview")
@@ -227,9 +319,20 @@ def compare_accounts(request: Request):
             continue  # 空壳目录 (懒创建) 不进对比
         st = paper.stats(data_dir, acc_id)
         initial = float(acc.get("initial_cash") or 0)
+        auto_enabled = None
+        if acc.get("strategy_id"):
+            from app.strategy import monitor_rules, paper_auto
+            strategy_id = acc["strategy_id"]
+            rules = [r for r in paper_auto.load_auto_rules(data_dir, acc_id)
+                     if r.get("match_kind") == "strategy" and r.get("match_id") == strategy_id]
+            monitor = monitor_rules.load_one(data_dir, _paper_monitor_id(acc_id))
+            auto_enabled = (bool(monitor and monitor.get("enabled") and _monitor_has_both_sides(monitor)) and
+                            {r.get("side") for r in rules if r.get("enabled")} == {"buy", "sell"})
         rows.append({
             "account": acc_id,
             "name": acc.get("name") or acc_id,
+            "strategy_id": acc.get("strategy_id"),
+            "auto_enabled": auto_enabled,
             "status": acc.get("status"),
             "initial_cash": initial,
             "fees": {k: acc.get(k) for k in ("commission_pct", "stamp_tax_pct", "slippage_bps")},
@@ -247,6 +350,32 @@ def compare_accounts(request: Request):
             "nav": [{"date": n["date"], "nav": n["nav"]} for n in paper.load_nav(data_dir, acc_id)],
         })
     return {"accounts": rows}
+
+
+@router.post("/strategy_accounts/{account_id}/enabled")
+def set_strategy_account_enabled(request: Request, account_id: str, enabled: bool):
+    """Pause/resume *new* signal orders; existing pending orders are untouched."""
+    from app.strategy import monitor_rules, paper_auto
+
+    data_dir = _data_dir(request)
+    account_id = _acc(request, account_id)
+    with paper.PAPER_LOCK:
+        account = paper.get_account(data_dir, account_id)
+        strategy_id = account.get("strategy_id") if account else None
+        if not strategy_id:
+            raise HTTPException(status_code=404, detail="策略模拟仓不存在")
+        monitor = monitor_rules.load_one(data_dir, _paper_monitor_id(account_id))
+        if enabled and (monitor is None or not monitor.get("enabled")):
+            raise HTTPException(status_code=409, detail="策略监控尚未启用。请先在监控中心启用")
+        if enabled and not _monitor_has_both_sides(monitor):
+            raise HTTPException(status_code=409, detail="策略监控缺少买入或卖出事件。请先在监控中心补齐")
+        rules = [r for r in paper_auto.load_auto_rules(data_dir, account_id)
+                 if r.get("match_kind") == "strategy" and r.get("match_id") == strategy_id]
+        if {r.get("side") for r in rules} != {"buy", "sell"}:
+            raise HTTPException(status_code=409, detail="买入或卖出跟单规则缺失")
+        for rule in rules:
+            paper_auto.set_enabled(data_dir, rule["id"], enabled, account_id)
+    return {"enabled": enabled}
 
 
 @router.post("/rebuild")

@@ -1207,6 +1207,14 @@ class QuoteService:
 
             all_alerts: list[dict] = []
             rule_events: list[dict] = []
+            auto_rule_events: list[dict] = []
+            paper_prices: dict[str, float] = {}
+            if stock_ready and "raw_close" in enriched_today.columns:
+                paper_prices.update(zip(
+                    enriched_today["symbol"].to_list(),
+                    enriched_today["raw_close"].to_list(),
+                    strict=False,
+                ))
             engine = None
 
             # 通用监控规则评估 (统一引擎: signal/price/market/strategy)
@@ -1271,6 +1279,12 @@ class QuoteService:
                         try:
                             etf_enriched, etf_date = self._repo.get_enriched_latest_asset("etf", refresh=False)
                             if not etf_enriched.is_empty() and etf_date == cn_today():
+                                if "raw_close" in etf_enriched.columns:
+                                    paper_prices.update(zip(
+                                        etf_enriched["symbol"].to_list(),
+                                        etf_enriched["raw_close"].to_list(),
+                                        strict=False,
+                                    ))
                                 etf_enriched = self._inject_intraday_signals(etf_enriched, engine, "etf")
                                 rule_events = rule_events + engine.evaluate(
                                     etf_enriched, asset_type="etf", reset_strategy_results=False,
@@ -1291,6 +1305,10 @@ class QuoteService:
                         except Exception as e:  # noqa: BLE001
                             logger.warning("指数监控评估失败 (不影响股票/ETF 告警): %s", e)
                     if rule_events:
+                        from app.strategy import paper_auto
+                        rule_events, auto_rule_events = paper_auto.prepare_rule_events(
+                            rule_events, paper_prices,
+                        )
                         rule_events = self._format_extension_notifications(rule_events)
                         # 落盘到 alerts.jsonl
                         try:
@@ -1354,22 +1372,18 @@ class QuoteService:
             # ② rule_events 喂给自动跟单规则触发自动下单。逐账户执行 (账户间规则与订单隔离)。
             # 即时撮合仅股票 (ETF 即时单在下单时已转次日开盘); 独立 try ——
             # 模拟盘任何异常只留痕, 不得影响监控告警链路。
-            if stock_ready and self._app_state is not None:
+            if paper_prices and self._app_state is not None:
                 try:
                     from app.strategy import paper as paper_trading
                     from app.strategy import paper_auto
                     data_dir = self._app_state.repo.store.data_dir
-                    snapshot = dict(zip(
-                        enriched_today["symbol"].to_list(),
-                        enriched_today["raw_close"].to_list(),
-                        strict=False,
-                    ))
+                    snapshot = paper_prices
                     paper_events: list[dict] = []
                     for acc_id in paper_trading.list_account_ids(data_dir):
                         paper_events.extend(
                             paper_trading.evaluate_intraday(data_dir, snapshot, account_id=acc_id))
-                        if rule_events:
-                            created = paper_auto.on_rule_events(data_dir, rule_events, account_id=acc_id)
+                        if auto_rule_events:
+                            created = paper_auto.on_rule_events(data_dir, auto_rule_events, account_id=acc_id)
                             paper_events.extend(paper_auto.auto_order_events(created, account_id=acc_id))
                     # 成交/自动跟单下单推送 (V3): 复用监控中心既有管道 —— SSE toast /
                     # 语音 (前端按 source 拼文案) / 系统通知 / alert_store 留痕 /

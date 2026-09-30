@@ -1084,6 +1084,7 @@ function accUrl(base: string, account?: string): string {
 export interface PaperAccount {
   id: string
   name?: string
+  strategy_id?: string | null
   initial_cash: number
   cash: number
   commission_pct: number
@@ -1097,6 +1098,7 @@ export interface PaperAccount {
 export interface PaperAccountSummary {
   id: string
   name: string
+  strategy_id?: string | null
   status: 'active' | 'frozen'
   initial_cash?: number
   cash?: number
@@ -1108,6 +1110,8 @@ export interface PaperAccountSummary {
 export interface PaperCompareRow {
   account: string
   name: string
+  strategy_id?: string | null
+  auto_enabled?: boolean | null
   status: 'active' | 'frozen'
   initial_cash: number
   fees: { commission_pct: number; stamp_tax_pct: number; slippage_bps: number }
@@ -3792,6 +3796,17 @@ export const api = {
     request<{ account: PaperAccount }>('/api/paper/account', {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+
+  paperCreateStrategyAccount: (body: { strategy_id: string; initial_cash: number; entry_pct: number }) =>
+    request<{ account: PaperAccount; monitor_enabled: boolean }>('/api/paper/strategy_accounts', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  paperSetStrategyAccountEnabled: (account: string, enabled: boolean) =>
+    request<{ enabled: boolean }>(`/api/paper/strategy_accounts/${encodeURIComponent(account)}/enabled?enabled=${enabled}`, {
+      method: 'POST',
     }),
 
   paperSettings: (body: { queue_limit_orders?: boolean; commission_pct?: number; stamp_tax_pct?: number; slippage_bps?: number }, account?: string) =>

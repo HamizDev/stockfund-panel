@@ -21,8 +21,8 @@
   - 涨跌停: 触及涨停的买单 / 跌停的卖单默认拒单 (expired 留痕); 账户开启
     queue_limit_orders 后转「排队次日重试」(转 next_open, 计顺延, 超限过期);
   - 停牌/缺行情: 顺延, 连续顺延超过 max_postpone 日自动过期;
-  - 除权: 按 ex_factor 调整持仓数量(乘 factor)与成本(除以 factor), 台账记 corp_action;
-    现金分红金额不在因子数据中, 不处理。
+  - 除权: 仅在因子数据另含独立的 share_factor 时调整持仓数量/成本;
+    价格复权 ex_factor 可含现金分红, 不能用来凭空增加持股。现金分红尚未入账。
 """
 from __future__ import annotations
 
@@ -165,6 +165,7 @@ def create_account(
     stamp_tax_pct: float = DEFAULT_STAMP_TAX_PCT,
     slippage_bps: float = DEFAULT_SLIPPAGE_BPS,
     queue_limit_orders: bool = False,
+    strategy_id: str | None = None,
 ) -> dict:
     """创建账户 (同 id 已存在则原样返回, 不覆盖 — 幂等)。"""
     validate_account_id(account_id)
@@ -186,6 +187,8 @@ def create_account(
             "status": "active",  # active / frozen
             "created_at": _now_iso(),
         }
+        if strategy_id is not None:
+            acc["strategy_id"] = strategy_id
         atomic_write_text(_root(data_dir, account_id) / "account.json", json.dumps(acc, ensure_ascii=False, indent=2))
         return acc
 
@@ -228,6 +231,7 @@ def list_accounts(data_dir: Path) -> list[dict]:
             "cash": acc.get("cash"),
             "latest_nav": nav[-1]["nav"] if nav else acc.get("cash"),
             "created_at": acc.get("created_at"),
+            "strategy_id": acc.get("strategy_id"),
         })
     return out
 
@@ -863,24 +867,27 @@ def _index_close(data_dir: Path, day: str) -> float | None:
 
 
 def _factor_on(data_dir: Path, symbol: str, asset_type: str, day: str) -> float | None:
-    """symbol 在 day 的除权因子 (无因子文件/无当日事件返回 None)。"""
+    """symbol 在 day 的送转股数因子。价格复权因子不可代替股数因子。"""
     sub = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
     p = data_dir / sub / "all.parquet"
     if not p.exists():
         return None
     try:
+        factor_scan = pl.scan_parquet(p.as_posix())
+        if "share_factor" not in factor_scan.collect_schema().names():
+            return None
         df = (
-            pl.scan_parquet(p.as_posix())
+            factor_scan
             .filter((pl.col("symbol") == symbol) & (pl.col("trade_date") == _date.fromisoformat(day)))
-            .select("ex_factor")
+            .select("share_factor")
             .collect()
         )
     except Exception as e:
         logger.warning("paper factor read failed %s: %s", symbol, e)
         return None
-    if df.is_empty() or df["ex_factor"][0] is None:
+    if df.is_empty() or df["share_factor"][0] is None:
         return None
-    f = float(df["ex_factor"][0])
+    f = float(df["share_factor"][0])
     return f if f > 0 else None
 
 

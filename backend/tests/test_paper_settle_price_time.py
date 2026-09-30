@@ -127,7 +127,7 @@ def test_auto_rule_intraday_order_waits_for_next_open(data_dir, monkeypatch):
         "order_type": "next_open", "cooldown_days": 5,
     })
     created = paper_auto.on_rule_events(data_dir, [
-        {"source": "strategy", "strategy_id": "strat_1", "symbol": SYM, "price": 10.6},
+        {"source": "strategy", "type": "buy_signal", "strategy_id": "strat_1", "symbol": SYM, "price": 10.6},
     ])
     assert len(created) == 1 and created[0]["order_type"] == "next_open"
 

@@ -22,11 +22,12 @@ import { Link } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { usePreferences } from '@/lib/useSharedQueries'
+import { getFrontendExtensionNavigation } from '@/extensions/registry'
 
 interface NavEntry {
   id: string
   label: string
-  type: 'builtin' | 'analysis'
+  type: 'builtin' | 'analysis' | 'extension'
   visible: boolean
 }
 
@@ -46,6 +47,7 @@ const BUILTIN_PAGES: NavEntry[] = [
   { id: '/regime', label: '市场环境', type: 'builtin', visible: true },
   { id: '/abnormal', label: '异动监控', type: 'builtin', visible: true },
   { id: '/lots', label: '持仓提醒', type: 'builtin', visible: true },
+  { id: '/paper', label: '模拟盘', type: 'builtin', visible: true },
   { id: '/signals', label: '信号库', type: 'builtin', visible: true },
   { id: '/review', label: '复盘', type: 'builtin', visible: true },
   { id: '/indices', label: '指数', type: 'builtin', visible: true },
@@ -122,7 +124,7 @@ function SortableItem({ entry, hidden, onToggleHidden, badgeEnabled, onToggleBad
         </button>
       </div>
       <div className="flex justify-center">
-        {entry.type === 'builtin' ? (
+        {entry.type !== 'analysis' ? (
           <Link
             to={entry.id}
             className="rounded p-1 text-muted hover:text-accent hover:bg-accent/10 transition-colors"
@@ -173,14 +175,24 @@ export function SettingsMenuSettingsPanel() {
     type: 'analysis' as const,
     visible: m.visible,
   }))
+  const extensionEntries = useMemo<NavEntry[]>(() =>
+    getFrontendExtensionNavigation().map(item => ({
+      id: item.route.path,
+      label: item.label,
+      type: 'extension',
+      visible: true,
+    })),
+  [])
 
   const allEntries = useMemo(() => {
     const saved = prefs?.nav_order ?? []
     const entryMap = new Map<string, NavEntry>()
     for (const e of BUILTIN_PAGES) entryMap.set(e.id, e)
     for (const e of analysisEntries) entryMap.set(e.id, e)
+    for (const e of extensionEntries) entryMap.set(e.id, e)
 
-    if (saved.length === 0) return [...BUILTIN_PAGES, ...analysisEntries]
+    const defaultEntries = [...BUILTIN_PAGES, ...analysisEntries, ...extensionEntries]
+    if (saved.length === 0) return defaultEntries
 
     const ordered: NavEntry[] = []
     const seen = new Set<string>()
@@ -191,7 +203,7 @@ export function SettingsMenuSettingsPanel() {
         seen.add(id)
       }
     }
-    for (const e of [...BUILTIN_PAGES, ...analysisEntries]) {
+    for (const e of defaultEntries) {
       if (seen.has(e.id)) continue
       // 未保存过排序的新条目: 内置页插回默认位置, 分析菜单追加到末尾
       const defaultIndex = BUILTIN_PAGES.findIndex(p => p.id === e.id)
@@ -206,7 +218,7 @@ export function SettingsMenuSettingsPanel() {
       else ordered.push(e)
     }
     return ordered
-  }, [prefs?.nav_order, analysisEntries])
+  }, [prefs?.nav_order, analysisEntries, extensionEntries])
 
   const hiddenSet = useMemo(() => new Set(prefs?.nav_hidden ?? []), [prefs?.nav_hidden])
 

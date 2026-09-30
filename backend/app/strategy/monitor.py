@@ -1112,7 +1112,9 @@ class MonitorRuleEngine:
         source = rtype
 
         events: list[dict] = []
-        for ev_type, sym, name, price, pct, hit_sigs in hit_rows:
+        for hit in hit_rows:
+            ev_type, sym, name, price, pct, hit_sigs = hit[:6]
+            paper_items = hit[6] if len(hit) > 6 else None
             # cooldown 键包含事件类型, 同股不同策略事件互不压制。
             is_batch = sym == "_batch"
             key_symbol = f"_{ev_type}_batch" if is_batch else sym
@@ -1154,6 +1156,8 @@ class MonitorRuleEngine:
                 "conditions": list(rule.get("conditions", [])) if rtype != "strategy" else [],
                 "logic": rule.get("logic", "and") if rtype != "strategy" else "and",
             }
+            if paper_items:
+                ev["_paper_items"] = paper_items
             events.append(ev)
             if self._alert_handler:
                 try:
@@ -1410,7 +1414,16 @@ class MonitorRuleEngine:
                     for symbol in symbol_list
                     for signal in signal_map.get(event_type, {}).get(symbol, [])
                 })
-                results.append((event_type, "_batch", message, None, None, hit_signals))
+                ranked = list(dict.fromkeys(
+                    str(row["symbol"]) for row in result.rows
+                    if str(row["symbol"]) in symbols
+                ))
+                ranked_set = set(ranked)
+                paper_symbols = ranked + [symbol for symbol in symbol_list if symbol not in ranked_set]
+                results.append((
+                    event_type, "_batch", message, None, None, hit_signals,
+                    [{"symbol": symbol} for symbol in paper_symbols],
+                ))
                 continue
             for symbol in symbol_list:
                 row = row_map.get(symbol, {})

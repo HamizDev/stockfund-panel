@@ -564,9 +564,10 @@ function HotRankCard({ title, rank, configUrl, onStockClick, onDimensionClick, o
   const hasData = (rank?.leading?.length ?? 0) > 0 || (rank?.lagging?.length ?? 0) > 0
   // 有指数代码时 hint 显示"点击看走势", 否则显示"点击板块看成分股"
   const hasIndex = [...(rank?.leading ?? []), ...(rank?.lagging ?? [])].some(r => r.index_code)
+  const displayTitle = title === '行业热度' && hasIndex ? '行业指数（降级）' : title
   return (
     <section className="rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
-      <SectionTitle icon={Flame} title={title} hint={hasIndex ? "领涨/领跌 · 点击看指数走势" : "领涨/领跌 · 点击板块看成分股"} />
+      <SectionTitle icon={Flame} title={displayTitle} hint={hasIndex ? "缺少行业成分数据 · 点击看指数走势" : "领涨/领跌 · 点击板块看成分股"} />
       {hasData ? (
         <div className="grid grid-cols-2 gap-2">
           <RankColumn title="领涨" rows={rank?.leading ?? []} tone="bull" onStockClick={onStockClick} onDimensionClick={onDimensionClick} onIndexClick={onIndexClick} activeSymbol={activeSymbol} />
@@ -870,11 +871,11 @@ export function Dashboard() {
         </div>
       )}
 
-      <div className="mb-1.5 grid grid-cols-4 gap-1">
+      <div className="mb-1.5 grid grid-cols-2 gap-1 sm:grid-cols-4">
         {data.indices.map(item => <IndexTicker key={item.symbol} item={item} />)}
       </div>
 
-      <div className="mb-1.5 grid grid-cols-6 gap-1">
+      <div className="mb-1.5 grid grid-cols-3 gap-1 lg:grid-cols-6">
         <KpiCell label="个股涨 / 平 / 跌" value={<><span className="text-bull">{data.breadth.up}</span><span className="text-muted">/</span><span className="text-muted">{data.breadth.flat}</span><span className="text-muted">/</span><span className="text-bear">{data.breadth.down}</span></>} sub={`上涨率 ${data.breadth.up_pct.toFixed(1)}%`} />
         <KpiCell label="强势 / 弱势" value={<><span className="text-bull">{strongUp}</span><span className="text-muted">/</span><span className="text-bear">{strongDown}</span></>} sub="涨跌 ≥3%" />
         <KpiCell label={<span className="inline-flex items-center gap-1">涨停 / 跌停<SealedBadge degraded={isSealedDegrade} hasDepth={hasDepth} isHistorical={false} sealedReady={sealedReady} sealedCountsUp={{ real: data.limit.limit_up, fake: data.limit.fake_up ?? 0, pending: 0 }} sealedCountsDown={{ real: data.limit.limit_down, fake: data.limit.fake_down ?? 0, pending: 0 }} rawUp={data.limit.limit_up + (data.limit.fake_up ?? 0)} rawDown={data.limit.limit_down + (data.limit.fake_down ?? 0)} invalidateKeys={['overview-market', 'limit-ladder']} /></span>} value={<><span className="text-bull">{data.limit.limit_up}</span><span className="text-muted">/</span><span className="text-bear">{data.limit.limit_down}</span></>} sub={`封板率 ${(data.limit.seal_rate ?? 0).toFixed(0)}%`} />

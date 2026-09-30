@@ -16,6 +16,36 @@ const HORIZONS = [
   { value: '2y', label: '近 2 年' },
   { value: '3y', label: '近 3 年' },
 ]
+const RESULT_STORAGE_KEY = 'stockfund.ai-fund-screener.result.v1'
+
+type SavedResult = {
+  fundType: string
+  horizon: string
+  share: string
+  candidates: FundRankItem[]
+  selectedCode: string | null
+  report: string
+  retrievedAt: number | null
+  resultHorizon: string
+}
+
+function loadSavedResult(): SavedResult | null {
+  try {
+    const raw = window.sessionStorage.getItem(RESULT_STORAGE_KEY)
+    if (!raw) return null
+    const value = JSON.parse(raw) as SavedResult
+    if (!Array.isArray(value.candidates) || value.candidates.length === 0 ||
+        !value.candidates.every((item) => item && typeof item.code === 'string' && typeof item.name === 'string') ||
+        typeof value.report !== 'string' ||
+        typeof value.fundType !== 'string' || typeof value.horizon !== 'string' ||
+        typeof value.share !== 'string' || typeof value.resultHorizon !== 'string' ||
+        (value.selectedCode !== null && typeof value.selectedCode !== 'string') ||
+        (value.retrievedAt !== null && typeof value.retrievedAt !== 'number')) return null
+    return value
+  } catch {
+    return null
+  }
+}
 
 function pct(value: number | null | undefined): string {
   return value == null || !Number.isFinite(value) ? '—' : `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
@@ -26,20 +56,30 @@ function metric(item: FundRankItem, horizon: string): number | null {
 }
 
 export function AiFundScreenerPage() {
-  const [fundType, setFundType] = useState('混合型')
-  const [horizon, setHorizon] = useState('1y')
-  const [share, setShare] = useState('all')
-  const [phase, setPhase] = useState<'idle' | 'loading' | 'done' | 'error'>('idle')
-  const [candidates, setCandidates] = useState<FundRankItem[]>([])
-  const [selectedCode, setSelectedCode] = useState<string | null>(null)
-  const [report, setReport] = useState('')
+  const [saved] = useState(loadSavedResult)
+  const [fundType, setFundType] = useState(saved?.fundType ?? '混合型')
+  const [horizon, setHorizon] = useState(saved?.horizon ?? '1y')
+  const [share, setShare] = useState(saved?.share ?? 'all')
+  const [phase, setPhase] = useState<'idle' | 'loading' | 'done' | 'error'>(saved ? 'done' : 'idle')
+  const [candidates, setCandidates] = useState<FundRankItem[]>(saved?.candidates ?? [])
+  const [selectedCode, setSelectedCode] = useState<string | null>(saved?.selectedCode ?? null)
+  const [report, setReport] = useState(saved?.report ?? '')
   const [error, setError] = useState('')
-  const [retrievedAt, setRetrievedAt] = useState<number | null>(null)
-  const [resultHorizon, setResultHorizon] = useState('1y')
+  const [retrievedAt, setRetrievedAt] = useState<number | null>(saved?.retrievedAt ?? null)
+  const [resultHorizon, setResultHorizon] = useState(saved?.resultHorizon ?? '1y')
   const controllerRef = useRef<AbortController | null>(null)
   const model = useQuery({ queryKey: ['ai-fund-model-status'], queryFn: api.strategyAiStatus, staleTime: 60_000 })
 
   useEffect(() => () => controllerRef.current?.abort(), [])
+  useEffect(() => {
+    if (phase !== 'done' || !candidates.length) return
+    const result: SavedResult = { fundType, horizon, share, candidates, selectedCode, report, retrievedAt, resultHorizon }
+    try {
+      window.sessionStorage.setItem(RESULT_STORAGE_KEY, JSON.stringify(result))
+    } catch {
+      // Storage may be disabled; the page remains usable without persistence.
+    }
+  }, [phase, fundType, horizon, share, candidates, selectedCode, report, retrievedAt, resultHorizon])
   const selected = useMemo(
     () => candidates.find((candidate) => candidate.code === selectedCode) ?? candidates[0] ?? null,
     [candidates, selectedCode],

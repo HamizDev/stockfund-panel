@@ -197,6 +197,25 @@ def test_strategy_events_baseline_dedupe_and_next_day_replay():
     assert [(event["type"], event["symbol"]) for event in next_day] == [("buy_signal", "B")]
 
 
+def test_strategy_batch_keeps_individual_symbols_for_paper_orders():
+    day = date(2026, 7, 24)
+    symbols = tuple(f"S{i}" for i in range(6, -1, -1))
+    engine = MonitorRuleEngine()
+    engine.set_strategy_engine(_SequenceStrategyEngine([
+        _result(day),
+        _result(day, pool=symbols, buys=symbols),
+    ]))
+    engine.set_rules([_rule("buy_signal")])
+
+    with patch("app.strategy.monitor.time.time", side_effect=[100, 101]):
+        assert engine.evaluate(_quotes()) == []
+        events = engine.evaluate(_quotes())
+
+    assert len(events) == 1
+    assert events[0]["symbol"] == ""
+    assert [item["symbol"] for item in events[0]["_paper_items"]] == list(symbols)
+
+
 def test_strategy_sell_and_pool_exit_are_independent_events():
     day = date(2026, 7, 24)
     engine = MonitorRuleEngine()

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import uuid
 from datetime import date as _date
 from datetime import datetime
@@ -52,10 +53,13 @@ def validate_rule(rule: dict) -> None:
         raise ValueError("match_id 不能为空")
     if rule.get("side") not in ("buy", "sell"):
         raise ValueError(f"side 非法: {rule.get('side')!r}")
-    if rule.get("size_mode") not in ("fixed_amount", "pct_equity"):
+    if rule.get("size_mode") not in ("fixed_amount", "pct_equity", "full_position"):
         raise ValueError(f"size_mode 非法: {rule.get('size_mode')!r}")
+    if rule.get("size_mode") == "full_position" and rule.get("side") != "sell":
+        raise ValueError("full_position 仅支持卖出")
     value = rule.get("size_value")
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if (rule.get("size_mode") != "full_position"
+            and (isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0)):
         raise ValueError("size_value 必须是正数")
     if rule.get("size_mode") == "pct_equity" and value > 100:
         raise ValueError("pct_equity 的 size_value 不能超过 100 (%)")
@@ -123,8 +127,40 @@ def set_enabled(data_dir: Path, rule_id: str, enabled: bool, account_id: str = p
 
 def _matches(rule: dict, ev: dict) -> bool:
     if rule["match_kind"] == "strategy":
-        return ev.get("source") == "strategy" and ev.get("strategy_id") == rule["match_id"]
+        if ev.get("source") != "strategy" or ev.get("strategy_id") != rule["match_id"]:
+            return False
+        # Strategy notifications include both entry and exit events. A rule's
+        # side must agree with the event, otherwise an exit can open a buy.
+        return ev.get("type") in (
+            {"buy_signal", "pool_entry"} if rule["side"] == "buy"
+            else {"sell_signal", "pool_exit"}
+        )
     return ev.get("rule_id") == rule["match_id"]
+
+
+def prepare_rule_events(events: list[dict], raw_prices: dict[str, float]) -> tuple[list[dict], list[dict]]:
+    """Keep batched notifications compact while giving paper orders raw-price symbols.
+
+    The private batch list is removed before notifications are stored or sent.
+    Missing raw prices fail closed for strategy orders; adjusted prices are not
+    valid order references.
+    """
+    public_events: list[dict] = []
+    paper_events: list[dict] = []
+    for event in events:
+        public = {key: value for key, value in event.items() if key != "_paper_items"}
+        public_events.append(public)
+        items = event.get("_paper_items")
+        if items:
+            for item in items:
+                symbol = item.get("symbol")
+                if symbol:
+                    paper_events.append({**public, "symbol": symbol, "price": raw_prices.get(symbol)})
+        elif event.get("source") == "strategy":
+            paper_events.append({**public, "price": raw_prices.get(event.get("symbol", ""))})
+        else:
+            paper_events.append(public)
+    return public_events, paper_events
 
 
 def _in_cooldown(data_dir: Path, rule: dict, symbol: str, cooldown_days: int, account_id: str) -> bool:
@@ -145,9 +181,15 @@ def _in_cooldown(data_dir: Path, rule: dict, symbol: str, cooldown_days: int, ac
     return False
 
 
-def _sizing_qty(data_dir: Path, rule: dict, ref_price: float, account_id: str) -> int:
+def _sizing_qty(data_dir: Path, rule: dict, symbol: str, ref_price: float, account_id: str) -> int:
     if ref_price <= 0:
         return 0
+    if rule["size_mode"] == "full_position":
+        position = paper.load_positions(data_dir, account_id).get(symbol)
+        if position is None:
+            return 0
+        available = paper._available_of(position, cn_now().date().isoformat())
+        return available // paper.LOT_SIZE * paper.LOT_SIZE
     if rule["size_mode"] == "fixed_amount":
         amount = float(rule["size_value"])
     else:  # pct_equity: 按账户总权益 (现金 + 最新定版持仓市值)
@@ -158,6 +200,24 @@ def _sizing_qty(data_dir: Path, rule: dict, ref_price: float, account_id: str) -
         equity = nav_rows[-1]["nav"] if nav_rows else float(acc["cash"])
         amount = equity * float(rule["size_value"]) / 100.0
     return paper.qty_from_amount(amount, ref_price)
+
+
+def _estimated_buy_cost(qty: int, price: float, account: dict) -> float:
+    slip = float(account["slippage_bps"]) / 10000
+    commission = float(account["commission_pct"])
+    return qty * price * (1 + slip) + paper.buy_fee(qty, price, commission)
+
+
+def _cash_after_pending_buys(data_dir: Path, account_id: str, account: dict) -> float:
+    reserved = 0.0
+    for order in paper.load_orders(data_dir, account_id):
+        if order.get("status") != "pending" or order.get("side") != "buy":
+            continue
+        ref = order.get("ref_price")
+        if not isinstance(ref, (int, float)) or not math.isfinite(ref) or ref <= 0:
+            return 0.0
+        reserved += _estimated_buy_cost(int(order["qty"]), float(ref), account)
+    return max(0.0, float(account["cash"]) - reserved)
 
 
 def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.DEFAULT_ACCOUNT_ID) -> list[dict]:
@@ -173,31 +233,44 @@ def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.D
     if not rules:
         return created
     with paper.PAPER_LOCK:
+        account = paper.get_account(data_dir, account_id)
+        if account is None:
+            return created
+        buy_cash = _cash_after_pending_buys(data_dir, account_id, account)
         for ev in events:
             symbol = (ev.get("symbol") or "").strip()
-            price = ev.get("price")
-            if not symbol or price is None or price <= 0:
+            try:
+                price = float(ev.get("price"))
+            except (TypeError, ValueError):
+                continue
+            if not symbol or not math.isfinite(price) or price <= 0:
                 continue
             for rule in rules:
                 if not _matches(rule, ev):
                     continue
                 if _in_cooldown(data_dir, rule, symbol, int(rule.get("cooldown_days", 0)), account_id):
                     continue
-                qty = _sizing_qty(data_dir, rule, float(price), account_id)
+                qty = _sizing_qty(data_dir, rule, symbol, price, account_id)
                 if qty <= 0:
                     logger.info("paper auto %s: %s 金额不足以一手 (价 %s)", rule["name"], symbol, price)
+                    continue
+                buy_cost = _estimated_buy_cost(qty, price, account) if rule["side"] == "buy" else 0.0
+                if rule["side"] == "buy" and buy_cost > buy_cash:
+                    logger.info("paper auto %s: 待成交买单已占用可用资金, 跳过 %s", rule["name"], symbol)
                     continue
                 order, err = paper.create_order(
                     data_dir, symbol, rule["side"],
                     account_id=account_id,
                     qty=qty,
                     order_type=rule["order_type"],
-                    ref_price=float(price),
+                    ref_price=price,
                     source=f"auto:{rule['id']}",
                 )
                 if err:
                     logger.info("paper auto %s: %s 下单被拒: %s", rule["name"], symbol, err)
                     continue
+                if rule["side"] == "buy":
+                    buy_cash -= buy_cost
                 created.append(order)
                 logger.info("paper auto %s: %s 触发 %s %d 股 (%s)", rule["name"], symbol, rule["side"], qty, order["id"])
     return created

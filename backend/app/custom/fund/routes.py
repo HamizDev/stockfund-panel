@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import AsyncIterable, AsyncIterator
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
@@ -24,6 +25,12 @@ _client: FuyaoFundClient | None = None
 
 _NAV_RANGES = {"week", "month", "tmonth", "hyear", "year", "twoyear", "tyear", "fyear"}
 _MAX_KLINE_DAYS = 5 * 365
+
+
+async def _ndjson_lines(chunks: AsyncIterable[str]) -> AsyncIterator[str]:
+    # Heartbeat chunks have no newline; separate them from the next JSON event.
+    async for chunk in chunks:
+        yield chunk if chunk.endswith("\n") else chunk + "\n"
 
 
 def _client_or_503() -> FuyaoFundClient:
@@ -299,7 +306,7 @@ def build_router() -> APIRouter:
                 return
             yield '{"type":"done"}\n'
 
-        return StreamingResponse(with_heartbeat(_gen()), media_type="application/x-ndjson")
+        return StreamingResponse(_ndjson_lines(with_heartbeat(_gen())), media_type="application/x-ndjson")
 
     @router.get("/watchlist")
     def watchlist() -> dict:
@@ -613,6 +620,6 @@ def build_router() -> APIRouter:
             ):
                 yield chunk + "\n"
 
-        return StreamingResponse(with_heartbeat(_gen()), media_type="application/x-ndjson")
+        return StreamingResponse(_ndjson_lines(with_heartbeat(_gen())), media_type="application/x-ndjson")
 
     return router

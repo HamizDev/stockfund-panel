@@ -39,14 +39,16 @@ def _write_daily(tmp_path, rows: list[tuple[date, float, float]]) -> None:
     repo.append_daily(df)
 
 
-def _write_factor(tmp_path, day: date, factor: float, asset_type: str = "stock") -> None:
+def _write_factor(tmp_path, day: date, factor: float, asset_type: str = "stock", *, share_factor: float | None = None) -> None:
     sub = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
     out = tmp_path / sub / "all.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame(
-        {"symbol": [SYM], "trade_date": [day], "ex_factor": [factor]},
-        schema={"symbol": pl.String, "trade_date": pl.Date, "ex_factor": pl.Float64},
-    ).write_parquet(out)
+    values = {"symbol": [SYM], "trade_date": [day], "ex_factor": [factor]}
+    schema = {"symbol": pl.String, "trade_date": pl.Date, "ex_factor": pl.Float64}
+    if share_factor is not None:
+        values["share_factor"] = [share_factor]
+        schema["share_factor"] = pl.Float64
+    pl.DataFrame(values, schema=schema).write_parquet(out)
 
 
 # ── 纯函数口径 ──────────────────────────────────────────
@@ -325,7 +327,7 @@ def test_corporate_action_adjusts_position_and_idempotent(tmp_path):
     paper.settle_day(tmp_path, (day - timedelta(days=1)).isoformat())
     assert paper.load_positions(tmp_path)[SYM]["qty"] == 1000
 
-    _write_factor(tmp_path, day, 1.25)
+    _write_factor(tmp_path, day, 1.25, share_factor=1.25)
     paper.settle_day(tmp_path, day.isoformat())
     pos = paper.load_positions(tmp_path)[SYM]
     assert pos["qty"] == pytest.approx(1250)
@@ -340,6 +342,20 @@ def test_corporate_action_adjusts_position_and_idempotent(tmp_path):
     assert paper.load_positions(tmp_path)[SYM]["qty"] == pytest.approx(1250)
     corp = [f for f in paper.load_fills(tmp_path) if f.get("kind") == "corp_action"]
     assert len(corp) == 1
+
+
+def test_price_adjustment_factor_does_not_create_paper_shares(tmp_path):
+    day = date(2026, 9, 24)
+    _cap_account(tmp_path)
+    _write_daily(tmp_path, [
+        (day - timedelta(days=1), 10.0, 10.0), (day, 9.8, 9.8),
+    ])
+    paper.create_order(tmp_path, SYM, "buy", qty=1000, order_type="close", ref_price=10.0)
+    paper.settle_day(tmp_path, (day - timedelta(days=1)).isoformat())
+    _write_factor(tmp_path, day, 1.02)  # 仅有价格复权。可能是现金分红
+    paper.settle_day(tmp_path, day.isoformat())
+    assert paper.load_positions(tmp_path)[SYM]["qty"] == 1000
+    assert not any(f.get("kind") == "corp_action" for f in paper.load_fills(tmp_path))
 
 
 def test_nav_and_overview_math(tmp_path, monkeypatch):
@@ -433,7 +449,7 @@ def test_auto_trigger_matches_strategy_event(tmp_path, monkeypatch):
     _cap_account(tmp_path)
     paper_auto.create_auto_rule(tmp_path, _auto_rule())
 
-    ev = {"source": "strategy", "strategy_id": "strat_1", "rule_id": "r1",
+    ev = {"source": "strategy", "type": "buy_signal", "strategy_id": "strat_1", "rule_id": "r1",
           "symbol": SYM, "price": 10.0}
     orders = paper_auto.on_rule_events(tmp_path, [ev])
     assert len(orders) == 1
@@ -456,16 +472,96 @@ def test_auto_trigger_matches_strategy_event(tmp_path, monkeypatch):
     assert len(orders2) == 1
 
 
+def test_auto_strategy_rules_follow_signal_direction():
+    from app.strategy import paper_auto
+    buy = _auto_rule(side="buy")
+    sell = _auto_rule(side="sell")
+    event = {"source": "strategy", "strategy_id": "strat_1"}
+    for event_type in ("buy_signal", "pool_entry"):
+        assert paper_auto._matches(buy, {**event, "type": event_type})
+        assert not paper_auto._matches(sell, {**event, "type": event_type})
+    for event_type in ("sell_signal", "pool_exit"):
+        assert paper_auto._matches(sell, {**event, "type": event_type})
+        assert not paper_auto._matches(buy, {**event, "type": event_type})
+    assert not paper_auto._matches(buy, event)
+
+
+def test_paper_auto_expands_batch_with_raw_prices_without_leaking_items():
+    from app.strategy import paper_auto
+
+    event = {
+        "source": "strategy", "type": "buy_signal", "strategy_id": "demo",
+        "symbol": "", "price": None,
+        "_paper_items": [{"symbol": "A"}, {"symbol": "B"}],
+    }
+    public, auto = paper_auto.prepare_rule_events([event], {"A": 10.5})
+    assert public == [{key: value for key, value in event.items() if key != "_paper_items"}]
+    assert [(item["symbol"], item["price"]) for item in auto] == [("A", 10.5), ("B", None)]
+    assert "_paper_items" not in auto[0]
+
+
+def test_auto_buy_reserves_cash_for_existing_pending_orders(tmp_path):
+    from app.strategy import paper_auto
+
+    _cap_account(tmp_path, cash=100_000)
+    paper_auto.create_auto_rule(tmp_path, _auto_rule(size_value=60_000))
+    events = [
+        {"source": "strategy", "type": "buy_signal", "strategy_id": "strat_1",
+         "symbol": symbol, "price": 10.0}
+        for symbol in ("600519.SH", "000001.SZ")
+    ]
+    orders = paper_auto.on_rule_events(tmp_path, events)
+    assert len(orders) == 1
+    assert orders[0]["symbol"] == "600519.SH"
+
+
+def test_auto_skips_nonfinite_price_without_losing_next_event(tmp_path):
+    from app.strategy import paper_auto
+
+    _cap_account(tmp_path, cash=100_000)
+    paper_auto.create_auto_rule(tmp_path, _auto_rule())
+    base = {"source": "strategy", "type": "buy_signal", "strategy_id": "strat_1"}
+    events = [
+        {**base, "symbol": "600519.SH", "price": float("nan")},
+        {**base, "symbol": "000001.SZ", "price": 10.0},
+    ]
+    orders = paper_auto.on_rule_events(tmp_path, events)
+    assert [order["symbol"] for order in orders] == ["000001.SZ"]
+
+
+def test_auto_strategy_exit_sells_available_position(tmp_path, monkeypatch):
+    from app.strategy import paper_auto
+    day = date(2026, 9, 24)
+    monkeypatch.setattr(paper, "cn_today", lambda: day)
+    _write_daily(tmp_path, [(day - timedelta(days=1), 10.0, 10.0)])
+    _cap_account(tmp_path)
+    buy, err = paper.create_order(tmp_path, SYM, "buy", qty=500, ref_price=10.0)
+    assert err is None and buy is not None
+    assert len(paper.evaluate_intraday(tmp_path, {SYM: 10.0})) == 1
+    next_day = day + timedelta(days=1)
+    monkeypatch.setattr(paper, "cn_today", lambda: next_day)
+    monkeypatch.setattr(paper_auto, "cn_now", lambda: datetime.combine(next_day, time(10), CN_TZ))
+    paper_auto.create_auto_rule(tmp_path, _auto_rule(
+        side="sell", size_mode="full_position", size_value=1, cooldown_days=0,
+    ))
+    orders = paper_auto.on_rule_events(tmp_path, [{
+        "source": "strategy", "type": "sell_signal", "strategy_id": "strat_1",
+        "symbol": SYM, "price": 10.0,
+    }])
+    assert len(orders) == 1
+    assert orders[0]["side"] == "sell" and orders[0]["qty"] == 500
+
+
 def test_auto_trigger_non_matching_events_ignored(tmp_path):
     from app.strategy import paper_auto
     _cap_account(tmp_path)
     paper_auto.create_auto_rule(tmp_path, _auto_rule())
     # strategy_id 不匹配
-    ev1 = {"source": "strategy", "strategy_id": "other", "symbol": SYM, "price": 10.0}
+    ev1 = {"source": "strategy", "type": "buy_signal", "strategy_id": "other", "symbol": SYM, "price": 10.0}
     # 无 symbol (批量事件)
-    ev2 = {"source": "strategy", "strategy_id": "strat_1", "symbol": "", "price": 10.0}
+    ev2 = {"source": "strategy", "type": "buy_signal", "strategy_id": "strat_1", "symbol": "", "price": 10.0}
     # 无价格
-    ev3 = {"source": "strategy", "strategy_id": "strat_1", "symbol": SYM}
+    ev3 = {"source": "strategy", "type": "buy_signal", "strategy_id": "strat_1", "symbol": SYM}
     assert paper_auto.on_rule_events(tmp_path, [ev1, ev2, ev3]) == []
 
 
@@ -473,7 +569,7 @@ def test_auto_rule_disabled_not_triggered(tmp_path):
     from app.strategy import paper_auto
     _cap_account(tmp_path)
     rule = paper_auto.create_auto_rule(tmp_path, _auto_rule(enabled=False))
-    ev = {"source": "strategy", "strategy_id": "strat_1", "symbol": SYM, "price": 10.0}
+    ev = {"source": "strategy", "type": "buy_signal", "strategy_id": "strat_1", "symbol": SYM, "price": 10.0}
     assert paper_auto.on_rule_events(tmp_path, [ev]) == []
     paper_auto.set_enabled(tmp_path, rule["id"], True)
     assert len(paper_auto.on_rule_events(tmp_path, [ev])) == 1
@@ -485,7 +581,7 @@ def test_auto_frozen_account_rejects(tmp_path, monkeypatch):
     acc["status"] = "frozen"
     paper.save_account(tmp_path, acc)
     paper_auto.create_auto_rule(tmp_path, _auto_rule())
-    ev = {"source": "strategy", "strategy_id": "strat_1", "symbol": SYM, "price": 10.0}
+    ev = {"source": "strategy", "type": "buy_signal", "strategy_id": "strat_1", "symbol": SYM, "price": 10.0}
     assert paper_auto.on_rule_events(tmp_path, [ev]) == []
 
 

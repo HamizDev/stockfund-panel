@@ -836,6 +836,66 @@ function AccountCompareModal({ onClose }: { onClose: () => void }) {
   )
 }
 
+function StrategyAccountsPanel({ onSelect }: { onSelect: (accountId: string) => void }) {
+  const qc = useQueryClient()
+  const compareQ = useQuery({ queryKey: QK.paperCompare, queryFn: api.paperCompare })
+  const strategiesQ = useQuery({
+    queryKey: QK.screenerStrategies('any', 'all'),
+    queryFn: () => api.screenerStrategies(undefined, 'all'),
+    staleTime: 60_000,
+  })
+  const [creating, setCreating] = useState(false)
+  const [strategyId, setStrategyId] = useState('')
+  const [cash, setCash] = useState('200000')
+  const [entryPct, setEntryPct] = useState('10')
+  const [error, setError] = useState('')
+  const rows = (compareQ.data?.accounts ?? [])
+    .filter(row => row.strategy_id)
+    .sort((a, b) => (b.pnl_pct ?? -Infinity) - (a.pnl_pct ?? -Infinity))
+  const options = (strategiesQ.data?.presets ?? []).filter(strategy =>
+    !strategy.research_only && strategy.timeframes.includes('1d') &&
+    /^mr_strategy_[a-z0-9_]{1,28}$/.test(`mr_strategy_${strategy.id}`) &&
+    strategy.asset_types.some(asset => asset === 'stock' || asset === 'etf') &&
+    !rows.some(row => row.strategy_id === strategy.id))
+  const createM = useMutation({
+    mutationFn: () => api.paperCreateStrategyAccount({
+      strategy_id: strategyId,
+      initial_cash: Number(cash),
+      entry_pct: Number(entryPct),
+    }),
+    onSuccess: result => {
+      qc.invalidateQueries({ queryKey: QK.paperAll })
+      setCreating(false)
+      setError('')
+      onSelect(result.account.id)
+    },
+    onError: cause => setError(cause instanceof Error ? cause.message : '创建策略模拟仓失败'),
+  })
+  const autoM = useMutation({
+    mutationFn: ({ account, enabled }: { account: string; enabled: boolean }) => api.paperSetStrategyAccountEnabled(account, enabled),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: QK.paperCompare }); setError('') },
+    onError: cause => setError(cause instanceof Error ? cause.message : '切换自动跟单失败'),
+  })
+  const valid = strategyId && Number(cash) > 0 && Number(entryPct) > 0 && Number(entryPct) <= 100
+
+  return <section className="mb-4 rounded-card border border-border bg-surface p-4">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div><h2 className="text-sm font-semibold">策略模拟仓</h2><p className="mt-1 text-[11px] text-muted">每个策略使用独立虚拟账户；收益、胜率和净值仅按该账户实际成交计算。</p></div>
+      <button onClick={() => setCreating(value => !value)} className="inline-flex items-center gap-1 rounded-btn border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs text-accent"><Plus className="h-3.5 w-3.5" />新建策略仓</button>
+    </div>
+    {creating && <div className="mt-3 grid gap-2 rounded-btn border border-border bg-base/40 p-3 md:grid-cols-[minmax(0,1fr)_120px_110px_auto]">
+      <label className="space-y-1 text-[11px] text-muted">策略<select aria-label="模拟仓策略" value={strategyId} onChange={event => setStrategyId(event.target.value)} className="h-9 w-full rounded-btn border border-border bg-base px-2 text-xs text-foreground"><option value="">选择策略</option>{options.map(strategy => <option key={strategy.id} value={strategy.id}>{strategy.name} · {strategy.id}</option>)}</select></label>
+      <label className="space-y-1 text-[11px] text-muted">初始资金（元）<input aria-label="初始资金" type="number" min="1" value={cash} onChange={event => setCash(event.target.value)} className="h-9 w-full rounded-btn border border-border bg-base px-2 text-xs text-foreground" /></label>
+      <label className="space-y-1 text-[11px] text-muted">每笔买入权益 %<input aria-label="每笔买入权益百分比" type="number" min="1" max="100" value={entryPct} onChange={event => setEntryPct(event.target.value)} className="h-9 w-full rounded-btn border border-border bg-base px-2 text-xs text-foreground" /></label>
+      <button onClick={() => createM.mutate()} disabled={!valid || createM.isPending} className="self-end rounded-btn bg-accent px-3 py-2 text-xs font-medium text-white disabled:opacity-40">{createM.isPending ? '创建中…' : '创建并监控'}</button>
+    </div>}
+    {error && <div role="alert" className="mt-2 text-xs text-danger">{error}</div>}
+    <p className="mt-2 text-[11px] leading-5 text-muted">买入信号按下一交易日开盘模拟下单；卖出信号仅对已有持仓下单。暂停只阻止新信号下单，已有待成交订单仍按原规则处理。策略监控、行情和撮合均需正常运行。</p>
+    {compareQ.isLoading ? <div className="py-5 text-center text-xs text-muted">正在读取策略账本…</div> : rows.length === 0 ? <div className="py-5 text-center text-xs text-muted">暂无策略模拟仓。现有手动账户仍可在上方切换。</div> :
+      <div className="mt-3 overflow-x-auto"><table className="w-full min-w-[850px] text-xs"><thead><tr className="border-b border-border text-left text-[11px] text-muted"><th className="py-2 font-normal">策略 / 独立账户</th><th className="text-right font-normal">累计收益</th><th className="text-right font-normal">胜率</th><th className="text-right font-normal">回合</th><th className="text-right font-normal">当前权益</th><th className="text-right font-normal">最大回撤</th><th className="text-right font-normal">自动跟单</th><th className="text-right font-normal">操作</th></tr></thead><tbody>{rows.map(row => <tr key={row.account} className="border-b border-border/50 last:border-0 hover:bg-elevated/30"><td className="py-2"><div className="font-medium text-foreground">{row.name}</div><div className="font-mono text-[10px] text-muted">{row.strategy_id}</div></td><td className={cn('text-right font-mono', priceColorClass((row.pnl_pct ?? 0) / 100))}>{row.pnl_pct == null ? '—' : `${row.pnl_pct > 0 ? '+' : ''}${row.pnl_pct.toFixed(2)}%`}</td><td className="text-right font-mono">{row.rounds ? `${row.win_rate.toFixed(1)}%` : '—'}</td><td className="text-right font-mono">{row.rounds}</td><td className="text-right font-mono">¥{fmtMoney(row.total)}</td><td className="text-right font-mono">{row.max_drawdown == null ? '—' : `-${row.max_drawdown.toFixed(2)}%`}</td><td className="text-right"><button onClick={() => autoM.mutate({ account: row.account, enabled: !row.auto_enabled })} disabled={autoM.isPending} className={cn('rounded-btn px-2 py-1 disabled:opacity-40', row.auto_enabled ? 'bg-accent/10 text-accent' : 'bg-elevated text-muted')}>{row.auto_enabled ? '已启用 · 暂停' : '已暂停 · 启用'}</button></td><td className="text-right"><button onClick={() => onSelect(row.account)} className="rounded-btn border border-border px-2 py-1 text-accent hover:border-accent/40">查看账户</button></td></tr>)}</tbody></table></div>}
+  </section>
+}
+
 function AutoRulesPanel({ acc }: { acc: string }) {
   const qc = useQueryClient()
   const rulesQ = useQuery({ queryKey: QK.paperAutoRules(acc), queryFn: () => api.paperAutoRules(acc) })
@@ -1127,6 +1187,7 @@ export function Paper() {
           ) : undefined}
         />
         <div className="flex-1 overflow-y-auto">
+          <div className="px-5 pt-5"><StrategyAccountsPanel onSelect={createdId => { setDraftId(null); setAccId(createdId) }} /></div>
           <SetupCard
             accId={draftId ?? accId}
             onDone={createdId => {
@@ -1236,6 +1297,7 @@ export function Paper() {
         }
       />
       <div className="min-h-0 flex-1 overflow-y-auto p-5">
+        <StrategyAccountsPanel onSelect={setAccId} />
         {/* 总览卡片 */}
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <StatCard label="总资产 (虚拟)" value={fmtMoney(ov.total)} icon={Wallet} iconCls="text-accent" />
@@ -1407,7 +1469,7 @@ export function Paper() {
               <div className="mt-1">· 即时单: 交易时段按最新快照价 + 滑点成交</div>
               <div>· 次日开盘 / 当日收盘单: 盘后管道按真实开盘/收盘价成交</div>
               <div>· T+1: 当日买入次一交易日可卖</div>
-              <div>· 停牌顺延 3 日自动过期; 除权按因子调整数量与成本, 台账留痕</div>
+              <div>· 停牌顺延 3 日自动过期；仅有独立送转股数因子时调整股数与成本</div>
               <div className="mt-2 flex items-center justify-between border-t border-border/40 pt-2">
                 <span title="开启后, 触及涨停的买入/触及跌停的卖出不再直接过期, 转次日开盘重试 (最多顺延 3 日)">
                   涨跌停排队次日重试

@@ -282,7 +282,8 @@ def _em_industry_rank(limit: int = 5) -> dict:
         try:
             vals = line.split('"')[1].split("~")
             name = vals[1].replace("指数", "")
-            pct = float(vals[32] or 0)
+            # 腾讯返回百分点 (如 0.93 表示 0.93%); 看板统一用小数比例。
+            pct = float(vals[32] or 0) / 100
             amount = float(vals[37] or 0)
             if not name or "none_match" in name:
                 continue
@@ -588,7 +589,7 @@ def build_market_overview(
 
     concept_rank = _dimension_rank(rows, repo, "concept")
     industry_rank = _dimension_rank(rows, repo, "industry", level=2)
-    # 行业热度无扩展数据源时, 用东方财富免费行业板块兜底
+    # 行业成分数据缺失时, 用腾讯行业指数作明确标注的降级展示。
     if not industry_rank.get("leading") and not industry_rank.get("lagging"):
         industry_rank = _em_industry_rank()
 
