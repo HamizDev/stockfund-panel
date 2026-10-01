@@ -606,7 +606,22 @@ def _get_factor_values(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
     return {"factor": factor, "as_of": _clean_value(as_of), "count": len(rows), "rows": rows}
 
 
+def _get_fund_research(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    """Reuse the fund center's credential-free dated disclosure adapter."""
+    from app.custom.fund import service as fund_service
+
+    thscode = str(args.get("thscode") or "").strip().upper()
+    if not re.fullmatch(r"\d{6}(?:\.OF)?", thscode):
+        raise ValueError("场外基金代码须为六位数字或六位数字.OF")
+    horizon = str(args.get("horizon") or "1y")
+    if horizon not in {"1m", "3m", "6m", "1y", "2y", "3y"}:
+        raise ValueError("基金研究区间无效")
+    normalized = thscode if thscode.endswith(".OF") else thscode + ".OF"
+    return fund_service.research_model_context(fund_service.fund_research(normalized, horizon)) or {}
+
+
 _LOCAL_TOOLS: dict[str, Callable[[dict[str, Any], ToolContext], Any]] = {
+    "get_fund_research": _get_fund_research,
     "get_stock_quote": _get_stock_quote,
     "get_stock_daily": _get_stock_daily,
     "get_stock_analysis": _get_stock_analysis,
@@ -641,6 +656,15 @@ def _schema(name: str, description: str, properties: dict[str, Any], required: l
 
 def _local_tool_schemas() -> list[dict[str, Any]]:
     return [
+        _schema(
+            "get_fund_research",
+            "查询场外基金公开费率条件、区间观测回撤、报告期持仓及净值/报告日期。复用基金中心免费数据; 并非实时完整持仓, 缺失资料明确返回。",
+            {
+                "thscode": {"type": "string", "description": "六位基金代码, 例如 011370.OF; ETF 请使用证券行情工具"},
+                "horizon": {"type": "string", "enum": ["1m", "3m", "6m", "1y", "2y", "3y"]},
+            },
+            ["thscode"],
+        ),
         _schema(
             "get_stock_quote",
             "查询一只或多只股票(≤50)的实时行情快照: 最新价、涨跌幅、成交额、换手率、振幅等。",
@@ -809,6 +833,8 @@ def summarize_tool_result(name: str, payload: dict[str, Any]) -> str:
             f"回撤 {stats.get('max_drawdown', '-')}",
             f"夏普 {stats.get('sharpe', '-')}",
         ))
+    if name == "get_fund_research":
+        return f"基金 {result.get('thscode', '')} · 净值日期 {result.get('nav_date') or '未提供'} · 缺失 {len(result.get('missing_fields') or [])} 项"
     if name == "get_stock_quote":
         return f"查询 {_count()} 只个股实时行情"
     if name == "get_stock_daily":

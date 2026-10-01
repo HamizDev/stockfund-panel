@@ -64,9 +64,11 @@ function saveWidth(width: number) {
 }
 
 function clampWidth(width: number): number {
-  // 右缘贴齐, 至少给页面主体留 64px 上下文。
-  const maxWidth = Math.max(MIN_WIDTH, window.innerWidth - 64)
-  return Math.min(Math.max(width, MIN_WIDTH), maxWidth)
+  // 窄屏占满视口; 桌面给页面主体保留 64px 上下文。
+  const maxWidth = window.innerWidth < MIN_WIDTH + 64
+    ? window.innerWidth
+    : window.innerWidth - 64
+  return Math.min(Math.max(width, Math.min(MIN_WIDTH, maxWidth)), maxWidth)
 }
 
 export function AssistantDrawer() {
@@ -359,7 +361,7 @@ function EmptyState({ status, suggests }: { status: AssistantStatus | null; sugg
           <Settings2 className="h-4 w-4" />
           AI 未配置
         </div>
-        <p className="mt-1.5 text-secondary">AI 助手需要先配置 AI 供应商和 API Key 才能对话。</p>
+        <p className="mt-1.5 text-secondary">先配置模型，可使用 API Key 或已登录的本机 Codex。</p>
         <button
           type="button"
           onClick={() => navigate('/settings?tab=ai')}

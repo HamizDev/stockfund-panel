@@ -362,15 +362,18 @@ export const fundApi = {
   async *analyzeStream(
     thscode: string,
     focus?: string,
+    signal?: AbortSignal,
   ): AsyncGenerator<{
     type: 'meta' | 'delta' | 'error' | 'done' | 'ping'
     symbol?: string
     summary?: string
     stats?: Record<string, number | null>
+    nav_date?: string | null
+    holdings_report_date?: string | null
     content?: string
     message?: string
   }> {
-    yield* streamFundEvents('/analyze', { thscode, focus: focus ?? '' })
+    yield* streamFundEvents('/analyze', { thscode, focus: focus ?? '' }, signal)
   },
   /** AI 对基金榜单候选进行研究排序，不自动执行交易。 */
   async *aiPickStream(

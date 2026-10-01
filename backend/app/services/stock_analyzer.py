@@ -196,6 +196,26 @@ _SYSTEM_PROMPT = """你是一位拥有 15 年 A 股一线研究经验的技术�
 # 用户消息构建
 # ================================================================
 
+_RESEARCH_PLAN_PROMPT = """你是 stockfund-panel 的证券研究助手。
+只使用输入中的行情、关键价位和财务数据, 写一份简洁的 Markdown 研究报告。
+每个判断引用数据日期与依据; 数据不足时列出待核对项, 不编造数字或消息。
+报告结构:
+## 研究结论: 用「等待确认 / 满足观察条件 / 条件失效」说明技术状态, 不打虚构分数。
+## 依据与风险: 趋势、量价、实际提供的支撑/压力、财务(ETF 不套用公司财务)。
+## 条件买入计划: 表格列出“阶段 | 必须满足的条件 | 研究动作 | 失效条件”。
+阶段包括观察、首批、后续批次; 可描述等待收盘确认、回踩/突破、成交量验证等,
+只用实际提供的指标/价位, 没有依据则写“暂无法定价”, 不可任意生成目标价格。
+## 停止加仓与退出条件: 说明什么变化使假设失效、哪些数据仍需补充。
+## 下单前核对: 行情时点、复权口径、手续费、买卖单位、资金和风险预算。
+输入日K及计算价位是历史研究数据, 可能为前复权, 不能视为实时可成交报价;
+不能把复权支撑直接当真实限价, 需核对最新不复权报价、最新公司行为及价差。
+无个人预算或可承受损失时不编造金额、仓位比例、止损比例或预期收益; 分批描述
+是待用户设定预算后的条件步骤。涨跌停、停牌、滑点可能使计划无法成交。
+股票不能假定当日买入可当日卖出。ETF 必须核对具体品种的交易规则, 不能全部
+按 T+0; 还要核对跟踪指数、费率、流动性、折溢价, 缺失这些输入时明确标注。
+本报告不会下单或启用自动交易, 不保证盈利。结尾一句标注“条件研究计划, 供核对”。
+"""
+
 def _paper_position_part(positions: list[dict], close: float | None, raw_close: float | None) -> str:
     """虚拟持仓上下文 (V3): 模拟盘持有该标的时注入提示词, 让 AI 结合仓位给建议。
 
@@ -321,6 +341,8 @@ async def analyze_stock_stream(
     data_dir: Path,
     symbol: str,
     focus: str = "",
+    *,
+    research_plan: bool = False,
 ) -> AsyncIterator[str]:
     """流式个股分析:yield 出每个 NDJSON 事件。
 
@@ -354,6 +376,7 @@ async def analyze_stock_stream(
         "summary": summarize_levels(levels, close),
         "levels": levels,
         "close": close,
+        "as_of": str(df.tail(1)["date"][0]) if "date" in df.columns else None,
     }, ensure_ascii=False)
 
     # 5+6. 构建提示词 + 流式调用 LLM(整体 try-except,任何异常都 yield error,避免前端卡死)
@@ -365,7 +388,8 @@ async def analyze_stock_stream(
         paper_positions: list[dict] = []
         try:
             from app.strategy import paper as paper_trading
-            for acc_id in paper_trading.list_account_ids(data_dir):
+            # Screener plans need market evidence, not personal account data.
+            for acc_id in ([] if research_plan else paper_trading.list_account_ids(data_dir)):
                 pos = paper_trading.load_positions(data_dir, account_id=acc_id).get(symbol)
                 if pos and (pos.get("qty") or 0) > 0:
                     paper_positions.append({"account_id": acc_id, **pos})
@@ -381,7 +405,7 @@ async def analyze_stock_stream(
         got_content = False
         async for delta in stream_ai_text(
             [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": _RESEARCH_PLAN_PROMPT if research_plan else _SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.5,

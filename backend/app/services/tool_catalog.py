@@ -40,6 +40,7 @@ _BACKTEST_STATS_KEYS: frozenset[str] = frozenset({
 
 # 回测默认窗口 (对齐 api/backtest.py 的 FACTOR_DEFAULT_DAYS, 受控窗口防超大区间)
 _DEFAULT_BACKTEST_DAYS = 180
+_MAX_BACKTEST_DAYS = 366
 
 
 def _function_schema(name: str, description: str, parameters: dict[str, Any]) -> dict[str, Any]:
@@ -114,11 +115,11 @@ def build_tool_schemas() -> list[dict[str, Any]]:
                     },
                     "start": {
                         "type": "string",
-                        "description": "开始日期 YYYY-MM-DD; 缺省=最近 180 天",
+                        "description": "开始日期 YYYY-MM-DD; 缺省=最近 180 天; 开始日不得晚于结束日, 日期范围最多 366 天",
                     },
                     "end": {
                         "type": "string",
-                        "description": "结束日期 YYYY-MM-DD; 缺省=今天",
+                        "description": "结束日期 YYYY-MM-DD; 缺省=今天 (北京时间); 不得晚于今天, 日期范围最多 366 天",
                     },
                     "asset_type": {
                         "type": "string",
@@ -209,15 +210,23 @@ def run_backtest(
     同步阻塞 (spawn 子进程), 由 execute_tool 用 asyncio.to_thread 调用。
     返回 {"strategy_id", "start", "end", "stats": 精简白名单键}。
     """
-    from app.backtest.strategy import StrategyBacktestConfig
-    from app.backtest.worker import make_worker_task, run_worker_task
-    from app.services.heavy_job_limiter import shared_heavy_job_limiter
-
     # 缺省结束日用北京日期; 服务器本地 date.today() 会在 UTC/美西主机少取一天。
-    end_date = date.fromisoformat(end) if end else cn_today()
+    today = cn_today()
+    end_date = date.fromisoformat(end) if end else today
     start_date = (
         date.fromisoformat(start) if start else end_date - timedelta(days=_DEFAULT_BACKTEST_DAYS)
     )
+    if start_date > end_date:
+        raise ValueError("回测开始日期不能晚于结束日期")
+    if end_date > today:
+        raise ValueError("回测结束日期不能晚于今天 (北京时间)")
+    if (end_date - start_date).days > _MAX_BACKTEST_DAYS:
+        raise ValueError(f"回测日期范围不能超过 {_MAX_BACKTEST_DAYS} 天")
+
+    # 日期边界通过后才加载/创建回测任务, 并进入共享重任务限流。
+    from app.backtest.strategy import StrategyBacktestConfig
+    from app.backtest.worker import make_worker_task, run_worker_task
+    from app.services.heavy_job_limiter import shared_heavy_job_limiter
 
     cfg = StrategyBacktestConfig(
         strategy_id=strategy_id,

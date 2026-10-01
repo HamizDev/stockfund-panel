@@ -1087,6 +1087,18 @@ def _write_compatible_codex_config(path: Path) -> None:
 
     lines.append(_toml_string("approval_policy", "never"))
     lines.append(_toml_string("sandbox_mode", "read-only"))
+    # Text-only transport: do not expose CLI filesystem, command, browser,
+    # connector or agent tools. App tools are separately checked/dispatched.
+    # This affects this disposable CODEX_HOME only, never the user's config.
+    lines.append(_toml_string("web_search", "disabled"))
+    lines.extend(["", "[tools]", "view_image = false", "", "[features]"])
+    for feature in (
+        "shell_tool", "unified_exec", "shell_snapshot", "view_image",
+        "apps", "plugins", "browser_use", "computer_use", "code_mode",
+        "code_mode_host", "multi_agent", "multi_agent_v2", "memories",
+        "hooks", "skill_search", "tool_suggest", "workspace_dependencies",
+    ):
+        lines.append(f"{feature} = false")
 
     if active_provider:
         provider_name, provider = active_provider

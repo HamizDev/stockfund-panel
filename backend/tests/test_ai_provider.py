@@ -690,3 +690,22 @@ async def test_codex_exec_args_exclude_ephemeral(monkeypatch):
     assert "--ephemeral" not in args
     assert "exec" in args and "--skip-git-repo-check" in args
     assert args[args.index("--model") + 1] == "gpt-5.6-sol"
+
+
+def test_disposable_codex_config_disables_native_data_access_tools(monkeypatch, tmp_path):
+    import tomllib
+
+    monkeypatch.setattr(ai_provider, "_read_codex_config", lambda: {
+        "features": {"shell_tool": True}, "mcp_servers": {"private": {}},
+    })
+    monkeypatch.setattr(ai_provider, "current_ai_model", lambda: "gpt-6.1-sol")
+    monkeypatch.setattr(ai_provider, "current_codex_reasoning_effort", lambda: "xhigh")
+    target = tmp_path / "config.toml"
+    ai_provider._write_compatible_codex_config(target)
+    cfg = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert "mcp_servers" not in cfg
+    assert cfg["web_search"] == "disabled"
+    assert cfg["tools"]["view_image"] is False
+    for name in ("shell_tool", "unified_exec", "view_image", "apps", "plugins", "browser_use",
+                 "computer_use", "code_mode_host", "multi_agent", "multi_agent_v2", "hooks", "memories"):
+        assert cfg["features"][name] is False

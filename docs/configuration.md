@@ -33,6 +33,8 @@ TickFlow 是内置默认数据源;同时支持插件化接入第三方数据源(
 
 ### 全量分钟 (full_minute)
 
+免费逐标的分钟接口不等于全市场分钟数据；来源范围、历史窗口和校验要求见 [免费分钟数据说明](./free-minute-data.md)。
+
 「全量分钟」是一项**独立能力**(能力键 `full_minute`,探测名 `intraday.universe`),与其他能力同样**可路由**:盘中把全市场当日 1 分钟 K 持续增量落盘到本地 `data/kline_minute/` 当日分区,分钟策略(`minute_filter`)与分时视图即可读到新鲜数据。接入方式二选一:
 
 - **TickFlow Expert**:配置 Expert 档 Key,零配置即用(修复轮 `intraday.batch` + 稳态 `intraday.universe` 单请求增量)

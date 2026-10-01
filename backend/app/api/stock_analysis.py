@@ -151,6 +151,7 @@ class AnalyzeRequest(BaseModel):
     """AI 个股分析请求。"""
     symbol: str
     focus: str = ""  # 可选:用户追加的分析关注点
+    research_plan: bool = False  # 选股页的条件研究计划; 不执行任何交易
 
 
 @router.post("/analyze")
@@ -167,7 +168,11 @@ async def analyze_stock(request: Request, req: AnalyzeRequest):
     data_dir = repo.store.data_dir
 
     async def stream_gen():
-        async for chunk in with_heartbeat(analyze_stock_stream(repo, data_dir, req.symbol, req.focus)):
+        stream = (
+            analyze_stock_stream(repo, data_dir, req.symbol, req.focus, research_plan=True)
+            if req.research_plan else analyze_stock_stream(repo, data_dir, req.symbol, req.focus)
+        )
+        async for chunk in with_heartbeat(stream):
             yield chunk + "\n"
 
     return StreamingResponse(

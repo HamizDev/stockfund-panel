@@ -5,8 +5,8 @@ tools= 调用模型, 文本 delta 逐段推给前端; 模型请求工具时执�
 进入下一轮, 正文继续在同一个占位消息上追加。生成任务与事件消费通过
 asyncio.Queue 并行 — 用户在模型思考/取数期间就能看到足迹事件。
 
-失败语义 fail-closed: 无 Key / Codex CLI(无 tools 协议)在入口直接给
-error 事件, 不做纯文本降级; 工具执行错误按既有契约回填给模型继续。
+Codex CLI 通过 codex_round 的严格 JSON 决策桥接同一只读工具循环;
+无配置或不合法决策 fail-closed, 工具错误按既有契约回填给模型。
 """
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from app.custom.assistant import tools as assistant_tools
+from app.custom.assistant.codex_round import stream_codex_round
 from app.custom.assistant.prompt import build_system_prompt
 from app.custom.assistant.streaming import stream_openai_round
 from app.services.ai_provider import (
@@ -125,20 +126,13 @@ async def chat_stream(
     if not ai_configured():
         yield _line(_error_event(
             "no_key",
-            "AI 未配置: 请先在设置页配置 AI 供应商和 API Key。",
+            "AI 未配置: 请先在设置页配置模型, 使用 API Key 或本机 Codex 登录。",
             _SETTINGS_HINT,
         ))
         yield _line({"type": "done"})
         return
 
-    if is_codex_cli_provider():
-        yield _line(_error_event(
-            "provider",
-            "当前 AI 供应商(Codex CLI)不支持工具调用, AI 助手需要 OpenAI 兼容模型。",
-            _SETTINGS_HINT,
-        ))
-        yield _line({"type": "done"})
-        return
+    codex = is_codex_cli_provider()
 
     truncated, was_truncated = _truncate_history(history)
     if not truncated:
@@ -148,6 +142,8 @@ async def chat_stream(
 
     if was_truncated:
         yield _line({"type": "notice", "message": f"对话较长, 已仅保留最近 {_MAX_HISTORY_MESSAGES // 2} 轮作为上下文。"})
+    if codex:
+        yield _line({"type": "notice", "message": "本次使用 Codex 分析; 所需数据由看板只读工具查询, 每轮完成后显示回答。"})
 
     req_messages: list[dict[str, Any]] = [
         {"role": "system", "content": build_system_prompt(context)},
@@ -200,7 +196,8 @@ async def chat_stream(
             while True:
                 round_text: list[str] = []
                 tool_calls: list[dict[str, Any]] = []
-                async for event in stream_openai_round(req_messages, schemas, temperature=0.3, timeout=240.0):
+                round_stream = stream_codex_round if codex else stream_openai_round
+                async for event in round_stream(req_messages, schemas, temperature=0.3, timeout=240.0):
                     if event["type"] == "text":
                         round_text.append(event["delta"])
                         await queue.put({"type": "delta", "content": event["delta"]})

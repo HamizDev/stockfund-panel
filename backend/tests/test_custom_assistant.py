@@ -1,6 +1,6 @@
 """AI 对话助手扩展契约测试。
 
-覆盖: 扩展经 loader 自动注册路由、门控 fail-closed(无 Key / Codex CLI)、
+覆盖: 扩展经 loader 自动注册路由、无配置 fail-closed、Codex 工具桥接、
 SSE 流式工具循环的事件顺序与逐字 delta、历史截断、本地工具执行与
 摘要白名单、HTTP 流式端点行为。
 """
@@ -90,16 +90,34 @@ async def test_chat_stream_fails_closed_without_key(monkeypatch: pytest.MonkeyPa
     assert events[-1]["type"] == "done"
 
 
-async def test_chat_stream_fails_closed_for_codex_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_chat_stream_uses_codex_read_only_tool_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(chat_service, "ai_configured", lambda: True)
     monkeypatch.setattr(chat_service, "is_codex_cli_provider", lambda provider=None: True)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(chat_service, "stream_codex_round", _stream_script([
+        {"tool_calls": [{"name": "list_strategies", "arguments": "{}"}]},
+        {"text_pieces": ["你有 2 个策略。"]},
+    ], captured))
     events = await _collect(await _drain(chat_service.chat_stream(
-        history=[{"role": "user", "content": "hi"}],
+        history=[{"role": "user", "content": "我的策略?"}], engine=_StubEngine(),
     )))
-
-    assert events[0]["type"] == "error"
-    assert events[0]["kind"] == "provider"
+    assert [e["type"] for e in events] == ["notice", "tool_call", "tool_result", "delta", "done"]
+    assert events[2]["ok"] is True
+    messages = captured["messages"][1]
+    assert messages[-1]["role"] == "tool"
+    assert messages[-1]["tool_call_id"] == messages[-2]["tool_calls"][0]["id"]
+    assert "demo_a" in messages[-1]["content"]
     assert events[-1]["type"] == "done"
+
+
+def test_status_allows_configured_codex(monkeypatch):
+    from app.custom.assistant import routes
+
+    monkeypatch.setattr(routes, "ai_configured", lambda: True)
+    monkeypatch.setattr(routes, "current_ai_provider", lambda: "codex_cli")
+    app = FastAPI()
+    app.include_router(routes.build_router())
+    assert TestClient(app).get("/api/custom/assistant/status").json()["supports_tools"] is True
 
 
 async def test_chat_stream_streams_text_deltas_word_by_word(monkeypatch: pytest.MonkeyPatch) -> None:

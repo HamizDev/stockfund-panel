@@ -60,7 +60,7 @@ function AnswerDisclaimer() {
         <ShieldAlert className="h-3 w-3 shrink-0" />
         风险提示: AI 生成内容仅供参考, 不构成投资建议
       </span>
-      <span>数据为本地快照, 可能存在延迟或口径差异, 请以交易所官方披露为准</span>
+      <span>数据来源与时点以查询结果为准，可能存在延迟或缺口</span>
     </div>
   )
 }
@@ -85,6 +85,7 @@ function ThinkingDots() {
 }
 
 const TOOL_LABELS: Record<string, string> = {
+  get_fund_research: '查询基金费率、回撤与披露持仓',
   list_factors: '检索因子目录',
   list_strategies: '检索策略目录',
   list_data_capabilities: '检索数据源能力',

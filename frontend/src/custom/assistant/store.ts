@@ -162,7 +162,7 @@ async function runGeneration() {
   } catch (error) {
     const aborted = abortController.signal.aborted
     const message: ChatMessage = aborted
-      ? { id: uid(), role: 'notice', content: '已中断, 可点击重试继续。', ts: Date.now() }
+      ? { id: uid(), role: 'notice', content: '已停止接收；Codex 模型任务可能继续到完成或超时。', ts: Date.now() }
       : { id: uid(), role: 'error', kind: 'network', message: error instanceof Error ? error.message : String(error), ts: Date.now() }
     appendMessage(message)
   } finally {
