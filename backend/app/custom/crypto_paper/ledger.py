@@ -78,6 +78,15 @@ def _validate_qty(qty: Decimal, quote: dict) -> None:
         raise ValueError(f"数量须至少 {minimum}, 且为 {step} 的整数倍")
 
 
+def fee_rate(quote: dict, market: str) -> Decimal:
+    if quote.get("exchange", "binance") == "bitget":
+        rate = _num(quote.get("taker_fee_rate"))
+        if not Decimal("0") <= rate <= Decimal("0.01"):
+            raise ValueError("公开手续费率无效")
+        return rate
+    return SPOT_FEE if market == "spot" else FUTURES_FEE
+
+
 def replay(data_dir: Path, *, market: str, symbol: str, action: str,
            quantity: object, leverage: int, request_id: str) -> tuple[dict, dict] | None:
     """Read back a committed request before any new external quote is needed."""
@@ -157,7 +166,7 @@ def _trade_spot(wallet: dict, symbol: str, action: str, qty: Decimal, price: Dec
 
 
 def _trade_usdm(wallet: dict, symbol: str, action: str, qty: Decimal,
-                price: Decimal, leverage: int) -> dict:
+                price: Decimal, leverage: int, rate: Decimal = FUTURES_FEE) -> dict:
     if action not in ("open_long", "open_short", "close_long", "close_short"):
         raise ValueError("合约方向无效")
     if isinstance(leverage, bool) or not isinstance(leverage, int) or not 1 <= leverage <= 20:
@@ -165,7 +174,7 @@ def _trade_usdm(wallet: dict, symbol: str, action: str, qty: Decimal,
     cash = _num(wallet["cash"])
     positions = wallet["positions"]
     current = positions.get(symbol)
-    fee = qty * price * FUTURES_FEE
+    fee = qty * price * rate
     realized = Decimal("0")
     if action.startswith("open_"):
         if current:
@@ -215,6 +224,14 @@ def execute(state: dict, *, market: str, symbol: str, action: str,
         raise ValueError("不支持的市场或交易对")
     if quote.get("market") != market or quote.get("symbol") != symbol:
         raise ValueError("行情与订单不匹配")
+    exchange = state.get("exchange", "binance")
+    if exchange not in ("binance", "bitget") or quote.get("exchange", "binance") != exchange:
+        raise ValueError("行情源与模拟账本不匹配")
+    if exchange == "bitget" and market != "usdm":
+        raise ValueError("Bitget 模拟目前仅支持 USDT 本位合约")
+    rate = fee_rate(quote, market)
+    if exchange == "bitget" and leverage > _num(quote.get("max_leverage"), positive=True):
+        raise ValueError("杠杆超过交易对上限")
     if not isinstance(request_id, str) or not 1 <= len(request_id) <= 80 or not all(
         c.isalnum() or c in "_-" for c in request_id
     ):
@@ -241,14 +258,15 @@ def execute(state: dict, *, market: str, symbol: str, action: str,
         raise ValueError(f"订单名义金额低于 {minimum} USDT")
     wallet = state[market]
     result = (_trade_spot(wallet, symbol, action, qty, price) if market == "spot"
-              else _trade_usdm(wallet, symbol, action, qty, price, leverage))
+              else _trade_usdm(wallet, symbol, action, qty, price, leverage, rate))
     now_ms = at_ms if at_ms is not None else int(datetime.now(UTC).timestamp() * 1000)
     if market == "usdm" and action.startswith("open_"):
         wallet["positions"][symbol].update(opened_ms=now_ms, funding_cursor_ms=now_ms)
     record = {
         "id": f"cp_{uuid.uuid4().hex[:16]}", "request_id": request_id,
         "kind": "trade", "at": datetime.fromtimestamp(now_ms / 1000, UTC).isoformat(),
-        "market": market, "symbol": symbol, "action": action, "quantity": str(qty),
+        "market": market, "symbol": symbol, "exchange": exchange,
+        "action": action, "quantity": str(qty), "fee_rate": str(rate),
         "price": str(price), "leverage": leverage if market == "usdm" else None,
         **result,
     }
@@ -341,6 +359,8 @@ def settle_funding(state: dict, symbol: str, events: list[dict], through_ms: int
             "funding_amount": str(amount), "realized_pnl": str(-amount),
             "scheduled_funding_amount": str(expected),
             "leverage": position["leverage"],
+            "exchange": state.get("exchange", "binance"),
+            "mark_price_basis": event.get("mark_price_basis", "published_settlement_mark"),
         })
         position["funding_cursor_ms"] = stamp
         if liquidate(state, symbol, price, stamp):

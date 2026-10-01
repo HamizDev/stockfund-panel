@@ -14,7 +14,7 @@ from pathlib import Path
 
 import httpx
 
-from app.custom.crypto_paper import client, ledger
+from app.custom.crypto_paper import bitget, client, ledger
 from app.services.fs_utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,34 @@ _STORE_LOCK = threading.RLock()
 _RUN_LOCK = threading.Lock()
 _RUNTIMES: dict[str, Runner] = {}
 _RUNTIME_LOCK = threading.RLock()
-_BARS: dict[tuple[str, str, str], tuple[float, list[dict]]] = {}
+_BARS: dict[tuple[str, str, str, str], tuple[float, list[dict]]] = {}
+
+
+def _exchange(account: dict) -> str:
+    exchange = account.get("exchange", "binance")
+    if exchange not in ("binance", "bitget"):
+        raise ValueError("不支持的模拟行情源")
+    if exchange == "bitget" and account.get("market") != "usdm":
+        raise ValueError("Bitget 模拟目前仅支持 USDT 本位合约")
+    return exchange
+
+
+def _source(exchange: str):
+    if exchange == "binance":
+        return client
+    if exchange == "bitget":
+        return bitget
+    raise ValueError("不支持的模拟行情源")
+
+
+def _connection_error(exc: httpx.HTTPError, exchange: str, dataset: str) -> str:
+    label = "Bitget" if exchange == "bitget" else "币安"
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status in (403, 451):
+            return f"{label}公开{dataset}被接口拒绝访问（HTTP {status}），本轮没有生成策略订单"
+        return f"{label}公开{dataset}请求失败（HTTP {status}），本轮没有生成策略订单"
+    return f"{label}公开{dataset}连接失败，本轮没有生成策略订单"
 
 
 def _path(data_dir: Path) -> Path:
@@ -51,6 +78,7 @@ def _load(data_dir: Path) -> dict:
         for account in state["accounts"].values():
             if not isinstance(account, dict) or not isinstance(account.get("ledger"), dict):
                 raise ValueError("account")
+            _exchange(account)
         return state
     except (OSError, ValueError, AttributeError) as exc:
         raise ValueError("策略模拟账本无法读取；原文件已保留") from exc
@@ -66,6 +94,7 @@ def _config(body: dict) -> dict:
     config = {key: body.get(key) for key in (
         "name", "market", "symbol", "strategy_id", "interval", "leverage",
         "initial_cash", "allocation_pct", "stop_loss_pct", "take_profit_pct")}
+    config["exchange"] = _exchange(body)
     if (config["market"] not in client.MARKETS or config["symbol"] not in client.SYMBOLS
             or config["strategy_id"] not in {s["id"] for s in STRATEGIES}
             or config["interval"] not in ("1h", "4h")):
@@ -97,6 +126,7 @@ def _row(account: dict) -> dict:
     initial = ledger._num(account["initial_cash"], positive=True)
     pnl = ledger._num(equity) - initial if equity is not None else None
     return {
+        "exchange": _exchange(account), "taker_fee_rate": account.get("taker_fee_rate"),
         **{key: account.get(key) for key in (
             "id", "name", "market", "symbol", "strategy_id", "interval", "leverage",
             "initial_cash", "allocation_pct", "stop_loss_pct", "take_profit_pct", "enabled",
@@ -143,7 +173,9 @@ def create(data_dir: Path, body: dict, leverage_list: list[int] | None = None) -
         state = _load(data_dir)
         previous = state["requests"].get(request)
         if previous:
-            if previous["signature"] != signature:
+            old_signature = copy.deepcopy(previous["signature"])
+            old_signature["config"].setdefault("exchange", "binance")
+            if old_signature != signature:
                 raise ValueError("请求标识已用于其他账户")
             return [_row(state["accounts"][aid]) for aid in previous["ids"]]
         if len(state["accounts"]) + len(levels) > 24:
@@ -153,6 +185,7 @@ def create(data_dir: Path, body: dict, leverage_list: list[int] | None = None) -
         for level in levels:
             aid = f"cps_{uuid.uuid4().hex[:16]}"
             book = ledger._empty()
+            book["exchange"] = config["exchange"]
             book[config["market"]]["cash"] = config["initial_cash"]
             state["accounts"][aid] = {
                 **config, "id": aid, "leverage": level,
@@ -223,14 +256,22 @@ def _funding_start(book: dict, symbol: str, now_ms: int) -> int:
     return stamp
 
 
-def _funding_window(book: dict, symbol: str, now_ms: int) -> tuple[list[dict], int]:
+def _funding_window(book: dict, symbol: str, now_ms: int, exchange: str = "binance") -> tuple[list[dict], int]:
     cursor = _funding_start(book, symbol, now_ms)
     if cursor > now_ms:
         raise ValueError("资金费游标晚于当前行情时间，请核对系统时钟")
     if cursor == now_ms:
         return [], now_ms
-    through = min(now_ms, cursor + 90 * 86_400_000)
-    return client.funding_history(symbol, cursor + 1, through), through
+    if exchange == "bitget":
+        # Published funding records and their completed one-minute mark candle
+        # can lag the boundary. Keep the cursor behind it rather than skipping
+        # a not-yet-published event forever.
+        through = min(now_ms - 120_000, cursor + 30 * 86_400_000)
+        if through <= cursor:
+            return [], cursor
+    else:
+        through = min(now_ms, cursor + 90 * 86_400_000)
+    return _source(exchange).funding_history(symbol, cursor + 1, through), through
 
 
 def _close(account: dict, quote: dict, now_ms: int, suffix: str) -> None:
@@ -251,7 +292,7 @@ def _open(account: dict, quote: dict, target: str, now_ms: int) -> None:
     price = ledger._num(quote["ask" if target == "long" else "bid"], positive=True)
     price *= Decimal("1.0005") if target == "long" else Decimal("0.9995")
     leverage = account["leverage"]
-    fee = ledger.SPOT_FEE if market == "spot" else ledger.FUTURES_FEE
+    fee = ledger.fee_rate(quote, market)
     step = ledger._num(quote["step_size"], positive=True)
     qty = budget / (price / leverage + price * fee)
     maximum = ledger._num(quote.get("max_qty") or "1e30", positive=True)
@@ -286,10 +327,21 @@ def _evaluate(account: dict, quote: dict, bars: list[dict], funding: list[dict],
               signal_error: str | None = None, funding_through_ms: int | None = None) -> None:
     market, symbol = account["market"], account["symbol"]
     book = account["ledger"]
+    if (quote.get("exchange", "binance") != _exchange(account)
+            or book.get("exchange", "binance") != _exchange(account)):
+        raise ValueError("行情源与策略模拟账户不匹配")
+    account["taker_fee_rate"] = str(ledger.fee_rate(quote, market))
     had_position = bool(book[market]["positions"].get(symbol))
     if market == "usdm":
         ledger.settle_funding(book, symbol, funding, funding_through_ms if funding_through_ms is not None else now_ms)
-        if funding_through_ms is not None and funding_through_ms < now_ms and book[market]["positions"].get(symbol):
+        lag = 120_000 if _exchange(account) == "bitget" else 0
+        pending_boundary = False
+        if lag and funding_through_ms is not None and book[market]["positions"].get(symbol):
+            interval_ms = int(quote["funding_interval_hours"]) * 3_600_000
+            last_boundary = int(quote["next_funding_time"]) - interval_ms
+            pending_boundary = funding_through_ms < last_boundary <= now_ms
+        if (funding_through_ms is not None and (funding_through_ms < now_ms - lag or pending_boundary)
+                and book[market]["positions"].get(symbol)):
             account.update(equity=None, status="catching_up", last_check_ms=now_ms,
                            last_error="正在补齐历史资金费，本轮不生成策略订单或记录当前净值")
             return
@@ -338,12 +390,12 @@ def _evaluate(account: dict, quote: dict, bars: list[dict], funding: list[dict],
                    last_error=signal_error, last_check_ms=now_ms)
 
 
-def _bars(market: str, symbol: str, interval: str) -> list[dict]:
-    key = (market, symbol, interval)
+def _bars(market: str, symbol: str, interval: str, exchange: str = "binance") -> list[dict]:
+    key = (exchange, market, symbol, interval)
     previous = _BARS.get(key)
     if previous and time.monotonic() - previous[0] < POLL_SECONDS:
         return previous[1]
-    bars = client.klines(market, symbol, interval, limit=200)
+    bars = _source(exchange).klines(market, symbol, interval, limit=200)
     _BARS[key] = (time.monotonic(), bars)
     return bars
 
@@ -360,47 +412,50 @@ def run_once(data_dir: Path, account_id: str | None = None, *, stop: threading.E
                 raise KeyError("策略模拟账户不存在")
             snapshot = {account_id: snapshot[account_id]}
         now_ms = int(time.time() * 1000)
-        quotes: dict[tuple[str, str], dict] = {}
+        quotes: dict[tuple[str, str, str], dict] = {}
         results: dict[str, tuple[dict, list[dict], list[dict], int, int, str | None] | str] = {}
         for aid, account in snapshot.items():
             if stop and stop.is_set():
                 return {"stopped": True}
             market, symbol = account["market"], account["symbol"]
+            exchange = _exchange(account)
             if not account["enabled"] and not account["ledger"][market]["positions"]:
                 continue
             try:
-                key = (market, symbol)
+                key = (exchange, market, symbol)
                 quote = quotes.get(key)
                 if quote is None:
-                    quote = client.quote(market, symbol)
+                    quote = _source(exchange).quote(market, symbol)
                     quotes[key] = quote
                 observed_ms = quote["asof_ms"]
-                if quote.get("market") != market or quote.get("symbol") != symbol or abs(int(time.time() * 1000) - observed_ms) > 60_000:
+                if (quote.get("exchange", "binance") != exchange or quote.get("market") != market
+                        or quote.get("symbol") != symbol or abs(int(time.time() * 1000) - observed_ms) > 60_000):
                     raise ValueError("公开行情过期或标的错误，已停止本轮策略下单")
                 bars, signal_error = [], None
                 if account["enabled"]:
                     try:
-                        bars = _bars(market, symbol, account["interval"])
+                        bars = _bars(market, symbol, account["interval"], exchange)
                         period_ms = 3_600_000 if account["interval"] == "1h" else 14_400_000
                         if bars and bars[-1]["close_time_ms"] >= observed_ms:
                             # Another account may have cached a quote from
                             # before the candle used by this new signal.
-                            quote = client.quote(market, symbol)
+                            quote = _source(exchange).quote(market, symbol)
                             quotes[key] = quote
                             observed_ms = quote["asof_ms"]
-                            if quote.get("market") != market or quote.get("symbol") != symbol or abs(int(time.time() * 1000) - observed_ms) > 60_000:
+                            if (quote.get("exchange", "binance") != exchange or quote.get("market") != market
+                                    or quote.get("symbol") != symbol or abs(int(time.time() * 1000) - observed_ms) > 60_000):
                                 raise ValueError("新信号后的公开行情过期或标的错误")
                         if len(bars) < 61 or not 0 <= observed_ms - bars[-1]["close_time_ms"] <= period_ms * 2:
                             raise ValueError("已收盘 K 线不足或过期，已停止本轮策略下单")
-                    except httpx.HTTPError:
-                        signal_error = "公开 K 线连接失败，本轮没有生成策略订单"
+                    except httpx.HTTPError as exc:
+                        signal_error = _connection_error(exc, exchange, " K 线")
                     except (ValueError, KeyError, TypeError, IndexError) as exc:
                         signal_error = str(exc)
-                funding, through = (_funding_window(account["ledger"], symbol, observed_ms)
+                funding, through = (_funding_window(account["ledger"], symbol, observed_ms, exchange)
                                     if market == "usdm" and account["ledger"][market]["positions"] else ([], observed_ms))
                 results[aid] = (quote, bars, funding, observed_ms, through, signal_error)
-            except httpx.HTTPError:
-                results[aid] = "公开行情连接失败，本轮没有生成策略订单"
+            except httpx.HTTPError as exc:
+                results[aid] = _connection_error(exc, exchange, "行情")
             except (ValueError, KeyError, TypeError) as exc:
                 results[aid] = str(exc)
         if stop and stop.is_set():

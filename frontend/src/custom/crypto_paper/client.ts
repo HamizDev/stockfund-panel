@@ -1,4 +1,5 @@
 export type CryptoMarket = 'spot' | 'usdm'
+export type CryptoExchange = 'binance' | 'bitget'
 export type CryptoSymbol = 'BTCUSDT' | 'ETHUSDT' | 'SOLUSDT'
 export type CryptoAction = 'buy' | 'sell' | 'open_long' | 'open_short' | 'close_long' | 'close_short'
 
@@ -50,6 +51,8 @@ export interface CryptoStrategyModel {
 export interface CryptoStrategyAccount {
   id: string
   name: string
+  exchange: CryptoExchange
+  taker_fee_rate?: string | null
   market: CryptoMarket
   symbol: CryptoSymbol
   strategy_id: CryptoStrategyId
@@ -107,6 +110,7 @@ export type CryptoStrategyRunResult =
 
 export interface CryptoStrategyAccountCreate {
   name: string
+  exchange?: CryptoExchange
   market: CryptoMarket
   symbol: CryptoSymbol
   strategy_id: CryptoStrategyId

@@ -211,3 +211,24 @@ def test_strategy_api_creates_paused_comparison_and_checks_missing_account(tmp_p
     assert api.get("/api/custom/crypto-paper/strategy-accounts").json()["runtime"]["running"] is False
     assert api.post(f"/api/custom/crypto-paper/strategy-accounts/{rows[0]['id']}/enabled", json={"enabled": "true"}).status_code == 422
     assert api.get("/api/custom/crypto-paper/strategy-accounts/absent").status_code == 404
+
+
+def test_strategy_api_bitget_is_explicit_and_default_stays_binance(tmp_path):
+    app = FastAPI()
+    app.include_router(build_router())
+    app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    api = TestClient(app)
+    body = {"name": "paper", "market": "usdm", "symbol": "ETHUSDT", "strategy_id": "ema_trend",
+            "request_id": "binance-default", "leverage": 10}
+    default = api.post("/api/custom/crypto-paper/strategy-accounts", json=body)
+    assert default.status_code == 200
+    assert default.json()["account"]["exchange"] == "binance"
+    selected = api.post("/api/custom/crypto-paper/strategy-accounts", json={
+        **body, "exchange": "bitget", "request_id": "bitget-paper"})
+    assert selected.status_code == 200
+    assert selected.json()["account"]["exchange"] == "bitget"
+    assert selected.json()["account"]["enabled"] is False
+    denied = api.post("/api/custom/crypto-paper/strategy-accounts", json={
+        **body, "exchange": "bitget", "market": "spot", "leverage": 1, "request_id": "bad-spot"})
+    assert denied.status_code == 400
+    assert len(api.get("/api/custom/crypto-paper/strategy-accounts").json()["accounts"]) == 2

@@ -12,7 +12,7 @@
 | AI 选股 | 按已运行的日线策略生成候选；配置模型后可进行个股分析 |
 | AI 选基 | 按历史收益区间获取研究候选，再由已配置的模型辅助比较；会显示可用数据的缺口 |
 | 模拟盘 | 手动虚拟账户与每个策略独立的虚拟账户；策略信号可自动生成**模拟**订单，统计收益、胜率和净值 |
-| 数字资产模拟 | 币安免费 K 线与历史资金费驱动的现货/合约独立策略账户；均线趋势、通道突破和 1/5/10/20 倍对照；仅研究模拟，默认暂停，详见[运行口径](docs/automatic-paper.md) |
+| 数字资产模拟 | 币安现货/合约、Bitget USDT 合约的免费公开行情驱动独立策略账户；均线趋势、通道突破和 1/5/10/20 倍对照；仅研究模拟，默认暂停，详见[运行口径](docs/automatic-paper.md) |
 | 数据源 | TickFlow、扶摇及可选的插件或自定义数据源；各来源的权限和覆盖范围不同 |
 
 选股和选基结果用于研究。页面会标出行情时间、来源和已知缺失字段；不要把历史收益、策略命中或模型文字当成交易结论。
@@ -91,6 +91,7 @@ Copy-Item .env.example .env
 | `stock-sdk` 插件 | 见 `backend/app/plugins/stocksdk/` | 可选插件，不随 Docker 默认构建安装；使用前核对数据来源条款 |
 | 市场资金流、概念与行业 | [shy313.com](https://shy313.com/) 的公开接口 | 对应页面和预设数据会请求 `shy313.com/api/plugins/market_flow/exports`；接口失败时相关内容可能为空 |
 | 币安公开行情 | [币安开发者文档](https://developers.binance.com/en/docs/products/spot/rest-api) | 数字资产研究模拟仅访问公开现货及 U 本位合约行情，无需 Key；接口可用性和合约风险口径见 [数据源状态](docs/data-source-status.md) |
+| Bitget 公开行情 | [Bitget 官方合约文档](https://www.bitget.com/docs/catalog/classic-contract-market/classic-contract-market) | USDT 合约自动研究模拟使用公开报价、K 线和资金费率，无需 Key；不连接交易所账户，详见[运行口径](docs/automatic-paper.md) |
 
 密钥可以在看板设置页填写，也可按 `.env.example` 的字段配置 `.env`。实际密钥文件、`data/` 和本地日志均不应提交。免费或公开网页数据可能延迟、限流或变更接口；软件不会保证实时性或完整性。
 

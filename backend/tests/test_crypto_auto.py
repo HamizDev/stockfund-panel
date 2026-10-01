@@ -123,6 +123,123 @@ def _open_usdm_position(data_dir, monkeypatch, clock) -> tuple[str, dict, dict]:
     return account_id, market, position
 
 
+def _install_bitget(monkeypatch, clock, *, trend="down"):
+    calls = []
+
+    def quote(market, symbol):
+        calls.append(("quote", market, symbol))
+        return {**_quote(market, clock[0], mark="110"), "symbol": symbol,
+                "exchange": "bitget", "taker_fee_rate": "0.0006", "max_leverage": 20,
+                "funding_interval_hours": 8,
+                "next_funding_time": (clock[0] // (8 * _HOUR_MS) + 1) * 8 * _HOUR_MS}
+
+    def klines(market, symbol, interval="1h", limit=200):
+        calls.append(("klines", market, symbol))
+        return _bars(clock[0], trend=trend, interval=interval)
+
+    monkeypatch.setattr(auto.bitget, "quote", quote)
+    monkeypatch.setattr(auto.bitget, "klines", klines)
+    monkeypatch.setattr(auto.bitget, "funding_history", lambda *args: [])
+    return calls
+
+
+def test_legacy_exchange_and_create_signature_remain_binance(tmp_path):
+    original = auto.create(tmp_path, _body())[0]
+    state = auto._load(tmp_path)
+    state["accounts"][original["id"]].pop("exchange")
+    state["accounts"][original["id"]]["ledger"].pop("exchange")
+    state["requests"]["auto-1"]["signature"]["config"].pop("exchange")
+    auto._save(tmp_path, state)
+    assert auto.accounts(tmp_path)[0]["exchange"] == "binance"
+    assert auto.create(tmp_path, _body())[0]["id"] == original["id"]
+
+
+@pytest.mark.parametrize("exchange", ["bitget", "bybit", "unknown"])
+def test_invalid_spot_exchange_does_not_create_account(tmp_path, exchange):
+    with pytest.raises(ValueError):
+        auto.create(tmp_path, {**_body(), "exchange": exchange})
+    assert not auto._path(tmp_path).exists()
+
+
+def test_exchange_caches_and_orders_are_isolated(tmp_path, monkeypatch, clock):
+    _install_client(monkeypatch, clock, trend="up")
+    bitget_calls = _install_bitget(monkeypatch, clock, trend="down")
+    accounts = [auto.create(tmp_path, _body("binance", market="usdm", leverage=10))[0],
+                auto.create(tmp_path, {**_body("bitget", market="usdm", leverage=10), "exchange": "bitget"})[0]]
+    for account in accounts:
+        auto.set_enabled(tmp_path, account["id"], True)
+    assert auto.run_once(tmp_path)["processed"] == 2
+    first, second = [auto.detail(tmp_path, a["id"]) for a in accounts]
+    assert first["account"]["last_signal"] == "long"
+    assert second["account"]["last_signal"] == "short"
+    assert first["trades"][0]["exchange"] == "binance"
+    trade = second["trades"][0]
+    assert trade["exchange"] == "bitget"
+    assert trade["fee_rate"] == "0.0006"
+    assert Decimal(trade["fee"]) == Decimal(trade["quantity"]) * Decimal(trade["price"]) * Decimal("0.0006")
+    assert second["account"]["taker_fee_rate"] == "0.0006"
+    assert len([c for c in bitget_calls if c[0] == "klines"]) == 1
+    auto.run_once(tmp_path)
+    assert auto.detail(tmp_path, accounts[1]["id"])["trades"] == second["trades"]
+
+
+def test_foreign_exchange_quote_cannot_open_position(tmp_path, monkeypatch, clock):
+    account = auto.create(tmp_path, {**_body(market="usdm", leverage=10), "exchange": "bitget"})[0]
+    _install_bitget(monkeypatch, clock)
+    monkeypatch.setattr(auto.bitget, "quote", lambda *args: _quote("usdm", clock[0]))
+    auto.set_enabled(tmp_path, account["id"], True)
+    auto.run_once(tmp_path)
+    saved = auto.detail(tmp_path, account["id"])
+    assert saved["trades"] == []
+    assert saved["account"]["status"] == "error"
+
+
+@pytest.mark.parametrize("status", [403, 451, 429])
+def test_http_failure_discloses_venue_and_status_without_order(tmp_path, monkeypatch, clock, status):
+    account = auto.create(tmp_path, _body(market="usdm", leverage=10))[0]
+    request = httpx.Request("GET", "https://fapi.binance.com/fapi/v1/ticker/bookTicker")
+
+    def blocked(*args):
+        raise httpx.HTTPStatusError("blocked", request=request,
+                                    response=httpx.Response(status, request=request))
+
+    monkeypatch.setattr(auto.client, "quote", blocked)
+    auto.set_enabled(tmp_path, account["id"], True)
+    auto.run_once(tmp_path)
+    saved = auto.detail(tmp_path, account["id"])
+    assert saved["trades"] == []
+    assert "币安" in saved["account"]["last_error"]
+    assert f"HTTP {status}" in saved["account"]["last_error"]
+
+
+def test_bitget_pending_funding_boundary_blocks_exit_until_settled(tmp_path, monkeypatch, clock):
+    boundary = clock[0] // (8 * _HOUR_MS) * 8 * _HOUR_MS
+    clock[0] = boundary - 60_000
+    account = auto.create(tmp_path, {**_body(market="usdm", leverage=10), "exchange": "bitget"})[0]
+    _install_bitget(monkeypatch, clock, trend="up")
+    auto.set_enabled(tmp_path, account["id"], True)
+    auto.run_once(tmp_path)
+    assert auto.detail(tmp_path, account["id"])["account"]["positions"]
+    clock[0] = boundary + 30_000
+    auto._BARS.clear()
+    _install_bitget(monkeypatch, clock, trend="down")
+    auto.run_once(tmp_path)
+    waiting = auto.detail(tmp_path, account["id"])
+    assert waiting["account"]["status"] == "catching_up"
+    assert len(waiting["trades"]) == 1
+    assert waiting["account"]["positions"]["BTCUSDT"]["side"] == "long"
+    clock[0] = boundary + 180_000
+    event = {"funding_time_ms": boundary, "rate": "0.0001", "mark_price": "110",
+             "mark_price_basis": "bitget_1m_mark_open_estimate"}
+    monkeypatch.setattr(auto.bitget, "funding_history", lambda *args: [event])
+    auto.run_once(tmp_path)
+    after = auto.detail(tmp_path, account["id"])
+    assert after["account"]["status"] == "running"
+    assert after["account"]["positions"]["BTCUSDT"]["side"] == "short"
+    assert [t["kind"] for t in after["trades"]] == ["trade", "funding", "trade", "trade"]
+    assert after["trades"][1]["mark_price_basis"] == "bitget_1m_mark_open_estimate"
+
+
 def test_empty_and_default_paused_accounts_do_not_fetch_market_data(tmp_path, monkeypatch, clock):
     def unexpected_network_call(*_args, **_kwargs):
         raise AssertionError("paused or empty strategy accounts must not fetch market data")

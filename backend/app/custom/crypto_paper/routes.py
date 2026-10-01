@@ -24,6 +24,7 @@ class PaperOrder(BaseModel):
 
 class StrategyAccount(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+    exchange: str = "binance"
     market: str
     symbol: str
     strategy_id: str

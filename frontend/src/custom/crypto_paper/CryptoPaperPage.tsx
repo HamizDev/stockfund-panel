@@ -133,21 +133,21 @@ export function CryptoPaperPage() {
   const futurePositions = account ? Object.entries(account.usdm.positions) : []
 
   return <div className="space-y-4 p-4 md:p-6">
-    <PageHeader title="数字资产模拟" subtitle="币安公开行情 · 现货与 U 本位合约独立虚拟账本" titleExtra={<Coins className="h-4 w-4 text-accent" />} />
+    <PageHeader title="数字资产模拟" subtitle="公开行情 · 独立策略账户与虚拟账本" titleExtra={<Coins className="h-4 w-4 text-accent" />} />
     <div className="rounded-card border border-amber-500/35 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-300">
       研究模拟，绝不连接真实账户。手动订单使用盘口最优价及固定示例手续费；U 本位持仓的资金费用由后台按已公布的历史资金费率事件结算。风险核算采用简化逐仓维持保证金与强平模型，不包含交易所真实阶梯保证金和盘口深度。数据接口失败时，后台可能暂停本轮资金费与风险记账；模拟结果不代表实盘，10x/20x 收益不能推断可盈利。行情中断时停止下单。
     </div>
     <div className="flex flex-wrap gap-2">
       {(['spot', 'usdm'] as const).map(item => <button key={item} onClick={() => selectMarket(item)}
         className={`rounded-btn border px-3 py-2 text-sm ${market === item ? 'border-accent bg-accent/15 text-accent' : 'border-border text-secondary'}`}>
-        {item === 'spot' ? '现货模拟' : 'U 本位合约模拟'}
+        {item === 'spot' ? '币安现货手动' : '币安 U 本位手动'}
       </button>)}
       <button onClick={refresh} className="ml-auto flex items-center gap-1 rounded-btn border border-border px-3 py-2 text-xs text-secondary"><RefreshCcw className="h-3.5 w-3.5" />刷新</button>
     </div>
     {error && <div className="rounded-card border border-danger/40 bg-danger/10 p-3 text-sm text-danger">{error}</div>}
     <div className="grid gap-3 lg:grid-cols-[1.1fr_0.9fr]">
       <section className="rounded-card border border-border bg-surface p-4">
-        <h2 className="text-sm font-semibold">行情与模拟下单</h2>
+        <h2 className="text-sm font-semibold">币安手动行情与模拟下单</h2>
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           <label className="text-xs text-muted">交易对<select value={symbol} onChange={event => { setSymbol(event.target.value as CryptoSymbol); pendingId.current = null }} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{SYMBOLS.map(item => <option key={item}>{item}</option>)}</select></label>
           <label className="text-xs text-muted">方向<select value={action} onChange={event => { setAction(event.target.value as CryptoAction); pendingId.current = null }} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{ACTIONS[market].map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
@@ -169,7 +169,7 @@ export function CryptoPaperPage() {
         {!loading && refreshing && <p className="mt-2 text-xs text-muted">正在同步最新账本与估值…</p>}
       </section>
       <section className="rounded-card border border-border bg-surface p-4">
-        <h2 className="text-sm font-semibold">{market === 'spot' ? '现货' : '合约'}虚拟账户</h2>
+        <h2 className="text-sm font-semibold">{market === 'spot' ? '币安现货' : '币安合约'}手动虚拟账户</h2>
         <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
           <div className="rounded-btn border border-border p-3"><span className="text-xs text-muted">可用 USDT</span><div className="mt-1 font-mono">{money(wallet?.cash)}</div></div>
           <div className="rounded-btn border border-border p-3"><span className="text-xs text-muted">估算总权益</span><div className="mt-1 font-mono">{money(valuation?.[market].equity)}</div></div>
@@ -184,7 +184,7 @@ export function CryptoPaperPage() {
       </section>
     </div>
     <section className="rounded-card border border-border bg-surface p-4">
-      <h2 className="text-sm font-semibold">虚拟账本事件</h2>
+      <h2 className="text-sm font-semibold">币安手动虚拟账本事件</h2>
       <div className="mt-2 overflow-x-auto"><table className="w-full min-w-[760px] text-left text-xs"><thead className="border-b border-border text-muted"><tr><th className="py-2">时间</th><th>市场</th><th>交易对</th><th>事件 / 方向</th><th>数量</th><th>价格</th><th>手续费</th><th>资金费用</th><th>已实现盈亏</th></tr></thead><tbody>{account?.trades.slice(-30).reverse().map(item => <tr key={item.id} className="border-b border-border/50"><td className="py-2">{new Date(item.at).toLocaleString()}</td><td>{item.market}</td><td>{item.symbol}</td><td>{item.kind === 'funding' ? '资金费' : item.kind === 'liquidation' ? '强平' : item.action}</td><td>{item.quantity ?? '—'}</td><td>{money(item.price, 4)}</td><td>{money(item.fee, 4)}</td><td>{money(item.funding_amount, 4)}</td><td>{money(item.realized_pnl)}</td></tr>)}</tbody></table></div>
       {!account?.trades.length && <p className="mt-3 text-xs text-muted">尚无虚拟成交</p>}
     </section>

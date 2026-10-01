@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent } from '
 import { Activity, ChevronDown, ChevronRight, Loader2, Pause, Play, RefreshCcw } from 'lucide-react'
 import {
   cryptoApi,
+  type CryptoExchange,
   type CryptoMarket,
   type CryptoStrategyAccount,
   type CryptoStrategyAccountCreate,
@@ -30,6 +31,7 @@ const FALLBACK_STRATEGIES: CryptoStrategyDefinition[] = [
 
 type FormState = {
   name: string
+  exchange: CryptoExchange
   market: CryptoMarket
   symbol: CryptoSymbol
   strategy_id: CryptoStrategyId
@@ -43,6 +45,7 @@ type FormState = {
 
 const INITIAL_FORM: FormState = {
   name: '策略模拟账户',
+  exchange: 'binance',
   market: 'spot',
   symbol: 'BTCUSDT',
   strategy_id: 'ema_trend',
@@ -81,6 +84,16 @@ function requestError(cause: unknown, fallback: string) {
 
 function accountName(account: CryptoStrategyAccount, strategies: CryptoStrategyDefinition[]) {
   return strategies.find(item => item.id === account.strategy_id)?.name ?? account.strategy_id
+}
+
+function exchangeName(exchange: CryptoExchange) {
+  return exchange === 'bitget' ? 'Bitget' : 'Binance'
+}
+
+function takerFeeLabel(account: CryptoStrategyAccount) {
+  return account.taker_fee_rate == null
+    ? '待获取公开手续费率'
+    : `成交手续费率 ${formatRate(account.taker_fee_rate)}`
 }
 
 function accountStatus(status: string) {
@@ -396,6 +409,7 @@ export function StrategyAccountsPanel() {
     setActionError('')
     const common = {
       name: form.name.trim(),
+      exchange: form.market === 'usdm' ? form.exchange : 'binance',
       market: form.market,
       symbol: form.symbol,
       strategy_id: form.strategy_id,
@@ -497,7 +511,7 @@ export function StrategyAccountsPanel() {
     </div>
 
     <div className="rounded-btn border border-amber-500/30 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-300">
-      仅作研究模拟，不接入真实账户，也不使用真实交易 Key。固定研究维护保证金率 {formatRate(renderedModel.maintenance_margin_rate)}、强平费率 {formatRate(renderedModel.liquidation_fee_rate)} 为模型假设；模型已计历史资金费率、手续费和滑点，不代表交易所精确阶梯强平或深度撮合。策略是未经证明盈利的研究预设，10x/20x 模拟收益不能推断可盈利。策略只根据已收盘的 1h/4h K 线产生信号，并在下一次获取报价时模拟成交，不按历史收盘价倒填收益。行情或资金费率数据接口失败时，后台本轮资金费与风险记账可能暂停，账户异常/补账期间不应将旧收益视为最新。暂停会停止策略开平仓，已有持仓仍继续进行资金费和强平核算。
+      仅作研究模拟，不连接真实账户或交易 Key。Bitget 成交手续费率使用公开合约规则返回的 Taker 费率；Binance 使用固定示例费率（现货 0.1%、合约 0.05%），均按模拟成交扣费。费率尚未返回时显示“待获取公开手续费率”。Bitget 资金费使用交易所公布的实际费率及 1 分钟 MARK 价格开盘价估算标记价；Binance 资金费采用已公布的结算标记价。维护保证金率 {formatRate(renderedModel.maintenance_margin_rate)}、强平费率 {formatRate(renderedModel.liquidation_fee_rate)} 是统一固定研究假设，不代表各交易所实际保证金档位或撮合结果。策略只在所选 1 小时或 4 小时 K 线收盘后生成信号；后台约每 {model.poll_seconds || 30} 秒轮询，无需保持浏览器打开。暂停会停止策略开平仓，已有持仓仍继续进行资金费与强平核算。行情或资金费数据不可用、账户异常或补账期间，旧收益不代表最新状态。模拟收益不代表实盘盈利能力。
     </div>
 
     {(accountsError || strategyError || actionError) && <div className="space-y-1 rounded-btn border border-danger/40 bg-danger/10 p-3 text-sm text-danger">
@@ -521,9 +535,10 @@ export function StrategyAccountsPanel() {
         <label className="text-xs text-muted">账户名称<input aria-label="账户名称" required maxLength={80} value={form.name} onChange={event => setForm(current => ({ ...current, name: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground" /></label>
         <label className="text-xs text-muted">市场<select value={form.market} onChange={event => {
           const market = event.target.value as CryptoMarket
-          setForm(current => ({ ...current, market, leverage: market === 'spot' ? '1' : current.leverage }))
+          setForm(current => ({ ...current, market, exchange: market === 'spot' ? 'binance' : 'bitget', leverage: market === 'spot' ? '1' : current.leverage }))
           if (market === 'spot') setCreationMode('single')
         }} aria-label="市场" className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground"><option value="spot">现货</option><option value="usdm">U 本位合约</option></select></label>
+        {form.market === 'usdm' && <label className="text-xs text-muted">交易所<select aria-label="交易所" value={form.exchange} onChange={event => setForm(current => ({ ...current, exchange: event.target.value as CryptoExchange }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground"><option value="binance">Binance</option><option value="bitget">Bitget</option></select></label>}
         <label className="text-xs text-muted">交易对<select aria-label="策略交易对" value={form.symbol} onChange={event => setForm(current => ({ ...current, symbol: event.target.value as CryptoSymbol }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{SYMBOLS.map(item => <option key={item}>{item}</option>)}</select></label>
         <label className="text-xs text-muted">策略<select aria-label="策略类型" value={form.strategy_id} onChange={event => setForm(current => ({ ...current, strategy_id: event.target.value as CryptoStrategyId }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{strategyOptions.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <label className="text-xs text-muted">信号周期<select aria-label="信号周期" value={form.interval} onChange={event => setForm(current => ({ ...current, interval: event.target.value as CryptoStrategyInterval }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground"><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label>
@@ -553,10 +568,11 @@ export function StrategyAccountsPanel() {
             const detail = details[account.id]
             const isExpanded = expandedId === account.id
             const pendingValuation = valuationMessage(account)
+            const feeLabel = takerFeeLabel(account)
             return <Fragment key={account.id}>
               <tr className="border-b border-border/50 align-top hover:bg-elevated/30">
                 <td className="px-3 py-3"><div className="font-medium text-foreground">#{index + 1} · {account.name}</div><div className="mt-1 text-[11px] text-muted">{account.symbol} · {account.interval} · 初始 {formatMoney(account.initial_cash)} USDT</div></td>
-                <td><div>{account.market === 'spot' ? '现货' : 'U 本位'} · {accountName(account, strategies)}</div><div className="mt-1 text-[11px] text-muted">仓位 {formatPercent(account.allocation_pct)}</div></td>
+                <td><div>{exchangeName(account.exchange)} · {account.market === 'spot' ? '现货' : 'U 本位'} · {accountName(account, strategies)}</div><div className="mt-1 text-[11px] text-muted">仓位 {formatPercent(account.allocation_pct)}</div>{feeLabel && <div className="mt-1 text-[10px] text-muted">{feeLabel}</div>}</td>
                 <td>{account.leverage}x</td>
                 <td className="font-mono">{pendingValuation ?? formatMoney(account.equity)}</td>
                 <td className={`font-mono ${pendingValuation ? 'text-muted' : Number(account.total_pnl) > 0 ? 'text-accent' : Number(account.total_pnl) < 0 ? 'text-danger' : ''}`}>{pendingValuation ?? formatMoney(account.total_pnl)}</td>

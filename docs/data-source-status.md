@@ -12,6 +12,7 @@
 | 腾讯财经 | 免费报价、五档、近 5 日分时和部分分钟路径 | 近 5 日不是全历史；分时价格映射 OHLC 的近似值不能当真实高低价用于精确分钟回测。 |
 | BaoStock | 新增可选沪深股票历史除权因子插件，无需 Key | 后复权累计因子转单次价格事件；不覆盖 ETF、北交所或完整公司行动现金流，见[说明](baostock-data.md)。 |
 | 币安 | 现货/U 本位 K 线、盘口、标记价、历史资金费和数量规则 | 免费无 Key；独立自动模拟已实现，默认暂停。平率保证金/强平为研究模型，见[运行口径](automatic-paper.md)。 |
+| Bitget | USDT 合约公开盘口、已收盘 K 线、标记价、资金费和数量规则 | 免费无 Key；每个自动策略账户显式选择交易所，不跨源回退。资金费结算标记价以对应 1 分钟标记价开盘估算，见[运行口径](automatic-paper.md)。 |
 
 ## 本次查询与限定范围验证
 
@@ -48,3 +49,4 @@
 - [通达信后台订阅说明](https://help.tdx.com.cn/quant/docs/markdown/mindoc-1cfsjkbf8f3is/mindoc-1d00kk3jsibbc.html)
 - [币安现货公开 API](https://developers.binance.com/en/docs/products/spot/rest-api)
 - [币安 U 本位公开 API](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data)
+- [Bitget 合约公开市场 API](https://www.bitget.com/docs/catalog/classic-contract-market/classic-contract-market)
