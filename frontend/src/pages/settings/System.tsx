@@ -16,7 +16,7 @@ import {
   listZhVoices, previewVoice, activateVoice, getCurrentVoiceURI,
 } from '@/lib/voiceBroadcast'
 import { loadStockExternalTemplate, saveStockExternalTemplate } from '@/lib/stock-external-link'
-import { useUpdateCheck } from '@/lib/updateCheck'
+import { UPDATE_REPO_URL, useUpdateCheck } from '@/lib/updateCheck'
 
 export function SettingsSystemPanel() {
   const qc = useQueryClient()
@@ -376,12 +376,26 @@ export function SettingsSystemPanel() {
                 ? `发现新版本 ${updateInfo.latest} (当前 ${versionData?.version ?? '—'})`
                 : updateState === 'latest'
                   ? `已是最新版本 (${versionData?.version ?? '—'})`
-                  : updateState === 'error'
-                    ? '检查失败 (网络受限?), 可直接前往 Releases'
-                    : '对比 GitHub Releases 最新 Release, 提示新版本'}
+                  : updateState === 'unreleased'
+                    ? '仓库暂无发布版本，可前往 GitHub 查看源码'
+                    : updateState === 'limited'
+                      ? 'GitHub 请求限流，请稍后重试或前往仓库查看'
+                      : updateState === 'error'
+                        ? '更新检查失败，可前往 GitHub 仓库查看'
+                        : '更新来源：HamizDev/stockfund-panel 的 GitHub Releases'}
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            <a
+              href={UPDATE_REPO_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn text-xs
+                         bg-elevated text-secondary hover:text-foreground transition-colors"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              GitHub 仓库
+            </a>
             {updateState === 'found' && updateInfo && (
               <a
                 href={updateInfo.url}

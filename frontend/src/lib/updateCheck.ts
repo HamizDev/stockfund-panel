@@ -11,10 +11,12 @@ import { useVersion } from '@/lib/useSharedQueries'
 
 // 检查更新的目标仓库 (Release 清单来源)。
 const UPDATE_REPO = 'HamizDev/stockfund-panel'
-const CACHE_KEY = 'update_check_cache'
+export const UPDATE_REPO_URL = `https://github.com/${UPDATE_REPO}`
+export const UPDATE_RELEASES_URL = `${UPDATE_REPO_URL}/releases`
+const CACHE_KEY = 'stockfund_panel_update_check_cache_v1'
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 
-export type UpdateStatus = 'idle' | 'checking' | 'latest' | 'found' | 'error'
+export type UpdateStatus = 'idle' | 'checking' | 'latest' | 'found' | 'unreleased' | 'limited' | 'error'
 
 export interface UpdateInfo {
   latest: string
@@ -60,10 +62,12 @@ export function compareVersion(a: string, b: string): number {
 }
 
 interface CacheBlob {
+  repo: string
   current: string
   latest: string
   url: string
   found: boolean
+  noRelease: boolean
   checkedAt: number
 }
 
@@ -73,10 +77,13 @@ function readCache(): CacheBlob | null {
     if (!raw) return null
     const v = JSON.parse(raw) as Partial<CacheBlob>
     if (
+      v.repo !== UPDATE_REPO ||
       typeof v.current !== 'string' ||
       typeof v.latest !== 'string' ||
       typeof v.url !== 'string' ||
+      releaseUrl(v.url) !== v.url ||
       typeof v.found !== 'boolean' ||
+      typeof v.noRelease !== 'boolean' ||
       typeof v.checkedAt !== 'number'
     ) {
       return null
@@ -85,6 +92,21 @@ function readCache(): CacheBlob | null {
   } catch {
     return null
   }
+}
+
+function releaseUrl(value: unknown): string {
+  try {
+    const parsed = new URL(String(value))
+    const releasesPath = `/${UPDATE_REPO}/releases`.toLowerCase()
+    const path = parsed.pathname.toLowerCase()
+    if (parsed.protocol === 'https:' && parsed.host === 'github.com' &&
+        (path === releasesPath || path.startsWith(`${releasesPath}/`))) {
+      return parsed.href
+    }
+  } catch {
+    // 缺少发布链接时仍保留本项目发布页入口。
+  }
+  return UPDATE_RELEASES_URL
 }
 
 function writeCache(blob: CacheBlob): void {
@@ -96,27 +118,32 @@ function writeCache(blob: CacheBlob): void {
 }
 
 // 优先 api.github.com (官方带 CORS, 浏览器可直连; 未认证限额 60 次/时);
-// latest.json 清单 (release.yml 产物) 作兜底 — API 限流或字段变动时仍可取到版本号。
+// 发布者提供的 latest.json 清单作兜底; 请求限流时停止查询并提示稍后重试。
 async function fetchLatest(): Promise<UpdateInfo> {
   let latest = ''
-  let url = `https://github.com/${UPDATE_REPO}/releases/latest`
+  let url = UPDATE_RELEASES_URL
   const r = await fetch(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, {
     cache: 'no-store',
+    signal: AbortSignal.timeout(10_000),
   })
+  if (r.status === 404) return { latest: '', url }
+  if (r.status === 429 || (r.status === 403 && r.headers?.get('x-ratelimit-remaining') === '0')) {
+    throw new Error('github-rate-limit')
+  }
   if (r.ok) {
     const rel = await r.json()
     latest = String(rel.tag_name ?? '')
-    url = rel.html_url || url
+    url = releaseUrl(rel.html_url)
   }
   if (!latest) {
     const m = await fetch(
       `https://github.com/${UPDATE_REPO}/releases/latest/download/latest.json`,
-      { cache: 'no-store' },
+      { cache: 'no-store', signal: AbortSignal.timeout(10_000) },
     )
     if (m.ok) {
       const manifest = await m.json()
       latest = String(manifest.tag ?? '')
-      url = manifest.notes_url || url
+      url = releaseUrl(manifest.notes_url)
     }
   }
   if (!latest) throw new Error('no release info')
@@ -135,8 +162,8 @@ export async function checkForUpdate(
     const c = readCache()
     if (c && c.current === cur && Date.now() - c.checkedAt < CACHE_TTL_MS) {
       setState({
-        status: c.found ? 'found' : 'latest',
-        info: { latest: c.latest, url: c.url },
+        status: c.noRelease ? 'unreleased' : c.found ? 'found' : 'latest',
+        info: { latest: c.latest, url: releaseUrl(c.url) },
         checkedAt: c.checkedAt,
       })
       return
@@ -147,12 +174,14 @@ export async function checkForUpdate(
   const checkedAt = Date.now()
   try {
     const info = await fetchLatest()
-    const found = compareVersion(cur, info.latest) < 0
-    setState({ status: found ? 'found' : 'latest', info, checkedAt })
-    writeCache({ current: cur, latest: info.latest, url: info.url, found, checkedAt })
-  } catch {
+    const noRelease = !info.latest
+    const found = !noRelease && compareVersion(cur, info.latest) < 0
+    setState({ status: noRelease ? 'unreleased' : found ? 'found' : 'latest', info, checkedAt })
+    writeCache({ repo: UPDATE_REPO, current: cur, latest: info.latest, url: info.url, found, noRelease, checkedAt })
+  } catch (error) {
     // 不落缓存: 下次启动重试 (静默检查每次会话最多一次, 不会打爆限额)
-    setState({ status: 'error', checkedAt })
+    const status = error instanceof Error && error.message === 'github-rate-limit' ? 'limited' : 'error'
+    setState({ status, info: null, checkedAt })
   } finally {
     inFlight = false
   }
