@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Activity, ArrowUpRight, Clock3, Database, RefreshCw, Search, ShieldAlert, Sparkles } from 'lucide-react'
@@ -45,6 +45,9 @@ export function AiScreenerPage() {
   const [multiOnly, setMultiOnly] = useState(false)
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
+  const candidateListRef = useRef<HTMLElement | null>(null)
+  const selectedCandidateRef = useRef<HTMLButtonElement | null>(null)
+  const detailPanelRef = useRef<HTMLElement | null>(null)
   const query = useQuery({
     queryKey: ['ai-screener-candidates', assetType],
     queryFn: () => getCandidates(assetType),
@@ -64,6 +67,18 @@ export function AiScreenerPage() {
   }, [visible, selectedSymbol])
   const selected = visible.find(item => item.symbol === selectedSymbol) ?? null
   const liveCount = data?.items.filter(item => item.price_source === 'live').length ?? 0
+  const scrollToDetail = () => {
+    if (window.matchMedia('(max-width: 1279px)').matches) {
+      detailPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }
+  const scrollToCandidates = () => {
+    (selectedCandidateRef.current ?? candidateListRef.current)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  const selectCandidate = (symbol: string) => {
+    setSelectedSymbol(symbol)
+    scrollToDetail()
+  }
 
   return <>
     <PageHeader title="AI 选股" className="pl-14 sm:pl-5" subtitle={<span className="hidden sm:inline">股票 / ETF · 候选追踪 · 条件研究计划</span>} right={
@@ -95,7 +110,7 @@ export function AiScreenerPage() {
       {!query.isLoading && !query.isError && !data?.error && !data?.items.length && <div className="rounded-xl border border-border bg-surface p-8 text-center text-sm text-secondary">{assetType === 'stock' ? <>暂无已缓存的策略命中。先在<Link className="mx-1 text-accent underline" to="/screener">策略页</Link>运行股票日线策略。</> : <>暂无 ETF 策略候选。请检查 ETF 日线是否已同步；数据完整时也可能没有符合条件的标的。<Link className="ml-1 text-accent underline" to="/data">查看数据</Link></>}</div>}
 
       {!!data?.items.length && <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_370px]">
-        <section className="min-w-0 rounded-xl border border-border bg-surface">
+        <section ref={candidateListRef} className="min-w-0 rounded-xl border border-border bg-surface">
           <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-3">
             <div className="flex items-center gap-2 text-sm font-semibold text-foreground">候选观察 <span className="text-xs font-normal text-muted">{visible.length} 只</span></div>
             <div className="ml-auto flex items-center gap-2">
@@ -104,7 +119,7 @@ export function AiScreenerPage() {
             </div>
           </div>
           <div className="grid gap-3 p-3 md:grid-cols-2 2xl:grid-cols-3">
-            {visible.map(item => <button key={item.symbol} aria-pressed={selected?.symbol === item.symbol} onClick={() => setSelectedSymbol(item.symbol)} className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${selected?.symbol === item.symbol ? 'border-accent/65 bg-accent/[0.07]' : 'border-border bg-background/40 hover:border-accent/35'}`}>
+            {visible.map(item => <button key={item.symbol} ref={selected?.symbol === item.symbol ? selectedCandidateRef : undefined} aria-pressed={selected?.symbol === item.symbol} onClick={() => selectCandidate(item.symbol)} className={`min-w-0 rounded-lg border p-3 text-left transition-colors ${selected?.symbol === item.symbol ? 'border-accent/65 bg-accent/[0.07]' : 'border-border bg-background/40 hover:border-accent/35'}`}>
               <div className="flex items-start justify-between gap-2"><div className="min-w-0"><div className="truncate text-sm font-semibold text-foreground">{item.name}</div><div className="font-mono text-[11px] text-muted">{item.symbol}</div></div><span className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[11px] font-medium text-accent">命中 {item.hit_count}</span></div>
               <div className="mt-3 flex items-end justify-between gap-2"><span className="font-mono text-xl text-foreground">{formatNumber(item.metrics.close)}</span><span className={`font-mono text-sm ${item.metrics.change_pct == null ? 'text-muted' : item.metrics.change_pct >= 0 ? 'text-bull' : 'text-bear'}`}>{formatPct(item.metrics.change_pct)}</span></div>
               <div className="mt-2 text-[10px] text-muted">{quoteLabel(item, data.as_of, data.quote.provider)}</div>
@@ -117,8 +132,9 @@ export function AiScreenerPage() {
           {!visible.length && <div className="p-8 text-center text-sm text-muted">没有符合当前过滤条件的候选</div>}
         </section>
 
-        <aside className="rounded-xl border border-border bg-surface p-4 xl:sticky xl:top-4 xl:self-start">
+        <aside ref={detailPanelRef} className="rounded-xl border border-border bg-surface p-4 xl:sticky xl:top-4 xl:self-start">
           {selected ? <>
+            <button type="button" onClick={scrollToCandidates} className="mb-3 inline-flex min-h-11 items-center rounded-btn border border-border px-3 text-xs text-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent xl:hidden">返回候选</button>
             <div className="flex items-start justify-between gap-2"><div><div className="text-lg font-semibold text-foreground">{selected.name}</div><div className="font-mono text-xs text-muted">{selected.symbol}</div></div><span className="rounded-full border border-accent/30 bg-accent/10 px-2 py-1 text-xs text-accent">{selected.hit_count} 条策略</span></div>
             <div className="mt-4 rounded-lg border border-border bg-background/50 p-3"><div className="flex items-end justify-between"><span className="font-mono text-2xl text-foreground">{formatNumber(selected.metrics.close)}</span><span className={`font-mono ${selected.metrics.change_pct != null && selected.metrics.change_pct >= 0 ? 'text-bull' : 'text-bear'}`}>{formatPct(selected.metrics.change_pct)}</span></div><div className="mt-1 text-[11px] text-muted">{quoteLabel(selected, data.as_of, data.quote.provider)}</div></div>
             <CandidateAnalysisPanel candidate={selected} assetType={assetType} configured={!!aiStatus.data?.configured} />

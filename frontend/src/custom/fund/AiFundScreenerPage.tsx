@@ -207,6 +207,9 @@ export function AiFundScreenerPage() {
   const [fundAnalysisByCode, setFundAnalysisByCode] = useState<Record<string, FundAiAnalysis>>(() => saved?.fundAnalyses ?? {})
   const controllerRef = useRef<AbortController | null>(null)
   const analysisControllerRef = useRef<{ code: string; controller: AbortController } | null>(null)
+  const candidateListRef = useRef<HTMLElement | null>(null)
+  const selectedCandidateRef = useRef<HTMLButtonElement | null>(null)
+  const detailPanelRef = useRef<HTMLElement | null>(null)
   const model = useQuery({ queryKey: ['ai-fund-model-status'], queryFn: api.strategyAiStatus, staleTime: 60_000 })
 
   useEffect(() => () => {
@@ -241,6 +244,16 @@ export function AiFundScreenerPage() {
   })
   const horizonLabel = HORIZONS.find((option) => option.value === resultHorizon)?.label ?? resultHorizon
 
+  function scrollToDetail() {
+    if (window.matchMedia('(max-width: 1279px)').matches) {
+      detailPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }
+
+  function scrollToCandidates() {
+    (selectedCandidateRef.current ?? candidateListRef.current)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
   function selectCandidate(code: string) {
     const active = analysisControllerRef.current
     if (active && active.code !== code) {
@@ -254,6 +267,7 @@ export function AiFundScreenerPage() {
       })
     }
     setSelectedCode(code)
+    scrollToDetail()
   }
 
   async function generateSelectedAnalysis() {
@@ -462,7 +476,7 @@ export function AiFundScreenerPage() {
       {!!unavailableTypes.length && <div role="status" className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">以下类型榜单暂不可用，本次只展示已返回的类别：{unavailableTypes.join('、')}。</div>}
 
       {!!candidates.length && <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_336px]">
-        <section className="min-w-0 rounded-xl border border-border bg-surface">
+        <section ref={candidateListRef} className="min-w-0 rounded-xl border border-border bg-surface">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
             <div className="text-sm font-semibold">历史榜单候选 <span className="text-xs font-normal text-muted">{candidates.length} 只</span></div>
             <div className="flex items-center gap-1 text-[11px] text-muted"><Database className="h-3.5 w-3.5" />东方财富公开基金排名</div>
@@ -476,6 +490,7 @@ export function AiFundScreenerPage() {
               const navDate = item.nav_date ?? research?.nav_date
               return <button
                 key={item.code}
+                ref={selected?.code === item.code ? selectedCandidateRef : undefined}
                 type="button"
                 aria-pressed={selected?.code === item.code}
                 onClick={() => selectCandidate(item.code)}
@@ -511,8 +526,9 @@ export function AiFundScreenerPage() {
           </div>
         </section>
 
-        <aside aria-label="基金详细分析" className="min-w-0 rounded-xl border border-border bg-surface p-4 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:overflow-y-auto">
+        <aside ref={detailPanelRef} aria-label="基金详细分析" className="min-w-0 rounded-xl border border-border bg-surface p-4 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:overflow-y-auto">
           {selected && <>
+            <button type="button" onClick={scrollToCandidates} className="mb-3 inline-flex min-h-11 items-center rounded-btn border border-border px-3 text-xs text-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent xl:hidden">返回候选</button>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="truncate text-base font-semibold text-foreground">{selected.name}</div>
