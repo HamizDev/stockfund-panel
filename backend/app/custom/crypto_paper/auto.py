@@ -14,14 +14,14 @@ from pathlib import Path
 
 import httpx
 
-from app.custom.crypto_paper import bitget, client, ledger
+from app.custom.crypto_paper import bitget, client, ledger, rules
 from app.services.fs_utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 POLL_SECONDS = 30
 STRATEGIES = [
-    {"id": "ema_trend", "name": "均线趋势", "description": "已收盘 K 线 EMA20/60 趋势；现货只做多，合约可多空。"},
-    {"id": "channel_breakout", "name": "通道突破", "description": "收盘突破此前 20 根高低区间；区间内保持持仓，止盈止损退出。"},
+    {"id": "ema_trend", "name": "均线趋势", "description": "已收盘 K 线 EMA 趋势，默认20/60，周期可调；现货只做多，合约可多空。"},
+    {"id": "channel_breakout", "name": "通道突破", "description": "收盘突破此前高低区间，默认回看20根，周期可调；区间内保持持仓，止盈止损退出。"},
 ]
 MODEL = {"maintenance_margin_rate": str(ledger.MAINTENANCE_RATE),
          "liquidation_fee_rate": str(ledger.LIQUIDATION_FEE), "slippage_bps": 5,
@@ -79,6 +79,7 @@ def _load(data_dir: Path) -> dict:
             if not isinstance(account, dict) or not isinstance(account.get("ledger"), dict):
                 raise ValueError("account")
             _exchange(account)
+            rules.parameters(account.get("strategy_id"), account.get("strategy_params"))
         return state
     except (OSError, ValueError, AttributeError) as exc:
         raise ValueError("策略模拟账本无法读取；原文件已保留") from exc
@@ -115,6 +116,7 @@ def _config(body: dict) -> dict:
     if not isinstance(name, str) or not name.strip() or len(name) > 80:
         raise ValueError("账户名称需为 1–80 个字符")
     config["name"] = name.strip()
+    config["strategy_params"] = rules.parameters(config["strategy_id"], body.get("strategy_params"))
     return config
 
 
@@ -127,6 +129,7 @@ def _row(account: dict) -> dict:
     pnl = ledger._num(equity) - initial if equity is not None else None
     return {
         "exchange": _exchange(account), "taker_fee_rate": account.get("taker_fee_rate"),
+        "strategy_params": rules.parameters(account["strategy_id"], account.get("strategy_params")),
         **{key: account.get(key) for key in (
             "id", "name", "market", "symbol", "strategy_id", "interval", "leverage",
             "initial_cash", "allocation_pct", "stop_loss_pct", "take_profit_pct", "enabled",
@@ -175,6 +178,7 @@ def create(data_dir: Path, body: dict, leverage_list: list[int] | None = None) -
         if previous:
             old_signature = copy.deepcopy(previous["signature"])
             old_signature["config"].setdefault("exchange", "binance")
+            old_signature["config"].setdefault("strategy_params", rules.parameters(config["strategy_id"]))
             if old_signature != signature:
                 raise ValueError("请求标识已用于其他账户")
             return [_row(state["accounts"][aid]) for aid in previous["ids"]]
@@ -217,10 +221,12 @@ def set_enabled(data_dir: Path, account_id: str, enabled: bool) -> dict:
         return _row(account)
 
 
-def signal(strategy_id: str, bars: list[dict], market: str) -> str:
+def signal(strategy_id: str, bars: list[dict], market: str, strategy_params: dict | None = None) -> str:
     """Only caller-validated closed bars; never fill at a historical close."""
-    if len(bars) < 61:
-        raise ValueError("已收盘 K 线不足 61 根")
+    params = rules.parameters(strategy_id, strategy_params)
+    required = rules.minimum_bars(strategy_id, params)
+    if len(bars) < required:
+        raise ValueError(f"已收盘 K 线不足 {required} 根")
     closes = [ledger._num(bar["close"], positive=True) for bar in bars]
     if strategy_id == "ema_trend":
         def ema(period: int) -> Decimal:
@@ -229,10 +235,10 @@ def signal(strategy_id: str, bars: list[dict], market: str) -> str:
             for price in closes[1:]:
                 result += alpha * (price - result)
             return result
-        fast, slow = ema(20), ema(60)
+        fast, slow = ema(params["fast_period"]), ema(params["slow_period"])
         target = "long" if fast > slow and closes[-1] > slow else "short" if fast < slow and closes[-1] < slow else "flat"
     elif strategy_id == "channel_breakout":
-        history = bars[-21:-1]
+        history = bars[-params["lookback"] - 1:-1]
         upper = max(ledger._num(bar["high"], positive=True) for bar in history)
         lower = min(ledger._num(bar["low"], positive=True) for bar in history)
         target = "long" if closes[-1] > upper else "short" if closes[-1] < lower else "hold"
@@ -369,7 +375,7 @@ def _evaluate(account: dict, quote: dict, bars: list[dict], funding: list[dict],
             strategy_book = copy.deepcopy(book)
             try:
                 bar_time = bars[-1]["close_time_ms"]
-                target = signal(account["strategy_id"], bars, market)
+                target = signal(account["strategy_id"], bars, market, account.get("strategy_params"))
                 account["last_signal"] = target
                 if bar_time != account["last_bar_time_ms"]:
                     position = book[market]["positions"].get(symbol)
@@ -445,7 +451,8 @@ def run_once(data_dir: Path, account_id: str | None = None, *, stop: threading.E
                             if (quote.get("exchange", "binance") != exchange or quote.get("market") != market
                                     or quote.get("symbol") != symbol or abs(int(time.time() * 1000) - observed_ms) > 60_000):
                                 raise ValueError("新信号后的公开行情过期或标的错误")
-                        if len(bars) < 61 or not 0 <= observed_ms - bars[-1]["close_time_ms"] <= period_ms * 2:
+                        required = rules.minimum_bars(account["strategy_id"], account.get("strategy_params"))
+                        if len(bars) < required or not 0 <= observed_ms - bars[-1]["close_time_ms"] <= period_ms * 2:
                             raise ValueError("已收盘 K 线不足或过期，已停止本轮策略下单")
                     except httpx.HTTPError as exc:
                         signal_error = _connection_error(exc, exchange, " K 线")

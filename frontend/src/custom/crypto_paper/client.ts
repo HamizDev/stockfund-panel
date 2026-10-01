@@ -56,6 +56,7 @@ export interface CryptoStrategyAccount {
   market: CryptoMarket
   symbol: CryptoSymbol
   strategy_id: CryptoStrategyId
+  strategy_params?: Record<string, number>
   interval: CryptoStrategyInterval
   leverage: number
   initial_cash: string
@@ -114,6 +115,7 @@ export interface CryptoStrategyAccountCreate {
   market: CryptoMarket
   symbol: CryptoSymbol
   strategy_id: CryptoStrategyId
+  strategy_params?: Record<string, number>
   interval: CryptoStrategyInterval
   leverage: number
   initial_cash: number
@@ -121,6 +123,71 @@ export interface CryptoStrategyAccountCreate {
   stop_loss_pct: number
   take_profit_pct: number
   request_id: string
+}
+
+export interface CryptoStrategyDraftRequest {
+  exchange: CryptoExchange
+  market: CryptoMarket
+  symbol: CryptoSymbol
+  interval: CryptoStrategyInterval
+  leverage: number
+  allocation_pct: number
+  focus?: string
+}
+
+export type CryptoStrategyDraftParams =
+  | { fast_period: number; slow_period: number }
+  | { lookback: number }
+
+export interface CryptoStrategyDraft {
+  name: string
+  exchange: CryptoExchange
+  market: CryptoMarket
+  symbol: CryptoSymbol
+  interval: CryptoStrategyInterval
+  strategy_id: CryptoStrategyId
+  strategy_params: CryptoStrategyDraftParams
+  leverage: number
+  initial_cash: number
+  allocation_pct: number
+  stop_loss_pct: number
+  take_profit_pct: number
+}
+
+export interface CryptoStrategyDraftEvidence {
+  exchange: CryptoExchange
+  market: CryptoMarket
+  symbol: CryptoSymbol
+  interval: CryptoStrategyInterval
+  retrieved_at_ms: number
+  quote_asof_ms: number
+  data_start_ms: number
+  data_end_ms: number
+  bars_count: number
+  return_pct: number
+  realized_volatility_pct: number
+  atr_pct: number
+  max_close_drawdown_pct: number
+  taker_fee_rate: string
+  spread_bps: number
+  funding_rate: string | null
+  stats_method?: string
+}
+
+export interface CryptoStrategyDraftResult {
+  draft: CryptoStrategyDraft
+  rationale: string
+  risk_notes: string[]
+  evidence: CryptoStrategyDraftEvidence
+  diagnostics: {
+    latest_signal: string
+    signal_counts: Record<string, number>
+    evaluated_bars: number
+    method?: string
+  }
+  model: string
+  provider: string
+  created_at_ms: number
 }
 
 export interface CryptoStrategyAccountCompare extends Omit<CryptoStrategyAccountCreate, 'leverage'> {
@@ -187,6 +254,13 @@ export const cryptoApi = {
     if (!Array.isArray(result?.strategies)) throw new Error('策略目录响应格式无效')
     return result
   },
+  strategyDraft: (body: CryptoStrategyDraftRequest, signal?: AbortSignal) =>
+    request<CryptoStrategyDraftResult>('/strategy-draft', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    }),
   strategyAccounts: async () => {
     const result = await request<CryptoStrategyAccountsResult>('/strategy-accounts')
     if (!Array.isArray(result?.accounts) || !result?.runtime || !result?.model) {

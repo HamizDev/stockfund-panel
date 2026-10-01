@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Activity, ChevronDown, ChevronRight, Loader2, Pause, Play, RefreshCcw } from 'lucide-react'
+import { AiStrategyDraftPanel } from './AiStrategyDraftPanel'
 import {
   cryptoApi,
   type CryptoExchange,
@@ -8,6 +9,7 @@ import {
   type CryptoStrategyAccountCreate,
   type CryptoStrategyAccountDetail,
   type CryptoStrategyDefinition,
+  type CryptoStrategyDraft,
   type CryptoStrategyId,
   type CryptoStrategyInterval,
   type CryptoStrategyModel,
@@ -16,7 +18,7 @@ import {
 } from './client'
 
 const SYMBOLS: CryptoSymbol[] = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
-const LEVERAGES = [1, 2, 3, 5, 10, 20]
+const LEVERAGES = Array.from({ length: 20 }, (_, index) => index + 1)
 const COMPARE_LEVERAGES = [1, 5, 10, 20]
 const DEFAULT_MODEL: CryptoStrategyModel = {
   maintenance_margin_rate: '0.005',
@@ -35,6 +37,9 @@ type FormState = {
   market: CryptoMarket
   symbol: CryptoSymbol
   strategy_id: CryptoStrategyId
+  fast_period: string
+  slow_period: string
+  lookback: string
   interval: CryptoStrategyInterval
   leverage: string
   initial_cash: string
@@ -49,6 +54,9 @@ const INITIAL_FORM: FormState = {
   market: 'spot',
   symbol: 'BTCUSDT',
   strategy_id: 'ema_trend',
+  fast_period: '20',
+  slow_period: '60',
+  lookback: '20',
   interval: '1h',
   leverage: '1',
   initial_cash: '10000',
@@ -84,6 +92,17 @@ function requestError(cause: unknown, fallback: string) {
 
 function accountName(account: CryptoStrategyAccount, strategies: CryptoStrategyDefinition[]) {
   return strategies.find(item => item.id === account.strategy_id)?.name ?? account.strategy_id
+}
+
+function strategyParametersLabel(account: CryptoStrategyAccount) {
+  const params = account.strategy_params ?? {}
+  const read = (key: string, fallback: number) => {
+    const value = Number(params[key])
+    return Number.isInteger(value) && value > 0 ? value : fallback
+  }
+  return account.strategy_id === 'ema_trend'
+    ? `EMA ${read('fast_period', 20)} / ${read('slow_period', 60)}`
+    : `通道回看 ${read('lookback', 20)} 根 K 线`
 }
 
 function exchangeName(exchange: CryptoExchange) {
@@ -405,6 +424,20 @@ export function StrategyAccountsPanel() {
     if (!Number.isFinite(takeProfit) || takeProfit <= 0 || takeProfit > 100) return setFormError('止盈比例须大于 0 且不超过 100%。')
     if (creationMode === 'compare' && form.market !== 'usdm') return setFormError('杠杆对照组仅支持 U 本位合约。')
 
+    let strategyParams: Record<string, number>
+    if (form.strategy_id === 'ema_trend') {
+      const fastPeriod = Number(form.fast_period)
+      const slowPeriod = Number(form.slow_period)
+      if (!Number.isInteger(fastPeriod) || fastPeriod < 5 || fastPeriod > 50) return setFormError('EMA 快线周期须为 5 至 50 的整数。')
+      if (!Number.isInteger(slowPeriod) || slowPeriod < 20 || slowPeriod > 120) return setFormError('EMA 慢线周期须为 20 至 120 的整数。')
+      if (fastPeriod >= slowPeriod) return setFormError('EMA 快线周期必须小于慢线周期。')
+      strategyParams = { fast_period: fastPeriod, slow_period: slowPeriod }
+    } else {
+      const lookback = Number(form.lookback)
+      if (!Number.isInteger(lookback) || lookback < 5 || lookback > 120) return setFormError('通道回看周期须为 5 至 120 的整数。')
+      strategyParams = { lookback }
+    }
+
     setSubmitting(true)
     setActionError('')
     const common = {
@@ -413,6 +446,7 @@ export function StrategyAccountsPanel() {
       market: form.market,
       symbol: form.symbol,
       strategy_id: form.strategy_id,
+      strategy_params: strategyParams,
       interval: form.interval,
       initial_cash: initialCash,
       allocation_pct: allocation,
@@ -445,6 +479,29 @@ export function StrategyAccountsPanel() {
     } finally {
       setSubmitting(false)
     }
+  }
+
+  const applyDraft = (draft: CryptoStrategyDraft) => {
+    setCreationMode('single')
+    setForm(current => ({
+      ...current,
+      name: draft.name,
+      exchange: draft.exchange,
+      market: draft.market,
+      symbol: draft.symbol,
+      strategy_id: draft.strategy_id,
+      fast_period: 'fast_period' in draft.strategy_params ? String(draft.strategy_params.fast_period) : current.fast_period,
+      slow_period: 'slow_period' in draft.strategy_params ? String(draft.strategy_params.slow_period) : current.slow_period,
+      lookback: 'lookback' in draft.strategy_params ? String(draft.strategy_params.lookback) : current.lookback,
+      interval: draft.interval,
+      leverage: String(draft.market === 'spot' ? 1 : draft.leverage),
+      initial_cash: String(draft.initial_cash),
+      allocation_pct: String(draft.allocation_pct),
+      stop_loss_pct: String(draft.stop_loss_pct),
+      take_profit_pct: String(draft.take_profit_pct),
+    }))
+    setFormError('')
+    setActionError('')
   }
 
   const toggleEnabled = async (account: CryptoStrategyAccount) => {
@@ -520,6 +577,8 @@ export function StrategyAccountsPanel() {
       {actionError && <p>操作失败：{actionError}</p>}
     </div>}
 
+    <AiStrategyDraftPanel onApply={applyDraft} />
+
     <form onSubmit={submit} className="rounded-btn border border-border p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap gap-2" role="tablist" aria-label="账户创建方式">
@@ -541,6 +600,10 @@ export function StrategyAccountsPanel() {
         {form.market === 'usdm' && <label className="text-xs text-muted">交易所<select aria-label="交易所" value={form.exchange} onChange={event => setForm(current => ({ ...current, exchange: event.target.value as CryptoExchange }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground"><option value="binance">Binance</option><option value="bitget">Bitget</option></select></label>}
         <label className="text-xs text-muted">交易对<select aria-label="策略交易对" value={form.symbol} onChange={event => setForm(current => ({ ...current, symbol: event.target.value as CryptoSymbol }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{SYMBOLS.map(item => <option key={item}>{item}</option>)}</select></label>
         <label className="text-xs text-muted">策略<select aria-label="策略类型" value={form.strategy_id} onChange={event => setForm(current => ({ ...current, strategy_id: event.target.value as CryptoStrategyId }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{strategyOptions.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        {form.strategy_id === 'ema_trend' ? <>
+          <label className="text-xs text-muted">EMA 快线周期<input aria-label="EMA 快线周期" type="number" min="5" max="50" step="1" required value={form.fast_period} onChange={event => setForm(current => ({ ...current, fast_period: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>
+          <label className="text-xs text-muted">EMA 慢线周期<input aria-label="EMA 慢线周期" type="number" min="20" max="120" step="1" required value={form.slow_period} onChange={event => setForm(current => ({ ...current, slow_period: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>
+        </> : <label className="text-xs text-muted">通道回看周期<input aria-label="通道回看周期" type="number" min="5" max="120" step="1" required value={form.lookback} onChange={event => setForm(current => ({ ...current, lookback: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>}
         <label className="text-xs text-muted">信号周期<select aria-label="信号周期" value={form.interval} onChange={event => setForm(current => ({ ...current, interval: event.target.value as CryptoStrategyInterval }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground"><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label>
         {form.market === 'usdm' && creationMode === 'single' && <label className="text-xs text-muted">杠杆<select aria-label="杠杆倍数" value={form.leverage} onChange={event => setForm(current => ({ ...current, leverage: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{LEVERAGES.map(item => <option key={item} value={item}>{item}x</option>)}</select></label>}
         <label className="text-xs text-muted">初始资金（USDT）<input aria-label="初始资金（USDT）" type="number" required min={100} max={10_000_000} step="any" value={form.initial_cash} onChange={event => setForm(current => ({ ...current, initial_cash: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>
@@ -572,7 +635,7 @@ export function StrategyAccountsPanel() {
             return <Fragment key={account.id}>
               <tr className="border-b border-border/50 align-top hover:bg-elevated/30">
                 <td className="px-3 py-3"><div className="font-medium text-foreground">#{index + 1} · {account.name}</div><div className="mt-1 text-[11px] text-muted">{account.symbol} · {account.interval} · 初始 {formatMoney(account.initial_cash)} USDT</div></td>
-                <td><div>{exchangeName(account.exchange)} · {account.market === 'spot' ? '现货' : 'U 本位'} · {accountName(account, strategies)}</div><div className="mt-1 text-[11px] text-muted">仓位 {formatPercent(account.allocation_pct)}</div>{feeLabel && <div className="mt-1 text-[10px] text-muted">{feeLabel}</div>}</td>
+                <td><div>{exchangeName(account.exchange)} · {account.market === 'spot' ? '现货' : 'U 本位'} · {accountName(account, strategies)}</div><div className="mt-1 text-[11px] text-muted">{strategyParametersLabel(account)} · 仓位 {formatPercent(account.allocation_pct)}</div>{feeLabel && <div className="mt-1 text-[10px] text-muted">{feeLabel}</div>}</td>
                 <td>{account.leverage}x</td>
                 <td className="font-mono">{pendingValuation ?? formatMoney(account.equity)}</td>
                 <td className={`font-mono ${pendingValuation ? 'text-muted' : Number(account.total_pnl) > 0 ? 'text-accent' : Number(account.total_pnl) < 0 ? 'text-danger' : ''}`}>{pendingValuation ?? formatMoney(account.total_pnl)}</td>

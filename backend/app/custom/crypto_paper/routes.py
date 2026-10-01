@@ -8,7 +8,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.custom.crypto_paper import auto, client, ledger
+from app.custom.crypto_paper import auto, client, ledger, strategy_draft
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ class StrategyAccount(BaseModel):
     market: str
     symbol: str
     strategy_id: str
+    strategy_params: dict[str, int] | None = None
     interval: str = "1h"
     leverage: int = Field(default=1, ge=1, le=20)
     initial_cash: float = Field(default=10000, ge=100, le=10000000, allow_inf_nan=False)
@@ -117,6 +118,22 @@ def build_router() -> APIRouter:
     @router.get("/strategies")
     def strategies() -> dict:
         return {"strategies": auto.STRATEGIES, "model": auto.MODEL}
+
+    @router.post("/strategy-draft")
+    async def generate_strategy_draft(body: strategy_draft.DraftRequest) -> dict:
+        try:
+            return await strategy_draft.generate(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="策略草案校验失败: " + str(exc)) from exc
+        except strategy_draft.DraftBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except strategy_draft.DraftUnavailableError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=503, detail=auto._connection_error(exc, body.exchange, "行情")) from exc
+        except Exception as exc:
+            logger.warning("AI crypto draft failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=502, detail="AI策略草案暂不可用, 请检查AI设置; 没有创建或启用账户") from exc
 
     @router.get("/strategy-accounts")
     def strategy_accounts(request: Request) -> dict:

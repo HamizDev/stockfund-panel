@@ -8,6 +8,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +26,32 @@ def isolated_research(monkeypatch):
         "fees": {"status": "unavailable"}, "risk": {"status": "unavailable"},
         "holdings": {"status": "unavailable"},
     })
+
+
+def _ai_client():
+    app = FastAPI()
+    app.include_router(routes.build_router())
+    return TestClient(app)
+
+
+async def _fake_ai_stream(*_args, **_kwargs):
+    yield "研究候选"
+
+
+def _rank_row(code, *, share="A", growth_1m=2.0, growth_1y=8.0):
+    return {
+        "code": code,
+        "name": f"测试基金{code}",
+        "share_class": share,
+        "nav": 1.23,
+        "nav_date": "2026-09-30",
+        "growth_1m": growth_1m,
+        "growth_3m": None,
+        "growth_6m": 4.0,
+        "growth_1y": growth_1y,
+        "growth_2y": 9.0,
+        "growth_3y": 10.0,
+    }
 
 
 def test_rank_preserves_missing_values_and_percent_units(monkeypatch):
@@ -49,6 +76,123 @@ def test_rank_preserves_missing_values_and_percent_units(monkeypatch):
     assert rows[0]["share_class"] == "C"
     assert rows[0]["growth_1m"] == 12.5
     assert rows[0]["growth_1y"] is None
+
+
+def test_ai_pick_defaults_to_all_supported_types(monkeypatch):
+    from app.services import ai_provider
+
+    calls = []
+    ranking_barrier = Barrier(len(routes._AI_PICK_TYPES))
+
+    def rank(fund_type, **_kwargs):
+        calls.append(fund_type)
+        ranking_barrier.wait(timeout=3)
+        return [_rank_row(str(110000 + routes._AI_PICK_TYPES.index(fund_type)))]
+
+    monkeypatch.setattr(service, "akshare_rank", rank)
+    monkeypatch.setattr(ai_provider, "stream_ai_text", _fake_ai_stream)
+    response = _ai_client().post("/api/custom/fund/screener/ai", json={})
+
+    assert response.status_code == 200
+    events = [json.loads(line) for line in response.text.splitlines() if line]
+    assert sorted(calls) == sorted(routes._AI_PICK_TYPES)
+    assert events[0]["fund_type"] == "all"
+    assert {row["fund_type"] for row in events[0]["candidates"]} == set(routes._AI_PICK_TYPES)
+
+
+def test_ai_pick_all_merges_unique_funds_with_balanced_source_types(monkeypatch):
+    from app.services import ai_provider
+
+    rankings = {}
+    for offset, fund_type in enumerate(routes._AI_PICK_TYPES):
+        rows = [_rank_row("100000")]
+        rows.extend(_rank_row(str(110000 + offset * 100 + number)) for number in range(6))
+        rankings[fund_type] = rows
+
+    monkeypatch.setattr(
+        service, "akshare_rank", lambda fund_type, **_kwargs: rankings[fund_type]
+    )
+    monkeypatch.setattr(ai_provider, "stream_ai_text", _fake_ai_stream)
+    response = _ai_client().post("/api/custom/fund/screener/ai", json={"fund_type": "all"})
+
+    assert response.status_code == 200
+    candidates = json.loads(response.text.splitlines()[0])["candidates"]
+    assert len(candidates) == routes._AI_PICK_LIMIT
+    assert len({row["code"] for row in candidates}) == len(candidates)
+    assert {kind: sum(row["fund_type"] == kind for row in candidates) for kind in routes._AI_PICK_TYPES} == {
+        kind: routes._AI_PICK_PER_TYPE_LIMIT for kind in routes._AI_PICK_TYPES
+    }
+    shared = next(row for row in candidates if row["code"] == "100000")
+    assert shared["fund_type"] == "股票型"
+    assert shared["nav_date"] == "2026-09-30"
+    assert shared["growth_3m"] is None
+
+
+def test_ai_pick_all_keeps_available_rankings_when_one_type_fails(monkeypatch):
+    from app.services import ai_provider
+
+    def rank(fund_type, **_kwargs):
+        if fund_type == "股票型":
+            return [_rank_row("123456")]
+        raise RuntimeError("ranking source unavailable")
+
+    monkeypatch.setattr(service, "akshare_rank", rank)
+    monkeypatch.setattr(ai_provider, "stream_ai_text", _fake_ai_stream)
+    response = _ai_client().post("/api/custom/fund/screener/ai", json={"fund_type": "all"})
+
+    assert response.status_code == 200
+    events = [json.loads(line) for line in response.text.splitlines() if line]
+    assert [row["code"] for row in events[0]["candidates"]] == ["123456"]
+    assert events[0]["unavailable_types"] == ["混合型", "指数型", "债券型"]
+
+
+def test_ai_pick_all_reports_empty_rankings_as_unavailable(monkeypatch):
+    from app.services import ai_provider
+
+    monkeypatch.setattr(service, "akshare_rank", lambda kind, **_: [_rank_row("123456")] if kind == "股票型" else [])
+    monkeypatch.setattr(ai_provider, "stream_ai_text", _fake_ai_stream)
+    response = _ai_client().post("/api/custom/fund/screener/ai", json={"fund_type": "all"})
+    assert response.status_code == 200
+    meta = json.loads(response.text.splitlines()[0])
+    assert meta["unavailable_types"] == ["混合型", "指数型", "债券型"]
+    assert len(meta["candidates"]) == 1
+
+
+def test_ai_pick_all_returns_unavailable_when_every_ranking_fails(monkeypatch):
+    def rank(*_args, **_kwargs):
+        raise RuntimeError("ranking source unavailable")
+
+    monkeypatch.setattr(service, "akshare_rank", rank)
+    response = _ai_client().post("/api/custom/fund/screener/ai", json={"fund_type": "all"})
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "基金历史收益榜单暂不可用"
+
+
+def test_ai_pick_all_filters_by_share_and_selected_horizon(monkeypatch):
+    from app.services import ai_provider
+
+    rankings = {}
+    for offset, fund_type in enumerate(routes._AI_PICK_TYPES):
+        base = 120000 + offset * 10
+        rankings[fund_type] = [
+            _rank_row(str(base), share="A", growth_1m=99.0),
+            _rank_row(str(base + 1), share="C", growth_1m=None, growth_1y=99.0),
+            _rank_row(str(base + 2), share="C", growth_1m=2.0),
+        ]
+
+    monkeypatch.setattr(
+        service, "akshare_rank", lambda fund_type, **_kwargs: rankings[fund_type]
+    )
+    monkeypatch.setattr(ai_provider, "stream_ai_text", _fake_ai_stream)
+    response = _ai_client().post("/api/custom/fund/screener/ai", json={
+        "fund_type": "all", "horizon": "1m", "share": "C",
+    })
+
+    assert response.status_code == 200
+    candidates = json.loads(response.text.splitlines()[0])["candidates"]
+    assert len(candidates) == len(routes._AI_PICK_TYPES)
+    assert all(row["share_class"] == "C" and row["growth_1m"] is not None for row in candidates)
 
 
 def test_ai_pick_sends_only_matching_candidates_to_model(monkeypatch):

@@ -173,9 +173,13 @@ export interface FundResearch {
   warnings: string[]
 }
 
+export type AiFundType = 'all' | '股票型' | '混合型' | '指数型' | '债券型'
+
 export interface FundRankItem {
   code: string
   name: string
+  /** Ranking category that supplied this candidate; older saved results may omit it. */
+  fund_type?: Exclude<AiFundType, 'all'>
   share_class: string
   nav: number | null
   nav_date: string | null
@@ -193,6 +197,7 @@ export interface FundRankItem {
 export interface AiPickEvent {
   type: 'meta' | 'research' | 'delta' | 'error' | 'done' | 'ping'
   candidates?: FundRankItem[]
+  unavailable_types?: Array<Exclude<AiFundType, 'all'>>
   code?: string
   research?: FundResearch
   completed?: number
@@ -369,7 +374,7 @@ export const fundApi = {
   },
   /** AI 对基金榜单候选进行研究排序，不自动执行交易。 */
   async *aiPickStream(
-    options: { fund_type: string; horizon: string; share: string },
+    options: { fund_type: AiFundType; horizon: string; share: string },
     signal?: AbortSignal,
   ): AsyncGenerator<AiPickEvent> {
     yield* streamFundEvents<AiPickEvent>('/screener/ai', options, signal)

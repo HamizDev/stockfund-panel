@@ -5,10 +5,16 @@ import { Activity, ArrowUpRight, Clock3, Database, Loader2, Sparkles } from 'luc
 import { PageHeader } from '@/components/PageHeader'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import { api } from '@/lib/api'
-import { fundApi, type FundRankItem } from './client'
+import { fundApi, type AiFundType, type FundRankItem } from './client'
 import { FundResearchPanel, rememberFundResearch } from './FundResearchPanel'
 
-const FUND_TYPES = ['股票型', '混合型', '指数型', '债券型']
+const FUND_TYPES: Array<{ value: AiFundType; label: string }> = [
+  { value: 'all', label: '全部类型' },
+  { value: '股票型', label: '股票型' },
+  { value: '混合型', label: '混合型' },
+  { value: '指数型', label: '指数型' },
+  { value: '债券型', label: '债券型' },
+]
 const HORIZONS = [
   { value: '1m', label: '近 1 月' },
   { value: '3m', label: '近 3 月' },
@@ -19,15 +25,27 @@ const HORIZONS = [
 ]
 const RESULT_STORAGE_KEY = 'stockfund.ai-fund-screener.result.v1'
 
+function isAiFundType(value: string): value is AiFundType {
+  return FUND_TYPES.some((option) => option.value === value)
+}
+
+type AiFundCategory = Exclude<AiFundType, 'all'>
+
+function isAiFundCategory(value: string): value is AiFundCategory {
+  return value !== 'all' && isAiFundType(value)
+}
+
 type SavedResult = {
   fundType: string
   horizon: string
   share: string
+  unavailableTypes?: string[]
   candidates: FundRankItem[]
   selectedCode: string | null
   report: string
   retrievedAt: number | null
   resultHorizon: string
+  resultFundType?: AiFundType
 }
 
 function loadSavedResult(): SavedResult | null {
@@ -40,6 +58,9 @@ function loadSavedResult(): SavedResult | null {
         typeof value.report !== 'string' ||
         typeof value.fundType !== 'string' || typeof value.horizon !== 'string' ||
         typeof value.share !== 'string' || typeof value.resultHorizon !== 'string' ||
+        (value.resultFundType !== undefined && !isAiFundType(value.resultFundType)) ||
+        (value.unavailableTypes !== undefined && (!Array.isArray(value.unavailableTypes) ||
+          !value.unavailableTypes.every((item) => typeof item === 'string' && isAiFundCategory(item)))) ||
         (value.selectedCode !== null && typeof value.selectedCode !== 'string') ||
         (value.retrievedAt !== null && typeof value.retrievedAt !== 'number')) return null
     return value
@@ -63,16 +84,24 @@ function sameFundCode(candidateCode: string, eventCode: string): boolean {
 
 export function AiFundScreenerPage() {
   const [saved] = useState(loadSavedResult)
-  const [fundType, setFundType] = useState(saved?.fundType ?? '混合型')
+  const [fundType, setFundType] = useState<AiFundType>(() =>
+    saved && isAiFundType(saved.fundType) ? saved.fundType : 'all',
+  )
   const [horizon, setHorizon] = useState(saved?.horizon ?? '1y')
   const [share, setShare] = useState(saved?.share ?? 'all')
   const [phase, setPhase] = useState<'idle' | 'loading' | 'done' | 'error'>(saved ? 'done' : 'idle')
   const [candidates, setCandidates] = useState<FundRankItem[]>(saved?.candidates ?? [])
+  const [unavailableTypes, setUnavailableTypes] = useState<AiFundCategory[]>(() =>
+    (saved?.unavailableTypes ?? []).filter(isAiFundCategory),
+  )
   const [selectedCode, setSelectedCode] = useState<string | null>(saved?.selectedCode ?? null)
   const [report, setReport] = useState(saved?.report ?? '')
   const [error, setError] = useState('')
   const [retrievedAt, setRetrievedAt] = useState<number | null>(saved?.retrievedAt ?? null)
   const [resultHorizon, setResultHorizon] = useState(saved?.resultHorizon ?? '1y')
+  const [resultFundType, setResultFundType] = useState<AiFundType>(() =>
+    saved?.resultFundType ?? (saved && isAiFundType(saved.fundType) ? saved.fundType : 'all'),
+  )
   const [researchProgress, setResearchProgress] = useState<{ completed: number; total: number; code?: string } | null>(null)
   const controllerRef = useRef<AbortController | null>(null)
   const model = useQuery({ queryKey: ['ai-fund-model-status'], queryFn: api.strategyAiStatus, staleTime: 60_000 })
@@ -80,13 +109,13 @@ export function AiFundScreenerPage() {
   useEffect(() => () => controllerRef.current?.abort(), [])
   useEffect(() => {
     if (phase !== 'done' || !candidates.length) return
-    const result: SavedResult = { fundType, horizon, share, candidates, selectedCode, report, retrievedAt, resultHorizon }
+    const result: SavedResult = { fundType, horizon, share, unavailableTypes, candidates, selectedCode, report, retrievedAt, resultHorizon, resultFundType }
     try {
       window.sessionStorage.setItem(RESULT_STORAGE_KEY, JSON.stringify(result))
     } catch {
       // Storage may be disabled; the page remains usable without persistence.
     }
-  }, [phase, fundType, horizon, share, candidates, selectedCode, report, retrievedAt, resultHorizon])
+  }, [phase, fundType, horizon, share, unavailableTypes, candidates, selectedCode, report, retrievedAt, resultHorizon, resultFundType])
   const selected = useMemo(
     () => candidates.find((candidate) => candidate.code === selectedCode) ?? candidates[0] ?? null,
     [candidates, selectedCode],
@@ -98,11 +127,13 @@ export function AiFundScreenerPage() {
     const controller = new AbortController()
     controllerRef.current = controller
     setCandidates([])
+    setUnavailableTypes([])
     setSelectedCode(null)
     setReport('')
     setError('')
     setRetrievedAt(null)
     setResultHorizon(horizon)
+    setResultFundType(fundType)
     setResearchProgress(null)
     setPhase('loading')
     try {
@@ -110,6 +141,7 @@ export function AiFundScreenerPage() {
         if (event.type === 'meta') {
           const items = event.candidates ?? []
           setCandidates(items)
+          setUnavailableTypes(event.unavailable_types ?? [])
           setSelectedCode(items[0]?.code ?? null)
           setRetrievedAt(event.retrieved_at_ms ?? null)
           setResearchProgress({ completed: items.filter((item) => !!item.research).length, total: items.length })
@@ -151,12 +183,13 @@ export function AiFundScreenerPage() {
     <div className="space-y-4 px-5 py-5 md:px-8">
       <div className="rounded-xl border border-accent/25 bg-accent/[0.06] px-4 py-3 text-xs leading-5 text-secondary">
         <span className="font-medium text-foreground">研究候选：</span>候选来自东方财富公开基金排名数据，再由已配置的 AI 模型进行比较。每只基金单独标注净值日期；费率、回撤和持仓按实际来源覆盖情况展示，缺失项会明确列出。模型输出仅用于继续核对，不能据此交易。
+        {fundType === 'all' && <span className="mt-1 block">“全部类型”仅覆盖股票型、混合型、指数型和债券型榜单，按类别均衡抽取候选；不代表覆盖所有基金类别。</span>}
         {model.data && !model.data.configured && <span className="mt-1 block text-warning">尚未配置 AI 模型。请先到 <Link className="text-accent underline" to="/settings?tab=ai">AI 设置</Link>连接模型。</span>}
       </div>
 
       <section className="rounded-xl border border-border bg-surface p-4">
         <div className="flex flex-wrap items-end gap-3">
-          <label className="min-w-36 flex-1 space-y-1 text-xs text-secondary"><span>基金类型</span><select aria-label="基金类型" value={fundType} onChange={(event) => setFundType(event.target.value)} className="h-10 w-full rounded-md border border-border bg-base px-3 text-sm text-foreground">{FUND_TYPES.map((item) => <option key={item}>{item}</option>)}</select></label>
+          <label className="min-w-36 flex-1 space-y-1 text-xs text-secondary"><span>基金类型</span><select aria-label="基金类型" value={fundType} onChange={(event) => setFundType(event.target.value as AiFundType)} className="h-10 w-full rounded-md border border-border bg-base px-3 text-sm text-foreground">{FUND_TYPES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
           <label className="min-w-32 flex-1 space-y-1 text-xs text-secondary"><span>对比区间</span><select aria-label="对比区间" value={horizon} onChange={(event) => setHorizon(event.target.value)} className="h-10 w-full rounded-md border border-border bg-base px-3 text-sm text-foreground">{HORIZONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
           <label className="min-w-28 flex-1 space-y-1 text-xs text-secondary"><span>份额类别</span><select aria-label="份额类别" value={share} onChange={(event) => setShare(event.target.value)} className="h-10 w-full rounded-md border border-border bg-base px-3 text-sm text-foreground"><option value="all">全部</option><option value="A">A 类</option><option value="C">C 类</option></select></label>
           <button onClick={run} disabled={phase === 'loading' || model.data?.configured === false} className="inline-flex h-10 min-w-36 items-center justify-center gap-2 rounded-btn bg-accent px-4 text-sm font-medium text-white disabled:opacity-50"><Sparkles className="h-4 w-4" />{phase === 'loading' ? '正在分析…' : '生成研究候选'}</button>
@@ -172,6 +205,7 @@ export function AiFundScreenerPage() {
           : '基金资料已读取，正在生成 AI 对比说明…'}
       </div>}
       {error && <div role="alert" className="rounded-xl border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div>}
+      {!!unavailableTypes.length && <div role="status" className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">以下类型榜单暂不可用，本次只展示已返回的类别：{unavailableTypes.join('、')}。</div>}
 
       {!!candidates.length && <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_350px]">
         <section className="min-w-0 rounded-xl border border-border bg-surface">
@@ -187,6 +221,7 @@ export function AiFundScreenerPage() {
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0"><div className="truncate text-sm font-semibold text-foreground">{item.name}</div><div className="font-mono text-[11px] text-muted">{item.code}.OF</div></div>
                   {item.share_class && <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[11px] text-accent">{item.share_class} 类</span>}
+                  {resultFundType === 'all' && item.fund_type && <span className="rounded bg-surface px-1.5 py-0.5 text-[11px] text-secondary">{item.fund_type}</span>}
                 </div>
                 <div className="mt-3 flex items-end justify-between"><span className="text-xs text-secondary">{horizonLabel}</span><span className={`font-mono text-lg ${value == null ? 'text-muted' : value >= 0 ? 'text-bull' : 'text-bear'}`}>{pct(value)}</span></div>
                 <div className="mt-2 text-[11px] text-muted">近 1 月 {pct(item.growth_1m)} · 近 1 年 {pct(item.growth_1y)}</div>

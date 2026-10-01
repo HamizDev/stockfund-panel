@@ -82,15 +82,23 @@ class AnalyzeIn(BaseModel):
 
 
 class AiPickIn(BaseModel):
-    fund_type: Literal["股票型", "混合型", "指数型", "债券型"] = "混合型"
+    fund_type: Literal["all", "股票型", "混合型", "指数型", "债券型"] = "all"
     horizon: Literal["1m", "3m", "6m", "1y", "2y", "3y"] = "1y"
     share: Literal["all", "A", "C"] = "all"
+
+
+_AI_PICK_TYPES = ("股票型", "混合型", "指数型", "债券型")
+_AI_PICK_LIMIT = 16
+_AI_PICK_PER_TYPE_LIMIT = 4
 
 
 _AI_PICK_PROMPT = """你是公募基金研究助手。
 仅根据提供的历史收益榜单和 research 公开资料, 从候选中挑选最多 5 只值得进一步研究的基金, 并说明依据与局限。
 
 严格要求:
+- fund_type=all 仅表示股票型、混合型、指数型、债券型四类榜单; 每类最多提供 4 只候选, fund_type 字段标明其榜单类别。
+  不得声称覆盖所有基金类别。不同类别的风险和业绩比较基准可能不同, 不得仅按历史收益给出跨类别的全局优劣结论;
+  应先说明类别差异, 仅在口径相同或可比时比较收益, 缺少风险或基准信息时明确说明。
 - 只能引用候选清单内的数值, 包括 research 中实际可用的费率、回撤、持仓和日期。
   null/不可用不等于 0; 不得编造缺失费用、规模、经理、日期或未来收益。
 - nav_date 为每只基金榜单净值日期, 不代表统一榜单统计截止日。retrieved_at_ms 仅为抓取时间。
@@ -249,26 +257,58 @@ def build_router() -> APIRouter:
     @router.post("/screener/ai")
     async def ai_pick(req: AiPickIn):
         """从当前历史收益榜单生成研究候选, 沿用已配置的 AI 模型。"""
+        import asyncio
+
         from fastapi.concurrency import run_in_threadpool
         from fastapi.responses import StreamingResponse
 
         from app.services.ai_provider import stream_ai_text
         from app.services.ndjson_heartbeat import with_heartbeat
 
-        try:
-            rows = await run_in_threadpool(
-                svc.akshare_rank, req.fund_type, sort_by=req.horizon, limit=200
-            )
-        except Exception as e:
-            logger.warning("Fund ranking unavailable for AI pick: %s", e)
-            raise HTTPException(status_code=502, detail="基金历史收益榜单暂不可用") from e
+        rank_types = _AI_PICK_TYPES if req.fund_type == "all" else (req.fund_type,)
+        rank_results = await asyncio.gather(
+            *(
+                run_in_threadpool(svc.akshare_rank, fund_type, sort_by=req.horizon, limit=200)
+                for fund_type in rank_types
+            ),
+            return_exceptions=True,
+        )
+        rankings: dict[str, list[dict]] = {}
+        unavailable_types: list[str] = []
+        for fund_type, rows in zip(rank_types, rank_results, strict=True):
+            if isinstance(rows, asyncio.CancelledError):
+                raise rows
+            if isinstance(rows, Exception):
+                logger.warning("Fund ranking unavailable for AI pick (%s): %s", fund_type, rows)
+                unavailable_types.append(fund_type)
+            elif not rows:
+                logger.warning("Fund ranking returned no rows for AI pick (%s)", fund_type)
+                unavailable_types.append(fund_type)
+            else:
+                rankings[fund_type] = rows
+        if not rankings and unavailable_types:
+            raise HTTPException(status_code=502, detail="基金历史收益榜单暂不可用")
+
         field = f"growth_{req.horizon}"
-        candidates = [
-            row
-            for row in rows
-            if row[field] is not None
-            and (req.share == "all" or row["share_class"] == req.share)
-        ][:16]
+        per_type_limit = _AI_PICK_PER_TYPE_LIMIT if req.fund_type == "all" else _AI_PICK_LIMIT
+        candidates = []
+        seen_codes = set()
+        for fund_type in rank_types:
+            selected_for_type = 0
+            for row in rankings.get(fund_type, []):
+                code = str(row.get("code") or "").strip()
+                if (
+                    not code
+                    or code in seen_codes
+                    or row.get(field) is None
+                    or (req.share != "all" and row.get("share_class") != req.share)
+                ):
+                    continue
+                seen_codes.add(code)
+                candidates.append({**row, "fund_type": fund_type})
+                selected_for_type += 1
+                if selected_for_type >= per_type_limit or len(candidates) >= _AI_PICK_LIMIT:
+                    break
         if not candidates:
             raise HTTPException(status_code=422, detail="当前筛选条件下没有可核对收益数据的基金")
 
@@ -281,6 +321,7 @@ def build_router() -> APIRouter:
                     "type": "meta",
                     "candidates": candidates,
                     "fund_type": req.fund_type,
+                    "unavailable_types": unavailable_types,
                     "horizon": req.horizon,
                     "share": req.share,
                     "source": "东方财富公开基金排名" + (" (经 AKShare)" if candidates[0].get("source", "akshare") == "akshare" else " (直接回退)"),
