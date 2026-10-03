@@ -1031,18 +1031,24 @@ def _resolve_windows_codex_command(command: str) -> str | None:
 
 def _resolve_windows_desktop_codex() -> str | None:
     """Prefer the Codex Desktop bundled CLI over an older npm shim."""
+    # Launchers may redirect LOCALAPPDATA to isolate application caches. Codex
+    # remains installed in the signed-in Windows user's real profile.
+    roots: list[Path] = []
     local_appdata = os.environ.get("LOCALAPPDATA")
-    if not local_appdata:
-        return None
+    if local_appdata:
+        roots.append(Path(local_appdata) / "OpenAI" / "Codex" / "bin")
+    user_profile = os.environ.get("USERPROFILE")
+    if user_profile:
+        roots.append(Path(user_profile) / "AppData" / "Local" / "OpenAI" / "Codex" / "bin")
 
-    root = Path(local_appdata) / "OpenAI" / "Codex" / "bin"
-    if not root.exists():
-        return None
-
-    candidates = list(root.glob("*/codex.exe"))
-    direct = root / "codex.exe"
-    if direct.exists():
-        candidates.append(direct)
+    candidates: list[Path] = []
+    for root in dict.fromkeys(roots):
+        if not root.is_dir():
+            continue
+        candidates.extend(p for p in root.glob("*/codex.exe") if p.is_file())
+        direct = root / "codex.exe"
+        if direct.is_file():
+            candidates.append(direct)
     if not candidates:
         return None
 

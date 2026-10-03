@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import types
+from copy import deepcopy
 from datetime import date, timedelta
 
 import polars as pl
 import pytest
 
 from app.custom.ai_screener import routes, service
+from app.services.quote_service import QuoteService
 
 ETF_DATE = date(2026, 9, 30)
 
@@ -192,6 +194,167 @@ def test_stock_candidates_filter_by_stock_directory_and_keep_cache_coverage():
     assert response["coverage"] == {"computed": 1, "total": 2}
     assert response["cache_available"] is True
     assert [item["symbol"] for item in response["items"]] == ["000001.SZ"]
+
+
+def test_stock_candidate_passes_through_existing_daily_technical_fields():
+    as_of = "2026-09-30"
+    row = {
+        "symbol": "000001.SZ",
+        "name": "平安银行",
+        "close": 10.5,
+        "raw_close": 10.3,
+        "change_pct": 0.0123,
+        "amount": 1_000_000,
+        "volume": 10_000,
+        "turnover_rate": 0.8,
+        "ma5": 10.4,
+        "ma20": 10.2,
+        "ma60": 9.9,
+        "vol_ratio_5d": 1.7,
+        "macd_dif": 0.31,
+        "macd_dea": 0.28,
+        "macd_hist": 0.06,
+        "kdj_k": 65.0,
+        "kdj_d": 60.0,
+        "kdj_j": 75.0,
+    }
+    response = service.build_candidates(
+        {"as_of": as_of, "results": {"stock": {"as_of": as_of, "rows": [row]}}},
+        [{"id": "stock", "asset_types": ["stock"], "timeframes": ["1d"]}],
+        [], {}, None,
+    )
+
+    item = response["items"][0]
+    assert {key: item["metrics"][key] for key in row if key not in {"symbol", "name"}} == {
+        key: value for key, value in row.items() if key not in {"symbol", "name"}
+    }
+    assert item["price_source"] == "daily"
+    assert item["price_basis"] == "qfq"
+    assert item["technical_as_of"] == as_of
+
+
+def test_stock_candidate_nulls_non_finite_and_missing_technical_fields():
+    as_of = "2026-09-30"
+    row = {
+        "symbol": "000001.SZ",
+        "close": float("nan"),
+        "raw_close": None,
+        "vol_ratio_5d": float("inf"),
+        "macd_dif": float("-inf"),
+        "macd_dea": None,
+        "macd_hist": float("nan"),
+        "kdj_k": float("nan"),
+        "kdj_d": None,
+        "kdj_j": float("inf"),
+    }
+    response = service.build_candidates(
+        {"as_of": as_of, "results": {"stock": {"as_of": as_of, "rows": [row]}}},
+        [{"id": "stock", "asset_types": ["stock"], "timeframes": ["1d"]}],
+        [], {}, None,
+    )
+
+    item = response["items"][0]
+    assert all(value is None for value in item["metrics"].values())
+    assert item["price_basis"] == "qfq"
+    assert item["technical_as_of"] == as_of
+
+
+def test_stock_candidate_reads_legacy_cache_without_mutating_it():
+    as_of = "2026-09-30"
+    cached = {
+        "as_of": as_of,
+        "updated_at": 123,
+        "results": {"stock": {"as_of": as_of, "rows": [{
+            "symbol": "000001.SZ", "name": "平安银行", "close": 10.5,
+            "change_pct": 0.01, "amount": 1000, "volume": 100,
+            "turnover_rate": 0.2, "ma5": 10.4, "ma20": 10.2, "ma60": 9.9,
+        }]}},
+    }
+    before = deepcopy(cached)
+
+    response = service.build_candidates(
+        cached,
+        [{"id": "stock", "asset_types": ["stock"], "timeframes": ["1d"]}],
+        [], {}, None,
+    )
+
+    item = response["items"][0]
+    assert cached == before
+    assert item["metrics"]["close"] == 10.5
+    assert all(item["metrics"][field] is None for field in (
+        "raw_close", "vol_ratio_5d", "macd_dif", "macd_dea", "macd_hist",
+        "kdj_k", "kdj_d", "kdj_j",
+    ))
+    assert item["price_basis"] == "qfq"
+    assert item["technical_as_of"] == as_of
+
+
+def test_live_candidate_uses_raw_price_and_enriched_percent_turnover():
+    as_of = "2026-09-30"
+    row = {
+        "symbol": "000001.SZ", "name": "平安银行", "close": 10.0,
+        "raw_close": 9.8, "change_pct": 0.01, "amount": 500,
+        "volume": 50, "turnover_rate": 0.4, "ma20": 9.9,
+        "vol_ratio_5d": 1.5, "macd_dif": 0.2,
+    }
+    # Realtime provider input is decimal; quote_service turns it into the
+    # enriched percent value before get_enriched_today feeds this endpoint.
+    normalized = QuoteService._build_quote_extra([{
+        "symbol": "000001.SZ", "turnover_rate": 0.008,
+    }]).to_dicts()[0]
+    quote = {
+        **normalized, "close": 10.25, "change_pct": 0.025,
+        "amount": 1100, "volume": 100,
+    }
+    response = service.build_candidates(
+        {"as_of": as_of, "results": {"stock": {"as_of": as_of, "rows": [row]}}},
+        [{"id": "stock", "asset_types": ["stock"], "timeframes": ["1d"]}],
+        [quote],
+        {"enabled": True, "running": True, "is_trading_hours": True,
+         "quote_age_ms": 100, "last_fetch_ms": 123},
+        "test-provider",
+    )
+
+    item = response["items"][0]
+    assert response["quote"]["live"] is True
+    assert item["metrics"]["close"] == 10.25
+    assert item["metrics"]["raw_close"] == 9.8
+    assert item["metrics"]["turnover_rate"] == pytest.approx(0.8)
+    assert item["metrics"]["ma20"] == 9.9
+    assert item["metrics"]["macd_dif"] == 0.2
+    assert item["price_source"] == "live"
+    assert item["price_basis"] == "raw"
+    assert item["technical_as_of"] == as_of
+
+
+@pytest.mark.parametrize("quote_close", [None, float("nan"), 0])
+def test_invalid_live_price_keeps_daily_values_and_does_not_claim_live(quote_close):
+    as_of = "2026-09-30"
+    row = {
+        "symbol": "000001.SZ", "name": "平安银行", "close": 10.0,
+        "raw_close": 9.8, "change_pct": 0.01, "amount": 500,
+        "volume": 50, "turnover_rate": 0.4,
+    }
+    response = service.build_candidates(
+        {"as_of": as_of, "results": {"stock": {"as_of": as_of, "rows": [row]}}},
+        [{"id": "stock", "asset_types": ["stock"], "timeframes": ["1d"]}],
+        [{"symbol": "000001.SZ", "close": quote_close, "change_pct": 0.5,
+          "amount": 9999, "volume": 999, "turnover_rate": 8.0}],
+        {"enabled": True, "running": True, "is_trading_hours": True,
+         "quote_age_ms": 100, "last_fetch_ms": 123},
+        "test-provider",
+    )
+
+    item = response["items"][0]
+    assert response["quote"]["live"] is False
+    assert item["price_source"] == "daily"
+    assert item["price_basis"] == "qfq"
+    assert item["metrics"]["close"] == 10.0
+    assert item["metrics"]["change_pct"] == 0.01
+    assert item["metrics"]["amount"] == 500
+    assert item["metrics"]["volume"] == 50
+    assert item["metrics"]["turnover_rate"] == 0.4
+    assert item["technical_as_of"] == as_of
 
 
 def test_empty_stock_cache_exposes_missing_computation():

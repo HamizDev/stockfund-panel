@@ -17,7 +17,11 @@ from app.services.screener import ScreenerService
 
 logger = logging.getLogger(__name__)
 _STOCK_SYMBOL = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
-_FIELDS = ("close", "change_pct", "amount", "volume", "turnover_rate", "pe_ttm", "pb", "ma5", "ma20", "ma60")
+_FIELDS = (
+    "close", "raw_close", "change_pct", "amount", "volume", "turnover_rate",
+    "pe_ttm", "pb", "ma5", "ma20", "ma60", "vol_ratio_5d",
+    "macd_dif", "macd_dea", "macd_hist", "kdj_k", "kdj_d", "kdj_j",
+)
 _ETF_CANDIDATE_TTL = 15.0
 _ETF_CANDIDATE_CACHE_LIMIT = 16
 _ETF_CANDIDATE_CACHE: dict[tuple[Any, ...], tuple[float, dict]] = {}
@@ -109,16 +113,19 @@ def _aggregate_candidates(
                 candidate["row"] = row
 
     age = _finite(quote_status.get("quote_age_ms"))
+    valid_quotes = {
+        str(row.get("symbol") or "").upper(): row
+        for row in quotes
+        if isinstance(row, dict)
+        and (_finite(row.get("close")) or 0) > 0
+    }
     live = bool(
         asset_type == "stock"
         and quote_status.get("enabled") and quote_status.get("running")
         and quote_status.get("is_trading_hours") and age is not None
-        and age <= 120_000 and quote_status.get("last_fetch_ms") and bool(quotes)
+        and age <= 120_000 and quote_status.get("last_fetch_ms") and valid_quotes
     )
-    quote_map = {
-        str(row.get("symbol") or "").upper(): row
-        for row in quotes if isinstance(row, dict)
-    } if live else {}
+    quote_map = valid_quotes if live else {}
 
     candidates = []
     for symbol, item in grouped.items():
@@ -139,6 +146,10 @@ def _aggregate_candidates(
             "hit_count": len(hits),
             "metrics": metrics,
             "price_source": "live" if quote else "daily",
+            # close is a raw live quote when present; enriched close and all
+            # technical fields remain forward-adjusted at the strategy date.
+            "price_basis": "raw" if quote else "qfq",
+            "technical_as_of": as_of,
         })
     candidates.sort(key=lambda item: (-item["hit_count"], -abs(item["metrics"]["amount"] or 0), item["symbol"]))
     computed = len(computed_ids)

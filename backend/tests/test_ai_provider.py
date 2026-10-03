@@ -665,6 +665,37 @@ def test_codex_cli_available_false_when_command_missing(monkeypatch):
     assert ai_provider.codex_cli_available() is False
 
 
+def test_codex_resolver_uses_real_profile_with_redirected_appdata(monkeypatch, tmp_path):
+    """The local launcher isolates app caches without hiding the installed CLI."""
+    profile = tmp_path / "profile"
+    cli = profile / "AppData/Local/OpenAI/Codex/bin/version-a/codex.exe"
+    cli.parent.mkdir(parents=True)
+    cli.write_bytes(b"test executable")
+    monkeypatch.setenv("USERPROFILE", str(profile))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "isolated-appdata"))
+    monkeypatch.setattr(ai_provider.sys, "platform", "win32")
+    monkeypatch.setattr(ai_provider.shutil, "which", lambda name: None)
+
+    assert ai_provider._resolve_command("codex") == str(cli)
+
+
+def test_desktop_codex_resolver_works_without_localappdata(monkeypatch, tmp_path):
+    cli = tmp_path / "AppData/Local/OpenAI/Codex/bin/codex.exe"
+    cli.parent.mkdir(parents=True)
+    cli.write_bytes(b"test executable")
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+    assert ai_provider._resolve_windows_desktop_codex() == str(cli)
+
+
+def test_desktop_codex_resolver_has_no_candidate_for_empty_profile(monkeypatch, tmp_path):
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "empty-profile"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty-appdata"))
+
+    assert ai_provider._resolve_windows_desktop_codex() is None
+
+
 @pytest.mark.asyncio
 async def test_codex_exec_args_exclude_ephemeral(monkeypatch):
     """exec 参数不含 --ephemeral: 老版本 codex(如 0.58)无此参数, 传了直接报错。"""

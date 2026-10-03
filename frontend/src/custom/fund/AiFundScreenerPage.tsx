@@ -6,6 +6,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import { api } from '@/lib/api'
 import { fundApi, type AiFundType, type FundProfile, type FundRankItem } from './client'
+import { FundCandidateCard } from './FundCandidateCard'
 import { FundResearchPanel, rememberFundResearch } from './FundResearchPanel'
 
 const FUND_TYPES: Array<{ value: AiFundType; label: string }> = [
@@ -131,33 +132,11 @@ function saveableFundAnalyses(analyses: unknown): Record<string, PersistedFundAn
 }
 
 function pct(value: number | null | undefined): string {
-  return value == null || !Number.isFinite(value) ? '—' : `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
+  return value == null || !Number.isFinite(value) ? '未提供' : `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
 }
 
 function metric(item: FundRankItem, horizon: string): number | null {
   return item[`growth_${horizon}` as keyof FundRankItem] as number | null
-}
-
-function valuePct(value: number | null | undefined): string {
-  return value == null || !Number.isFinite(value) ? '—' : `${value.toFixed(2)}%`
-}
-
-function ReadinessBadge({
-  label,
-  status,
-  loading = false,
-}: {
-  label: string
-  status?: 'ok' | 'partial' | 'unavailable'
-  loading?: boolean
-}) {
-  const tone = status === 'ok'
-    ? 'border-bull/25 bg-bull/10 text-bull'
-    : status === 'partial'
-      ? 'border-warning/25 bg-warning/10 text-warning'
-      : 'border-border bg-base/60 text-muted'
-  const state = loading ? '读取中' : status === 'ok' ? '可用' : status === 'partial' ? '部分' : status === 'unavailable' ? '暂无' : '待获取'
-  return <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] leading-4 ${tone}`} title={`${label}：${state}`}>{label} {state}</span>
 }
 
 function ProfileFacts({ profile, candidate }: { profile: FundProfile; candidate: FundRankItem }) {
@@ -208,7 +187,7 @@ export function AiFundScreenerPage() {
   const controllerRef = useRef<AbortController | null>(null)
   const analysisControllerRef = useRef<{ code: string; controller: AbortController } | null>(null)
   const candidateListRef = useRef<HTMLElement | null>(null)
-  const selectedCandidateRef = useRef<HTMLButtonElement | null>(null)
+  const selectedCandidateRef = useRef<HTMLElement | null>(null)
   const detailPanelRef = useRef<HTMLElement | null>(null)
   const model = useQuery({ queryKey: ['ai-fund-model-status'], queryFn: api.strategyAiStatus, staleTime: 60_000 })
 
@@ -242,8 +221,6 @@ export function AiFundScreenerPage() {
     enabled: detailTab === 'profile' && !!selectedThscode,
     staleTime: 5 * 60_000,
   })
-  const horizonLabel = HORIZONS.find((option) => option.value === resultHorizon)?.label ?? resultHorizon
-
   function scrollToDetail() {
     if (window.matchMedia('(max-width: 1279px)').matches) {
       detailPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -270,8 +247,9 @@ export function AiFundScreenerPage() {
     scrollToDetail()
   }
 
-  async function generateSelectedAnalysis() {
-    if (!selected || !selectedThscode) return
+  async function generateSelectedAnalysis(targetCode: string) {
+    const targetCandidate = candidates.find((candidate) => candidate.code === targetCode)
+    if (!targetCandidate) return
     const previous = analysisControllerRef.current
     if (previous) {
       previous.controller.abort()
@@ -283,7 +261,8 @@ export function AiFundScreenerPage() {
       })
     }
 
-    const code = selected.code
+    const code = targetCandidate.code
+    const targetThscode = `${targetCandidate.code}.OF`
     const controller = new AbortController()
     analysisControllerRef.current = { code, controller }
     setFundAnalysisByCode((current) => ({
@@ -296,7 +275,7 @@ export function AiFundScreenerPage() {
     }))
 
     try {
-      for await (const event of fundApi.analyzeStream(selectedThscode, undefined, controller.signal)) {
+      for await (const event of fundApi.analyzeStream(targetThscode, undefined, controller.signal)) {
         if (controller.signal.aborted) return
         if (event.type === 'meta') {
           setFundAnalysisByCode((current) => ({
@@ -367,6 +346,17 @@ export function AiFundScreenerPage() {
         ? { ...current, [selected.code]: { ...analysis, status: 'cancelled' } }
         : current
     })
+  }
+
+  function openCandidateAnalysis(code: string) {
+    selectCandidate(code)
+    setDetailTab('analysis')
+  }
+
+  function startCandidateAnalysis(code: string) {
+    selectCandidate(code)
+    setDetailTab('analysis')
+    void generateSelectedAnalysis(code)
   }
 
   async function run() {
@@ -481,48 +471,25 @@ export function AiFundScreenerPage() {
             <div className="text-sm font-semibold">历史榜单候选 <span className="text-xs font-normal text-muted">{candidates.length} 只</span></div>
             <div className="flex items-center gap-1 text-[11px] text-muted"><Database className="h-3.5 w-3.5" />东方财富公开基金排名</div>
           </div>
-          <div className="grid gap-2.5 p-3 md:grid-cols-2 xl:grid-cols-3">
-            {candidates.map((item) => {
-              const value = metric(item, resultHorizon)
-              const research = item.research
-              const risk = research?.risk
-              const drawdown = risk?.max_drawdown_pct
-              const navDate = item.nav_date ?? research?.nav_date
-              return <button
-                key={item.code}
-                ref={selected?.code === item.code ? selectedCandidateRef : undefined}
-                type="button"
-                aria-pressed={selected?.code === item.code}
-                onClick={() => selectCandidate(item.code)}
-                className={`min-w-0 rounded-lg border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${selected?.code === item.code ? 'border-accent/65 bg-accent/[0.08] shadow-sm' : 'border-border bg-base/40 hover:border-accent/35 hover:bg-elevated/40'}`}
-              >
-                <div className="flex min-h-10 items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold text-foreground">{item.name}</div>
-                    <div className="mt-0.5 font-mono text-[10px] text-muted">{item.code}.OF</div>
-                  </div>
-                  <div className="flex shrink-0 flex-wrap justify-end gap-1">
-                    {item.share_class && <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">{item.share_class} 类</span>}
-                    {resultFundType === 'all' && item.fund_type && <span className="rounded bg-elevated px-1.5 py-0.5 text-[10px] text-secondary">{item.fund_type}</span>}
-                  </div>
-                </div>
-                <div className="mt-2.5 flex items-end justify-between gap-2">
-                  <span className="text-[11px] text-secondary">{horizonLabel}</span>
-                  <span className={`font-mono text-lg tabular-nums ${value == null ? 'text-muted' : value >= 0 ? 'text-bull' : 'text-bear'}`}>{pct(value)}</span>
-                </div>
-                <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted">
-                  <span>1 月 {pct(item.growth_1m)}</span><span>1 年 {pct(item.growth_1y)}</span>
-                  <span>净值 {item.nav == null || !Number.isFinite(item.nav) ? '—' : item.nav.toFixed(4)}</span>
-                  <span>日期 {navDate ?? '未知'}</span>
-                </div>
-                {item.purchase_fee_text != null && <div className="mt-1 truncate text-[10px] text-secondary" title={`榜单申购费参考：${item.purchase_fee_text || '—'}`}>榜单申购费 {item.purchase_fee_text || '—'}</div>}
-                <div className="mt-2.5 flex flex-wrap gap-1.5 border-t border-border/60 pt-2">
-                  <ReadinessBadge label={`回撤 ${valuePct(drawdown)}`} status={risk?.status} loading={!research && phase === 'loading'} />
-                  <ReadinessBadge label="费率" status={research?.fees.status} loading={!research && phase === 'loading'} />
-                  <ReadinessBadge label="持仓" status={research?.holdings.status} loading={!research && phase === 'loading'} />
-                </div>
-              </button>
-            })}
+          <div className="grid gap-2.5 p-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr))]">
+            {candidates.map((item) => <FundCandidateCard
+              key={item.code}
+              item={item}
+              selected={selected?.code === item.code}
+              resultFundType={resultFundType}
+              horizon={resultHorizon}
+              analysisStatus={fundAnalysisByCode[item.code]?.status}
+              researchSummary={fundAnalysisByCode[item.code]?.summary}
+              analysisContent={fundAnalysisByCode[item.code]?.content}
+              analysisGeneratedAt={fundAnalysisByCode[item.code]?.generatedAt}
+              analysisError={fundAnalysisByCode[item.code]?.error}
+              modelConfigured={model.data?.configured}
+              modelProvider={model.data?.provider}
+              selectedRef={selected?.code === item.code ? (element) => { selectedCandidateRef.current = element } : undefined}
+              onSelect={selectCandidate}
+              onAnalyze={startCandidateAnalysis}
+              onViewAnalysis={openCandidateAnalysis}
+            />)}
           </div>
         </section>
 
@@ -532,7 +499,7 @@ export function AiFundScreenerPage() {
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="truncate text-base font-semibold text-foreground">{selected.name}</div>
-                <div className="mt-0.5 font-mono text-[11px] text-muted">{selected.code}.OF <span className="font-sans">· 净值日期 {selected.nav_date ?? selected.research?.nav_date ?? '未知'}</span></div>
+                <div className="mt-0.5 font-mono text-[11px] text-muted">{selected.code}.OF <span className="font-sans">· 净值日期 {selected.nav_date ?? selected.research?.nav_date ?? (selected.research ? '未提供' : '待获取')}</span></div>
               </div>
               <Link to={`/fund?code=${encodeURIComponent(selectedThscode)}&name=${encodeURIComponent(selected.name)}&research_horizon=${encodeURIComponent(resultHorizon)}`} aria-label="查看基金详情" title="查看基金详情" className="inline-flex h-9 shrink-0 items-center gap-1 rounded-btn border border-accent/35 bg-accent/10 px-2.5 text-[11px] text-accent hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
                 详情 <ArrowUpRight className="h-3.5 w-3.5" />
@@ -590,7 +557,7 @@ export function AiFundScreenerPage() {
                   <div className="text-xs font-semibold text-foreground">单只基金 AI 分析</div>
                   {selectedAnalysis?.status === 'loading'
                     ? <button type="button" onClick={cancelSelectedAnalysis} className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-danger/30 px-2.5 text-[11px] text-danger hover:bg-danger/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger"><span>停止接收</span></button>
-                    : <button type="button" onClick={generateSelectedAnalysis} disabled={model.data?.configured === false} className="inline-flex min-h-11 items-center gap-1.5 rounded-md bg-accent px-2.5 text-[11px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+                    : <button type="button" onClick={() => selected && generateSelectedAnalysis(selected.code)} disabled={model.data?.configured === false} className="inline-flex min-h-11 items-center gap-1.5 rounded-md bg-accent px-2.5 text-[11px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
                       <Sparkles className="h-3.5 w-3.5" />{selectedAnalysis?.status === 'done' ? '重新生成' : selectedAnalysis?.status === 'error' ? '重试分析' : '生成分析'}
                     </button>}
                 </div>

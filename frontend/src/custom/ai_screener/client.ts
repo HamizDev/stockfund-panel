@@ -9,6 +9,14 @@ export interface CandidateMetrics {
   ma5: number | null
   ma20: number | null
   ma60: number | null
+  raw_close?: number | null
+  vol_ratio_5d?: number | null
+  macd_dif?: number | null
+  macd_dea?: number | null
+  macd_hist?: number | null
+  kdj_k?: number | null
+  kdj_d?: number | null
+  kdj_j?: number | null
 }
 
 export interface Candidate {
@@ -18,6 +26,8 @@ export interface Candidate {
   hit_count: number
   metrics: CandidateMetrics
   price_source: 'live' | 'daily'
+  price_basis?: 'raw' | 'qfq'
+  technical_as_of?: string | null
 }
 
 export interface CandidateResponse {
