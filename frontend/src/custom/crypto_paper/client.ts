@@ -4,6 +4,9 @@ export type CryptoSymbol = 'BTCUSDT' | 'ETHUSDT' | 'SOLUSDT'
 export type CryptoAction = 'buy' | 'sell' | 'open_long' | 'open_short' | 'close_long' | 'close_short'
 
 export interface CryptoQuote {
+  exchange?: CryptoExchange
+  source?: string
+  last?: string
   market: CryptoMarket
   symbol: CryptoSymbol
   bid: string
@@ -49,6 +52,8 @@ export interface CryptoStrategyModel {
 }
 
 export interface CryptoStrategyAccount {
+  effective_readonly?: boolean
+  readonly_reason?: string | null
   id: string
   name: string
   exchange: CryptoExchange
@@ -213,6 +218,32 @@ export interface CryptoValuation {
   usdm: { equity: string; margin: string; unrealized_pnl: string; total_pnl: string }
 }
 
+export type CryptoChartInterval = '1m' | '5m' | '15m' | '1h' | '4h'
+export interface CryptoCandle {
+  open_time_ms: number
+  close_time_ms: number
+  open: string
+  high: string
+  low: string
+  close: string
+  volume: string
+}
+export interface CryptoStreamStatus {
+  connected: boolean
+  fresh: boolean
+  asof_ms: number | null
+  error: string | null
+  source: string
+}
+export interface CryptoTicker {
+  symbol: CryptoSymbol
+  bid: string
+  ask: string
+  mark: string
+  last: string
+  asof_ms: number
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api/custom/crypto-paper${path}`, {
     credentials: 'same-origin',
@@ -224,6 +255,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const cryptoApi = {
+  marketQuote: (symbol: CryptoSymbol) =>
+    request<{ quote: CryptoQuote; stream: CryptoStreamStatus }>(`/market/${symbol}/quote`),
+  candles: (symbol: CryptoSymbol, interval: CryptoChartInterval) =>
+    request<{ symbol: CryptoSymbol; interval: CryptoChartInterval; bars: CryptoCandle[]; closed_only: boolean }>(`/market/${symbol}/candles?interval=${interval}`),
+  marketStream: (symbol: CryptoSymbol) => new EventSource(`/api/custom/crypto-paper/market/${symbol}/stream`),
   account: async () => {
     const result = await request<CryptoAccount>('/account')
     if (!result?.spot?.positions || !result?.usdm?.positions || !Array.isArray(result.trades)) {

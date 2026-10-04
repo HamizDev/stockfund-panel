@@ -1,4 +1,4 @@
-"""Independent public Binance quotes and research-only crypto paper accounts."""
+"""Public Bitget data and research-only crypto paper accounts."""
 from __future__ import annotations
 
 from app.extensions import BACKEND_EXTENSION_API_VERSION, BackendExtensionRegistrar
@@ -15,11 +15,21 @@ def setup(registrar: BackendExtensionRegistrar) -> None:
 
 def startup(context) -> None:
     from app.custom.crypto_paper import auto
+    from app.custom.crypto_paper.public_stream import stream
 
-    auto.start(context.data_dir)
+    stream.start()
+    try:
+        auto.start(context.data_dir)
+    except Exception:
+        stream.stop()
+        raise
 
 
 def shutdown(context) -> None:
     from app.custom.crypto_paper import auto
+    from app.custom.crypto_paper.public_stream import stream
 
-    auto.shutdown(context.data_dir)
+    try:
+        auto.shutdown(context.data_dir)
+    finally:
+        stream.stop()

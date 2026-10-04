@@ -8,6 +8,10 @@
 // ===== Query Key 工厂 =====
 
 export const QK = {
+  cryptoMarketQuote: (symbol: string) => ['crypto-market-quote', 'bitget', 'usdm', symbol] as const,
+  cryptoCandles: (symbol: string, interval: string) => ['crypto-candles', 'bitget', 'usdm', symbol, interval] as const,
+  cryptoAccountDetail: (id: string) => ['crypto-strategy-account-detail', id] as const,
+  cryptoLegacyAccount: ['crypto-legacy-account'] as const,
   // 全局 / 共享 (Layout 预取)
   capabilities:   ['capabilities'] as const,
   settings:       ['settings'] as const,

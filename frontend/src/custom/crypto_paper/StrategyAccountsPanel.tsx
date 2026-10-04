@@ -50,8 +50,8 @@ type FormState = {
 
 const INITIAL_FORM: FormState = {
   name: '策略模拟账户',
-  exchange: 'binance',
-  market: 'spot',
+  exchange: 'bitget',
+  market: 'usdm',
   symbol: 'BTCUSDT',
   strategy_id: 'ema_trend',
   fast_period: '20',
@@ -109,6 +109,20 @@ function exchangeName(exchange: CryptoExchange) {
   return exchange === 'bitget' ? 'Bitget' : 'Binance'
 }
 
+function isCurrentAccount(account: CryptoStrategyAccount) {
+  const serverReadOnly = 'effective_readonly' in account && account.effective_readonly === true
+  return !serverReadOnly && account.exchange === 'bitget' && account.market === 'usdm'
+}
+
+function readOnlyAccountMessage(account: CryptoStrategyAccount) {
+  if ('readonly_reason' in account && typeof account.readonly_reason === 'string' && account.readonly_reason.trim()) {
+    return account.readonly_reason.trim()
+  }
+  return account.exchange === 'binance'
+    ? 'Binance 账户仅作为历史记录保留，只能查看详情；启停和运行操作已禁用，不会请求行情或运行账户。'
+    : '当前仅支持 Bitget USDT 本位合约；此账户仅保留只读查看，不会请求行情或运行账户。'
+}
+
 function takerFeeLabel(account: CryptoStrategyAccount) {
   return account.taker_fee_rate == null
     ? '待获取公开手续费率'
@@ -117,7 +131,7 @@ function takerFeeLabel(account: CryptoStrategyAccount) {
 
 function accountStatus(status: string) {
   const labels: Record<string, string> = {
-    paused: '暂停', disabled: '已停用', enabled: '待检查', waiting: '等待首次估值', catching_up: '补账中', 'catching-up': '补账中', running: '运行中', active: '运行中', error: '估值待核对',
+    paused: '暂停', disabled: '已停用', enabled: '待检查', waiting: '等待首次估值', catching_up: '补账中', 'catching-up': '补账中', running: '运行中', active: '运行中', error: '估值待核对', readonly: '历史只读',
   }
   return labels[status.toLowerCase()] ?? (status || '状态未知')
 }
@@ -235,7 +249,9 @@ function positionSummary(value: unknown, market: CryptoMarket) {
   return fields
 }
 
-export function StrategyAccountsPanel() {
+export function StrategyAccountsPanel({ onInspectAccount }: {
+  onInspectAccount?: (account: CryptoStrategyAccount) => void
+} = {}) {
   const [strategies, setStrategies] = useState<CryptoStrategyDefinition[]>(FALLBACK_STRATEGIES)
   const [strategyError, setStrategyError] = useState('')
   const [accounts, setAccounts] = useState<CryptoStrategyAccount[] | null>(null)
@@ -337,7 +353,9 @@ export function StrategyAccountsPanel() {
     }
   }, [])
 
-  const rankedAccounts = useMemo(() => [...(accounts ?? [])].sort((left, right) => {
+  const currentAccounts = useMemo(() => (accounts ?? []).filter(isCurrentAccount), [accounts])
+  const readOnlyAccounts = useMemo(() => (accounts ?? []).filter(account => !isCurrentAccount(account)), [accounts])
+  const rankedAccounts = useMemo(() => [...currentAccounts].sort((left, right) => {
     const leftReady = !valuationPending(left)
     const rightReady = !valuationPending(right)
     if (!leftReady) return rightReady ? 1 : 0
@@ -345,7 +363,7 @@ export function StrategyAccountsPanel() {
     if (left.return_pct == null) return right.return_pct == null ? 0 : 1
     if (right.return_pct == null) return -1
     return right.return_pct - left.return_pct
-  }), [accounts])
+  }), [currentAccounts])
 
   const loadDetail = (id: string): Promise<void> => {
     const revision = (detailRevision.current[id] ?? 0) + 1
@@ -413,6 +431,9 @@ export function StrategyAccountsPanel() {
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setFormError('')
+    if (form.exchange !== 'bitget' || form.market !== 'usdm') {
+      return setFormError('新建账户仅支持 Bitget USDT 本位合约。')
+    }
     const initialCash = Number(form.initial_cash)
     const allocation = Number(form.allocation_pct)
     const stopLoss = Number(form.stop_loss_pct)
@@ -442,8 +463,8 @@ export function StrategyAccountsPanel() {
     setActionError('')
     const common = {
       name: form.name.trim(),
-      exchange: form.market === 'usdm' ? form.exchange : 'binance',
-      market: form.market,
+      exchange: 'bitget' as const,
+      market: 'usdm' as const,
       symbol: form.symbol,
       strategy_id: form.strategy_id,
       strategy_params: strategyParams,
@@ -465,7 +486,7 @@ export function StrategyAccountsPanel() {
       } else {
         const body: CryptoStrategyAccountCreate = {
           ...common,
-          leverage: form.market === 'spot' ? 1 : Number(form.leverage),
+          leverage: Number(form.leverage),
         }
         const result = await cryptoApi.createStrategyAccount(body)
         saveAccounts([result.account])
@@ -482,6 +503,10 @@ export function StrategyAccountsPanel() {
   }
 
   const applyDraft = (draft: CryptoStrategyDraft) => {
+    if (draft.exchange !== 'bitget' || draft.market !== 'usdm') {
+      setFormError('Binance 历史草案仅供查看，不能填入账户创建表。')
+      return
+    }
     setCreationMode('single')
     setForm(current => ({
       ...current,
@@ -505,6 +530,10 @@ export function StrategyAccountsPanel() {
   }
 
   const toggleEnabled = async (account: CryptoStrategyAccount) => {
+    if (!isCurrentAccount(account)) {
+      setActionError(readOnlyAccountMessage(account))
+      return
+    }
     if (accountActionId !== null) return
     setAccountActionId(account.id)
     setActionError('')
@@ -520,6 +549,10 @@ export function StrategyAccountsPanel() {
   }
 
   const runAccount = async (account: CryptoStrategyAccount) => {
+    if (!isCurrentAccount(account)) {
+      setActionError(readOnlyAccountMessage(account))
+      return
+    }
     if (accountActionId !== null) return
     setAccountActionId(account.id)
     setRunningId(account.id)
@@ -548,12 +581,86 @@ export function StrategyAccountsPanel() {
 
   const strategyOptions = strategies.length ? strategies : FALLBACK_STRATEGIES
   const renderedModel = model ?? DEFAULT_MODEL
+  const renderAccountRows = (rows: CryptoStrategyAccount[], readOnly = false) => rows.map((account, index) => {
+    const detail = details[account.id]
+    const isExpanded = expandedId === account.id
+    const pendingValuation = valuationMessage(account)
+    const feeLabel = takerFeeLabel(account)
+    return <Fragment key={account.id}>
+      <tr className="border-b border-border/50 align-top hover:bg-elevated/30">
+        <td className="px-3 py-3"><div className="font-medium text-foreground">{readOnly ? '历史记录' : `#${index + 1}`} · {account.name}</div><div className="mt-1 text-[11px] text-muted">{account.symbol} · {account.interval} · 初始 {formatMoney(account.initial_cash)} USDT</div></td>
+        <td><div>{exchangeName(account.exchange)} · {account.market === 'spot' ? '现货' : 'U 本位'} · {accountName(account, strategies)}</div><div className="mt-1 text-[11px] text-muted">{strategyParametersLabel(account)} · 仓位 {formatPercent(account.allocation_pct)}</div>{feeLabel && <div className="mt-1 text-[10px] text-muted">{feeLabel}</div>}</td>
+        <td>{account.leverage}x</td>
+        <td className="font-mono">{pendingValuation ?? formatMoney(account.equity)}</td>
+        <td className={`font-mono ${pendingValuation ? 'text-muted' : Number(account.total_pnl) > 0 ? 'text-accent' : Number(account.total_pnl) < 0 ? 'text-danger' : ''}`}>{pendingValuation ?? formatMoney(account.total_pnl)}</td>
+        <td className={`font-mono ${pendingValuation ? 'text-muted' : Number(account.return_pct) > 0 ? 'text-accent' : Number(account.return_pct) < 0 ? 'text-danger' : ''}`}>{pendingValuation ?? formatPercent(account.return_pct)}</td>
+        <td className="font-mono">{formatPercent(account.max_drawdown_pct)}</td>
+        <td>{account.trade_count} / {account.liquidation_count}<div className="mt-1 text-[11px] text-muted">费 {formatMoney(account.fee_total, 4)} · 资费 {formatMoney(account.funding_total, 4)}</div></td>
+        <td className="pr-3 py-2">
+          {readOnly
+            ? <div className="mb-2 space-y-1"><span className="rounded-full border border-border px-2 py-0.5 text-muted">历史只读</span><div className="text-[10px] text-muted">记录状态：{account.enabled ? '已启用' : '已暂停'} · {accountStatus(account.status)}</div></div>
+            : <div className="mb-2 space-y-1"><span className={`rounded-full border px-2 py-0.5 ${account.enabled ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border text-muted'}`}>{account.enabled ? '策略已启用' : '已暂停'}</span><div className="text-[10px] text-muted">账户状态：{accountStatus(account.status)}</div></div>}
+          <div className="flex flex-wrap gap-1.5">
+            {readOnly ? <>
+              <button type="button" disabled title={readOnlyAccountMessage(account)} className="inline-flex cursor-not-allowed items-center gap-1 rounded-btn border border-border px-2 py-1 text-[11px] text-muted opacity-50">{account.enabled ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3" />}{account.enabled ? '暂停' : '启用'}</button>
+              <button type="button" disabled title={readOnlyAccountMessage(account)} className="cursor-not-allowed rounded-btn border border-border px-2 py-1 text-[11px] text-muted opacity-50">运行已禁用</button>
+            </> : <>
+              <button type="button" onClick={() => { void toggleEnabled(account) }} disabled={accountActionId !== null} className="inline-flex items-center gap-1 rounded-btn border border-border px-2 py-1 text-[11px] text-secondary hover:text-foreground disabled:opacity-50">
+                {account.enabled ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3" />}{account.enabled ? '暂停' : '启用'}
+              </button>
+              <button type="button" onClick={() => { void runAccount(account) }} disabled={accountActionId !== null} className="rounded-btn border border-border px-2 py-1 text-[11px] text-secondary disabled:opacity-50">{runningId === account.id ? '检查中…' : account.enabled ? '立即运行' : '检查持仓'}</button>
+            </>}
+            <button type="button" onClick={() => toggleDetail(account.id)} aria-expanded={isExpanded} className="inline-flex items-center gap-1 rounded-btn border border-border px-2 py-1 text-[11px] text-secondary">
+              {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}{isExpanded ? '收起' : '明细'}
+            </button>
+            {!readOnly && onInspectAccount && <button type="button" onClick={() => onInspectAccount(account)} className="rounded-btn border border-accent/40 px-2 py-1 text-[11px] text-accent hover:bg-accent/10">在图表查看</button>}
+          </div>
+          {readOnly && <p className="mt-2 max-w-[260px] text-[10px] leading-relaxed text-muted">{readOnlyAccountMessage(account)}</p>}
+          {(account.last_error || account.last_check_ms != null) && <div className={`mt-2 max-w-[260px] text-[10px] ${account.last_error ? 'text-danger' : 'text-muted'}`}>{account.last_error ? account.last_error : `最近检查 ${formatTime(account.last_check_ms)}`}</div>}
+        </td>
+      </tr>
+      {isExpanded && <tr className="border-b border-border/50 bg-elevated/20"><td colSpan={9} className="p-3">
+        {detailLoading[account.id] && !detail && <div className="flex items-center gap-2 py-5 text-xs text-muted"><Loader2 className="h-4 w-4 animate-spin" />正在加载账户净值和最近事件…</div>}
+        {detailErrors[account.id] && <div className="rounded-btn border border-danger/40 bg-danger/10 p-3 text-xs text-danger">{detailErrors[account.id]}</div>}
+        {detail && <div className="grid gap-3 lg:grid-cols-[1.1fr_0.9fr]">
+          <div className="space-y-3">
+            {readOnly && <div className="rounded-btn border border-border bg-elevated/30 p-3 text-xs leading-relaxed text-secondary">{readOnlyAccountMessage(account)}以下账户净值、持仓和事件仅按已保存记录展示。</div>}
+            <NavChart points={detail.nav} />
+            <div className="grid grid-cols-2 gap-2 text-[11px] text-muted sm:grid-cols-4">
+              <div className="rounded-btn border border-border p-2">现金 <b className="ml-1 font-mono text-foreground">{formatMoney(detail.account.cash)}</b></div>
+              <div className="rounded-btn border border-border p-2">止损 / 止盈 <b className="ml-1 text-foreground">{formatPercent(detail.account.stop_loss_pct)} / {formatPercent(detail.account.take_profit_pct)}</b></div>
+              <div className="rounded-btn border border-border p-2">最近信号 <b className="ml-1 text-foreground">{detail.account.last_signal || '—'}</b></div>
+              <div className="rounded-btn border border-border p-2">信号 K 线 <b className="ml-1 text-foreground">{formatTime(detail.account.last_bar_time_ms)}</b></div>
+            </div>
+            <div className="rounded-btn border border-border p-3">
+              <div className="text-xs font-semibold">当前持仓</div>
+              {Object.entries(detail.account.positions ?? {}).length ? <div className="mt-2 space-y-1 text-[11px]">
+                {Object.entries(detail.account.positions ?? {}).map(([symbol, position]) => {
+                  const summary = positionSummary(position, detail.account.market)
+                  return <div key={symbol} className="flex flex-wrap items-center justify-between gap-2"><span className="text-secondary">{symbol}</span><span className="text-muted">{summary.length ? summary.join(' · ') : '持仓字段暂不可用'}</span></div>
+                })}
+              </div> : <p className="mt-2 text-[11px] text-muted">暂无持仓。</p>}
+            </div>
+          </div>
+          <div className="rounded-btn border border-border p-3">
+            <div className="text-xs font-semibold">最近事件</div>
+            {detail.trades.length ? <div className="mt-2 max-h-64 space-y-2 overflow-y-auto">
+              {[...detail.trades].slice(-12).reverse().map(event => <div key={event.id} className="flex items-start justify-between gap-3 border-b border-border/50 pb-2 text-[11px] last:border-0">
+                <div><div className="font-medium text-foreground">{eventLabel(event)}{event.symbol ? ` · ${event.symbol}` : ''}</div><div className="mt-0.5 text-muted">{eventTime(event)}{event.leverage ? ` · ${event.leverage}x` : ''}</div></div>
+                <div className="text-right font-mono text-secondary">{event.quantity ? `${event.quantity} ` : ''}{event.price ? `@ ${formatMoney(event.price, 4)}` : ''}{event.fee ? <div className="text-muted">手续费 {formatMoney(event.fee, 4)}</div> : null}{event.funding_amount ? <div className="text-muted">资金费 {formatMoney(event.funding_amount, 4)}</div> : null}{event.realized_pnl ? <div>盈亏 {formatMoney(event.realized_pnl)}</div> : null}</div>
+              </div>)}
+            </div> : <p className="mt-3 text-xs text-muted">暂无成交、资金费或强平事件。</p>}
+          </div>
+        </div>}
+      </td></tr>}
+    </Fragment>
+  })
 
   return <section className="space-y-4 rounded-card border border-border bg-surface p-4">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div>
         <div className="flex items-center gap-2"><Activity className="h-4 w-4 text-accent" /><h2 className="text-sm font-semibold">策略自动模拟账户</h2></div>
-        <p className="mt-1 text-xs text-muted">每个账户单独持有虚拟资金，可单独暂停、检查或做杠杆对照。</p>
+        <p className="mt-1 text-xs text-muted">Bitget USDT 本位账户使用独立虚拟资金，可单独暂停、检查或做杠杆对照；Binance 账户只作为历史记录查看。</p>
       </div>
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <span className={`rounded-full border px-2.5 py-1 ${runtimeRunning ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border text-muted'}`}>
@@ -568,7 +675,7 @@ export function StrategyAccountsPanel() {
     </div>
 
     <div className="rounded-btn border border-amber-500/30 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-300">
-      仅作研究模拟，不连接真实账户或交易 Key。Bitget 成交手续费率使用公开合约规则返回的 Taker 费率；Binance 使用固定示例费率（现货 0.1%、合约 0.05%），均按模拟成交扣费。费率尚未返回时显示“待获取公开手续费率”。Bitget 资金费使用交易所公布的实际费率及 1 分钟 MARK 价格开盘价估算标记价；Binance 资金费采用已公布的结算标记价。维护保证金率 {formatRate(renderedModel.maintenance_margin_rate)}、强平费率 {formatRate(renderedModel.liquidation_fee_rate)} 是统一固定研究假设，不代表各交易所实际保证金档位或撮合结果。策略只在所选 1 小时或 4 小时 K 线收盘后生成信号；后台约每 {model.poll_seconds || 30} 秒轮询，无需保持浏览器打开。暂停会停止策略开平仓，已有持仓仍继续进行资金费与强平核算。行情或资金费数据不可用、账户异常或补账期间，旧收益不代表最新状态。模拟收益不代表实盘盈利能力。
+      仅作研究模拟，新账户仅支持 Bitget USDT 本位合约，不连接真实账户或交易 Key。Bitget 成交手续费率使用公开合约规则返回的 Taker 费率；Binance 历史账户仅保留只读记录，不提供新建、启停或运行入口。费率尚未返回时显示“待获取公开手续费率”。Bitget 资金费使用交易所公布的实际费率及 1 分钟 MARK 价格开盘价估算标记价。维护保证金率 {formatRate(renderedModel.maintenance_margin_rate)}、强平费率 {formatRate(renderedModel.liquidation_fee_rate)} 是统一固定研究假设，不代表交易所实际保证金档位或撮合结果。策略只在所选 1 小时或 4 小时 K 线收盘后生成信号；后台约每 {model.poll_seconds || 30} 秒轮询，无需保持浏览器打开。暂停会停止策略开平仓，已有持仓仍继续进行资金费与强平核算。行情或资金费数据不可用、账户异常或补账期间，旧收益不代表最新状态。模拟收益不代表实盘盈利能力。
     </div>
 
     {(accountsError || strategyError || actionError) && <div className="space-y-1 rounded-btn border border-danger/40 bg-danger/10 p-3 text-sm text-danger">
@@ -592,12 +699,8 @@ export function StrategyAccountsPanel() {
 
       <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <label className="text-xs text-muted">账户名称<input aria-label="账户名称" required maxLength={80} value={form.name} onChange={event => setForm(current => ({ ...current, name: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground" /></label>
-        <label className="text-xs text-muted">市场<select value={form.market} onChange={event => {
-          const market = event.target.value as CryptoMarket
-          setForm(current => ({ ...current, market, exchange: market === 'spot' ? 'binance' : 'bitget', leverage: market === 'spot' ? '1' : current.leverage }))
-          if (market === 'spot') setCreationMode('single')
-        }} aria-label="市场" className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground"><option value="spot">现货</option><option value="usdm">U 本位合约</option></select></label>
-        {form.market === 'usdm' && <label className="text-xs text-muted">交易所<select aria-label="交易所" value={form.exchange} onChange={event => setForm(current => ({ ...current, exchange: event.target.value as CryptoExchange }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground"><option value="binance">Binance</option><option value="bitget">Bitget</option></select></label>}
+        <div className="text-xs text-muted">交易所<div className="mt-1 rounded-btn border border-border bg-base p-2 text-foreground">Bitget</div></div>
+        <div className="text-xs text-muted">市场<div className="mt-1 rounded-btn border border-border bg-base p-2 text-foreground">USDT 本位合约</div></div>
         <label className="text-xs text-muted">交易对<select aria-label="策略交易对" value={form.symbol} onChange={event => setForm(current => ({ ...current, symbol: event.target.value as CryptoSymbol }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{SYMBOLS.map(item => <option key={item}>{item}</option>)}</select></label>
         <label className="text-xs text-muted">策略<select aria-label="策略类型" value={form.strategy_id} onChange={event => setForm(current => ({ ...current, strategy_id: event.target.value as CryptoStrategyId }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{strategyOptions.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         {form.strategy_id === 'ema_trend' ? <>
@@ -626,74 +729,25 @@ export function StrategyAccountsPanel() {
         <tbody>
           {accountsLoading && accounts === null && <tr><td colSpan={9} className="px-3 py-8 text-center text-muted"><span className="inline-flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" />正在加载策略账户…</span></td></tr>}
           {!accountsLoading && accounts === null && accountsError && <tr><td colSpan={9} className="px-3 py-8 text-center text-danger">策略账户列表加载失败，请稍后刷新。</td></tr>}
-          {!accountsLoading && accounts !== null && rankedAccounts.length === 0 && <tr><td colSpan={9} className="px-3 py-8 text-center text-muted">暂无策略模拟账户。创建的账户会保存在后端，初始状态为暂停。</td></tr>}
-          {rankedAccounts.map((account, index) => {
-            const detail = details[account.id]
-            const isExpanded = expandedId === account.id
-            const pendingValuation = valuationMessage(account)
-            const feeLabel = takerFeeLabel(account)
-            return <Fragment key={account.id}>
-              <tr className="border-b border-border/50 align-top hover:bg-elevated/30">
-                <td className="px-3 py-3"><div className="font-medium text-foreground">#{index + 1} · {account.name}</div><div className="mt-1 text-[11px] text-muted">{account.symbol} · {account.interval} · 初始 {formatMoney(account.initial_cash)} USDT</div></td>
-                <td><div>{exchangeName(account.exchange)} · {account.market === 'spot' ? '现货' : 'U 本位'} · {accountName(account, strategies)}</div><div className="mt-1 text-[11px] text-muted">{strategyParametersLabel(account)} · 仓位 {formatPercent(account.allocation_pct)}</div>{feeLabel && <div className="mt-1 text-[10px] text-muted">{feeLabel}</div>}</td>
-                <td>{account.leverage}x</td>
-                <td className="font-mono">{pendingValuation ?? formatMoney(account.equity)}</td>
-                <td className={`font-mono ${pendingValuation ? 'text-muted' : Number(account.total_pnl) > 0 ? 'text-accent' : Number(account.total_pnl) < 0 ? 'text-danger' : ''}`}>{pendingValuation ?? formatMoney(account.total_pnl)}</td>
-                <td className={`font-mono ${pendingValuation ? 'text-muted' : Number(account.return_pct) > 0 ? 'text-accent' : Number(account.return_pct) < 0 ? 'text-danger' : ''}`}>{pendingValuation ?? formatPercent(account.return_pct)}</td>
-                <td className="font-mono">{formatPercent(account.max_drawdown_pct)}</td>
-                <td>{account.trade_count} / {account.liquidation_count}<div className="mt-1 text-[11px] text-muted">费 {formatMoney(account.fee_total, 4)} · 资费 {formatMoney(account.funding_total, 4)}</div></td>
-                <td className="pr-3 py-2">
-                  <div className="mb-2 space-y-1"><span className={`rounded-full border px-2 py-0.5 ${account.enabled ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border text-muted'}`}>{account.enabled ? '策略已启用' : '已暂停'}</span><div className="text-[10px] text-muted">账户状态：{accountStatus(account.status)}</div></div>
-                  <div className="flex flex-wrap gap-1.5">
-                    <button type="button" onClick={() => { void toggleEnabled(account) }} disabled={accountActionId !== null} className="inline-flex items-center gap-1 rounded-btn border border-border px-2 py-1 text-[11px] text-secondary hover:text-foreground disabled:opacity-50">
-                      {account.enabled ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3" />}{account.enabled ? '暂停' : '启用'}
-                    </button>
-                    <button type="button" onClick={() => { void runAccount(account) }} disabled={accountActionId !== null} className="rounded-btn border border-border px-2 py-1 text-[11px] text-secondary disabled:opacity-50">{runningId === account.id ? '检查中…' : account.enabled ? '立即运行' : '检查持仓'}</button>
-                    <button type="button" onClick={() => toggleDetail(account.id)} aria-expanded={isExpanded} className="inline-flex items-center gap-1 rounded-btn border border-border px-2 py-1 text-[11px] text-secondary">
-                      {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}{isExpanded ? '收起' : '明细'}
-                    </button>
-                  </div>
-                  {(account.last_error || account.last_check_ms != null) && <div className={`mt-2 max-w-[260px] text-[10px] ${account.last_error ? 'text-danger' : 'text-muted'}`}>{account.last_error ? account.last_error : `最近检查 ${formatTime(account.last_check_ms)}`}</div>}
-                </td>
-              </tr>
-              {isExpanded && <tr className="border-b border-border/50 bg-elevated/20"><td colSpan={9} className="p-3">
-                {detailLoading[account.id] && !detail && <div className="flex items-center gap-2 py-5 text-xs text-muted"><Loader2 className="h-4 w-4 animate-spin" />正在加载账户净值和最近事件…</div>}
-                {detailErrors[account.id] && <div className="rounded-btn border border-danger/40 bg-danger/10 p-3 text-xs text-danger">{detailErrors[account.id]}</div>}
-                {detail && <div className="grid gap-3 lg:grid-cols-[1.1fr_0.9fr]">
-                  <div className="space-y-3">
-                    <NavChart points={detail.nav} />
-                    <div className="grid grid-cols-2 gap-2 text-[11px] text-muted sm:grid-cols-4">
-                      <div className="rounded-btn border border-border p-2">现金 <b className="ml-1 font-mono text-foreground">{formatMoney(detail.account.cash)}</b></div>
-                      <div className="rounded-btn border border-border p-2">止损 / 止盈 <b className="ml-1 text-foreground">{formatPercent(detail.account.stop_loss_pct)} / {formatPercent(detail.account.take_profit_pct)}</b></div>
-                      <div className="rounded-btn border border-border p-2">最近信号 <b className="ml-1 text-foreground">{detail.account.last_signal || '—'}</b></div>
-                      <div className="rounded-btn border border-border p-2">信号 K 线 <b className="ml-1 text-foreground">{formatTime(detail.account.last_bar_time_ms)}</b></div>
-                    </div>
-                    <div className="rounded-btn border border-border p-3">
-                      <div className="text-xs font-semibold">当前持仓</div>
-                      {Object.entries(detail.account.positions ?? {}).length ? <div className="mt-2 space-y-1 text-[11px]">
-                        {Object.entries(detail.account.positions ?? {}).map(([symbol, position]) => {
-                          const summary = positionSummary(position, detail.account.market)
-                          return <div key={symbol} className="flex flex-wrap items-center justify-between gap-2"><span className="text-secondary">{symbol}</span><span className="text-muted">{summary.length ? summary.join(' · ') : '持仓字段暂不可用'}</span></div>
-                        })}
-                      </div> : <p className="mt-2 text-[11px] text-muted">暂无持仓。</p>}
-                    </div>
-                  </div>
-                  <div className="rounded-btn border border-border p-3">
-                    <div className="text-xs font-semibold">最近事件</div>
-                    {detail.trades.length ? <div className="mt-2 max-h-64 space-y-2 overflow-y-auto">
-                      {[...detail.trades].slice(-12).reverse().map(event => <div key={event.id} className="flex items-start justify-between gap-3 border-b border-border/50 pb-2 text-[11px] last:border-0">
-                        <div><div className="font-medium text-foreground">{eventLabel(event)}{event.symbol ? ` · ${event.symbol}` : ''}</div><div className="mt-0.5 text-muted">{eventTime(event)}{event.leverage ? ` · ${event.leverage}x` : ''}</div></div>
-                        <div className="text-right font-mono text-secondary">{event.quantity ? `${event.quantity} ` : ''}{event.price ? `@ ${formatMoney(event.price, 4)}` : ''}{event.fee ? <div className="text-muted">手续费 {formatMoney(event.fee, 4)}</div> : null}{event.funding_amount ? <div className="text-muted">资金费 {formatMoney(event.funding_amount, 4)}</div> : null}{event.realized_pnl ? <div>盈亏 {formatMoney(event.realized_pnl)}</div> : null}</div>
-                      </div>)}
-                    </div> : <p className="mt-3 text-xs text-muted">暂无成交、资金费或强平事件。</p>}
-                  </div>
-                </div>}
-              </td></tr>}
-            </Fragment>
-          })}
+          {!accountsLoading && accounts !== null && rankedAccounts.length === 0 && <tr><td colSpan={9} className="px-3 py-8 text-center text-muted">暂无 Bitget USDT 本位合约账户。创建的账户会保存在后端，初始状态为暂停；历史账户可在下方展开查看。</td></tr>}
+          {renderAccountRows(rankedAccounts)}
         </tbody>
       </table>
     </div>
+    {readOnlyAccounts.length > 0 && <details className="rounded-btn border border-border">
+      <summary className="cursor-pointer list-none px-3 py-2 text-xs font-medium text-secondary">历史只读账户（{readOnlyAccounts.length}） · Binance {readOnlyAccounts.filter(account => account.exchange === 'binance').length} 个</summary>
+      <div className="space-y-2 border-t border-border p-3">
+        <p className="text-[11px] leading-relaxed text-muted">历史账户不参与当前账户收益排名。Binance 账户只保留已保存数据供查看；启用、暂停和运行按钮禁用，不会发送相应操作或行情请求。</p>
+        <div className="overflow-x-auto rounded-btn border border-border">
+          <table className="w-full min-w-[1060px] text-left text-xs">
+            <thead className="border-b border-border bg-elevated/40 text-muted"><tr>
+              <th className="px-3 py-2">历史账户</th><th>市场与策略</th><th>杠杆</th><th>权益</th><th>总盈亏</th><th>收益率</th><th>最大回撤</th><th>成交 / 强平</th><th className="pr-3">只读状态</th>
+            </tr></thead>
+            <tbody>{renderAccountRows(readOnlyAccounts, true)}</tbody>
+          </table>
+        </div>
+      </div>
+    </details>}
     <div className="flex flex-wrap justify-between gap-2 text-[11px] text-muted">
       <span>收益率用于账户排名；账户之间虚拟资金、持仓和费用独立。</span>
       <span>模型滑点：{renderedModel.slippage_bps} bps · 轮询间隔：{renderedModel.poll_seconds}s</span>

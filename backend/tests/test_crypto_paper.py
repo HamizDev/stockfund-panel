@@ -136,23 +136,27 @@ def test_spot_zero_market_lot_uses_conservative_lot_size(monkeypatch):
     assert client.quote("spot", "BTCUSDT")["step_size"] == "0.00001"
 
 
-def test_replay_survives_quote_outage_and_requires_request_id(tmp_path: Path, monkeypatch):
+def test_retired_manual_wallet_preserves_history_without_quotes(tmp_path: Path, monkeypatch):
+    _trade(tmp_path, request="once")
+    path = tmp_path / "user_data" / "crypto_paper.json"
+    original = path.read_bytes()
     app = FastAPI()
     app.include_router(build_router())
     app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
-    monkeypatch.setattr(client, "quote", lambda market, symbol: _quote(market))
+    monkeypatch.setattr(client, "quote", lambda *_args: pytest.fail("legacy must not fetch quotes"))
     api = TestClient(app)
     body = {"market": "spot", "symbol": "BTCUSDT", "action": "buy",
             "quantity": "1", "leverage": 1, "request_id": "once"}
     first = api.post("/api/custom/crypto-paper/orders", json=body)
-    assert first.status_code == 200
-    monkeypatch.setattr(client, "quote", lambda market, symbol: (_ for _ in ()).throw(RuntimeError("offline")))
+    assert first.status_code == 410
     retried = api.post("/api/custom/crypto-paper/orders", json=body)
-    assert retried.status_code == 200
-    assert retried.json()["order"] == first.json()["order"]
+    assert retried.status_code == 410
+    assert len(api.get("/api/custom/crypto-paper/account").json()["trades"]) == 1
     assert api.post("/api/custom/crypto-paper/orders", json={k: v for k, v in body.items() if k != "request_id"}).status_code == 422
     assert len(ledger.load(tmp_path)["trades"]) == 1
-    assert api.get("/api/custom/crypto-paper/quote/spot/NOTREAL").status_code == 400
+    assert api.get("/api/custom/crypto-paper/quote/spot/BTCUSDT").status_code == 410
+    assert api.get("/api/custom/crypto-paper/valuation").status_code == 410
+    assert path.read_bytes() == original
 
 
 def test_twenty_x_gap_liquidation_does_not_spend_free_cash(tmp_path):
@@ -213,16 +217,16 @@ def test_strategy_api_creates_paused_comparison_and_checks_missing_account(tmp_p
     assert api.get("/api/custom/crypto-paper/strategy-accounts/absent").status_code == 404
 
 
-def test_strategy_api_bitget_is_explicit_and_default_stays_binance(tmp_path):
+def test_strategy_api_defaults_to_bitget_and_rejects_unsupported_sources(tmp_path):
     app = FastAPI()
     app.include_router(build_router())
     app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     api = TestClient(app)
     body = {"name": "paper", "market": "usdm", "symbol": "ETHUSDT", "strategy_id": "ema_trend",
-            "request_id": "binance-default", "leverage": 10}
+            "request_id": "bitget-default", "leverage": 10}
     default = api.post("/api/custom/crypto-paper/strategy-accounts", json=body)
     assert default.status_code == 200
-    assert default.json()["account"]["exchange"] == "binance"
+    assert default.json()["account"]["exchange"] == "bitget"
     selected = api.post("/api/custom/crypto-paper/strategy-accounts", json={
         **body, "exchange": "bitget", "request_id": "bitget-paper"})
     assert selected.status_code == 200
@@ -231,4 +235,7 @@ def test_strategy_api_bitget_is_explicit_and_default_stays_binance(tmp_path):
     denied = api.post("/api/custom/crypto-paper/strategy-accounts", json={
         **body, "exchange": "bitget", "market": "spot", "leverage": 1, "request_id": "bad-spot"})
     assert denied.status_code == 400
+    denied_source = api.post("/api/custom/crypto-paper/strategy-accounts", json={
+        **body, "exchange": "binance", "request_id": "bad-binance"})
+    assert denied_source.status_code == 400
     assert len(api.get("/api/custom/crypto-paper/strategy-accounts").json()["accounts"]) == 2

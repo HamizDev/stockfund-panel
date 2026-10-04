@@ -1,193 +1,102 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Coins, RefreshCcw } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
-import { cryptoApi, type CryptoAccount, type CryptoAction, type CryptoMarket, type CryptoQuote, type CryptoSymbol, type CryptoValuation } from './client'
+import { QK } from '@/lib/queryKeys'
+import { cryptoApi, type CryptoChartInterval, type CryptoStrategyAccount, type CryptoTicker, type CryptoSymbol } from './client'
+import { CryptoMarketChart } from './CryptoMarketChart'
 import { StrategyAccountsPanel } from './StrategyAccountsPanel'
+import { positionLevels, validQuote, validTicker } from './market-view'
 
 const SYMBOLS: CryptoSymbol[] = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
-const ACTIONS: Record<CryptoMarket, { value: CryptoAction; label: string }[]> = {
-  spot: [{ value: 'buy', label: '买入' }, { value: 'sell', label: '卖出' }],
-  usdm: [
-    { value: 'open_long', label: '开多' }, { value: 'open_short', label: '开空' },
-    { value: 'close_long', label: '平多' }, { value: 'close_short', label: '平空' },
-  ],
-}
-
-function money(value: string | number | undefined, digits = 2) {
-  const n = Number(value)
-  return Number.isFinite(n) ? n.toLocaleString('zh-CN', { maximumFractionDigits: digits }) : '—'
+const PERIODS: CryptoChartInterval[] = ['1m', '5m', '15m', '1h', '4h']
+const PERIOD_NAMES = { '1m': '1 分钟', '5m': '5 分钟', '15m': '15 分钟', '1h': '1 小时', '4h': '4 小时' }
+function money(value: string | number | null | undefined, digits = 2) {
+  if (value == null || value === '') return '—'
+  const number = Number(value)
+  return Number.isFinite(number) ? number.toLocaleString('zh-CN', { maximumFractionDigits: digits }) : '—'
 }
 
 export function CryptoPaperPage() {
-  const [market, setMarket] = useState<CryptoMarket>('spot')
-  const [symbol, setSymbol] = useState<CryptoSymbol>('BTCUSDT')
-  const [action, setAction] = useState<CryptoAction>('buy')
-  const [quantity, setQuantity] = useState('')
-  const [leverage, setLeverage] = useState(1)
-  const [account, setAccount] = useState<CryptoAccount | null>(null)
-  const [valuation, setValuation] = useState<CryptoValuation | null>(null)
-  const [quote, setQuote] = useState<CryptoQuote | null>(null)
-  const [error, setError] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [loading, setLoading] = useState(true)
-  const [refreshing, setRefreshing] = useState(false)
-  const pendingId = useRef<string | null>(null)
-  const refreshRef = useRef<(() => Promise<void>) | null>(null)
-  const contextRef = useRef(`${market}:${symbol}`)
-  contextRef.current = `${market}:${symbol}`
-
-  const refresh = () => { void refreshRef.current?.() }
-
+  const [symbol, setSymbol] = useState<CryptoSymbol>('ETHUSDT')
+  const [interval, setIntervalValue] = useState<CryptoChartInterval>('1h')
+  const [selected, setSelected] = useState<CryptoStrategyAccount | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [ticker, setTicker] = useState<CryptoTicker | null>(null)
+  const [feedError, setFeedError] = useState<string | null>(null)
+  const [now, setNow] = useState(Date.now())
+  const quoteQuery = useQuery({ queryKey: QK.cryptoMarketQuote(symbol), queryFn: () => cryptoApi.marketQuote(symbol), refetchInterval: 15_000, retry: false })
+  const candleQuery = useQuery({ queryKey: QK.cryptoCandles(symbol, interval), queryFn: () => cryptoApi.candles(symbol, interval), refetchInterval: 30_000, retry: false })
+  const detailQuery = useQuery({ queryKey: QK.cryptoAccountDetail(selected?.id ?? ''), queryFn: () => cryptoApi.strategyAccountDetail(selected!.id), enabled: selected !== null, refetchInterval: 15_000, retry: false })
+  const historyQuery = useQuery({ queryKey: QK.cryptoLegacyAccount, queryFn: cryptoApi.account, enabled: historyOpen, retry: false })
   useEffect(() => {
+    setTicker(null)
+    setFeedError(null)
     let alive = true
-    let inFlight = false
-    let queuedRefresh = false
-    let timer: number | undefined
-    setQuote(null)
-    setValuation(null)
-    setError('')
-    setLoading(true)
-
-    const refreshCycle = async () => {
-      if (timer !== undefined) {
-        window.clearTimeout(timer)
-        timer = undefined
-      }
+    const source = cryptoApi.marketStream(symbol)
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    source.onmessage = event => {
       if (!alive) return
-      if (inFlight) {
-        queuedRefresh = true
-        return
-      }
-      inFlight = true
-      setRefreshing(true)
-      const [accountResult, quoteResult, valuationResult] = await Promise.allSettled([
-        cryptoApi.account(), cryptoApi.quote(market, symbol), cryptoApi.valuation(),
-      ])
-      if (alive) {
-        const errors: string[] = []
-        if (accountResult.status === 'fulfilled') setAccount(accountResult.value)
-        else errors.push(accountResult.reason instanceof Error ? accountResult.reason.message : '账本暂不可用')
-        if (quoteResult.status === 'fulfilled') setQuote(quoteResult.value)
-        else {
-          setQuote(null)
-          errors.push(quoteResult.reason instanceof Error ? quoteResult.reason.message : '行情暂不可用')
+      try {
+        const payload = JSON.parse(event.data)
+        if (payload.stream?.fresh && payload.stream?.connected && validTicker(payload.ticker, symbol, Date.now())) {
+          setTicker(payload.ticker)
+          setFeedError(null)
+        } else {
+          setTicker(null)
+          setFeedError(typeof payload.stream?.error === 'string' ? payload.stream.error : '实时推送等待有效报价，当前尝试 REST')
         }
-        if (valuationResult.status === 'fulfilled') setValuation(valuationResult.value)
-        else {
-          setValuation(null)
-          errors.push(valuationResult.reason instanceof Error ? valuationResult.reason.message : '估值暂不可用')
-        }
-        setError(errors.join('；'))
-        setLoading(false)
-        setRefreshing(false)
-      }
-      inFlight = false
-      if (alive) {
-        const nextDelay = queuedRefresh ? 0 : 15_000
-        queuedRefresh = false
-        timer = window.setTimeout(() => { void refreshCycle() }, nextDelay)
-      }
+      } catch { setTicker(null); setFeedError('实时推送数据无效，当前尝试 REST') }
     }
-
-    refreshRef.current = refreshCycle
-    void refreshCycle()
-    return () => {
-      alive = false
-      if (timer !== undefined) window.clearTimeout(timer)
-      if (refreshRef.current === refreshCycle) refreshRef.current = null
-    }
-  }, [market, symbol])
-
-  const selectMarket = (next: CryptoMarket) => {
-    setMarket(next)
-    setAction(ACTIONS[next][0].value)
-    pendingId.current = null
+    source.onerror = () => { if (alive) { setTicker(null); setFeedError('实时推送连接中断，当前尝试 REST') } }
+    return () => { alive = false; source.close(); window.clearInterval(timer) }
+  }, [symbol])
+  const live = ticker && validTicker(ticker, symbol, now) ? ticker : null
+  const rest = quoteQuery.data?.quote
+  const restFresh = validQuote(rest, symbol, now)
+  const price = live ?? (restFresh ? rest : null)
+  const detail = !detailQuery.isError && detailQuery.data?.account.id === selected?.id ? detailQuery.data : null
+  const levels = detail?.account.symbol === symbol ? positionLevels(detail.account) : []
+  const refresh = () => { void quoteQuery.refetch(); void candleQuery.refetch(); if (selected) void detailQuery.refetch() }
+  const selectAccount = (account: CryptoStrategyAccount) => {
+    if (account.exchange !== 'bitget' || account.market !== 'usdm' || account.effective_readonly) return
+    setSelected(account); setSymbol(account.symbol); setIntervalValue(account.interval)
   }
-
-  const place = async () => {
-    if (!quote || busy || !Number.isFinite(Number(quantity)) || Number(quantity) <= 0) return
-    setBusy(true)
-    const context = `${market}:${symbol}`
-    const requestId = pendingId.current || crypto.randomUUID()
-    pendingId.current = requestId
-    try {
-      const result = await cryptoApi.order({ market, symbol, action, quantity, leverage, request_id: requestId })
-      if (contextRef.current === context) {
-        setAccount(result.account)
-        setValuation(null)
-        setQuantity('')
-        setError('')
-        pendingId.current = null
-      }
-      void refreshRef.current?.()
-    } catch (cause) {
-      if (contextRef.current === context) setError(cause instanceof Error ? cause.message : '模拟订单失败')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const wallet = account?.[market]
-  const quotePrice = action === 'buy' || action === 'open_long' || action === 'close_short' ? quote?.ask : quote?.bid
-  const spotPositions = account ? Object.entries(account.spot.positions) : []
-  const futurePositions = account ? Object.entries(account.usdm.positions) : []
-
   return <div className="space-y-4 p-4 md:p-6">
-    <PageHeader title="数字资产模拟" subtitle="公开行情 · 独立策略账户与虚拟账本" titleExtra={<Coins className="h-4 w-4 text-accent" />} />
-    <div className="rounded-card border border-amber-500/35 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-300">
-      研究模拟，绝不连接真实账户。手动订单使用盘口最优价及固定示例手续费；U 本位持仓的资金费用由后台按已公布的历史资金费率事件结算。风险核算采用简化逐仓维持保证金与强平模型，不包含交易所真实阶梯保证金和盘口深度。数据接口失败时，后台可能暂停本轮资金费与风险记账；模拟结果不代表实盘，10x/20x 收益不能推断可盈利。行情中断时停止下单。
-    </div>
-    <div className="flex flex-wrap gap-2">
-      {(['spot', 'usdm'] as const).map(item => <button key={item} onClick={() => selectMarket(item)}
-        className={`rounded-btn border px-3 py-2 text-sm ${market === item ? 'border-accent bg-accent/15 text-accent' : 'border-border text-secondary'}`}>
-        {item === 'spot' ? '币安现货手动' : '币安 U 本位手动'}
-      </button>)}
-      <button onClick={refresh} className="ml-auto flex items-center gap-1 rounded-btn border border-border px-3 py-2 text-xs text-secondary"><RefreshCcw className="h-3.5 w-3.5" />刷新</button>
-    </div>
-    {error && <div className="rounded-card border border-danger/40 bg-danger/10 p-3 text-sm text-danger">{error}</div>}
-    <div className="grid gap-3 lg:grid-cols-[1.1fr_0.9fr]">
-      <section className="rounded-card border border-border bg-surface p-4">
-        <h2 className="text-sm font-semibold">币安手动行情与模拟下单</h2>
-        <div className="mt-3 grid gap-3 sm:grid-cols-2">
-          <label className="text-xs text-muted">交易对<select value={symbol} onChange={event => { setSymbol(event.target.value as CryptoSymbol); pendingId.current = null }} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{SYMBOLS.map(item => <option key={item}>{item}</option>)}</select></label>
-          <label className="text-xs text-muted">方向<select value={action} onChange={event => { setAction(event.target.value as CryptoAction); pendingId.current = null }} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{ACTIONS[market].map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
-        </div>
-        <div className="mt-3 grid grid-cols-3 gap-2 text-xs text-muted">
-          <div className="rounded-btn border border-border p-2">买一 {money(quote?.bid, 4)}</div>
-          <div className="rounded-btn border border-border p-2">卖一 {money(quote?.ask, 4)}</div>
-          <div className="rounded-btn border border-border p-2">标记 {market === 'usdm' ? money(quote?.mark ?? undefined, 4) : '—'}</div>
-        </div>
-        <p className="mt-2 text-[11px] text-muted">{quote ? `更新于 ${new Date(quote.asof_ms).toLocaleString()} · 最小数量 ${quote.min_qty} · 步长 ${quote.step_size}` : '等待公开行情'}</p>
-        {market === 'usdm' && <p className="mt-1 text-[11px] text-muted">最新资金费率 {quote?.last_funding_rate ?? '—'}（仅展示最新费率；持仓资金费按已公布历史事件由后台结算）</p>}
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <label className="text-xs text-muted">数量<input value={quantity} onChange={event => { setQuantity(event.target.value); pendingId.current = null }} inputMode="decimal" placeholder={quote?.min_qty ?? '0.001'} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>
-          {market === 'usdm' && <label className="text-xs text-muted">杠杆（研究模拟）<select value={leverage} onChange={event => { setLeverage(Number(event.target.value)); pendingId.current = null }} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{[1, 2, 3, 5, 10, 20].map(item => <option key={item} value={item}>{item}x</option>)}</select></label>}
-        </div>
-        <p className="mt-2 text-xs text-muted">参考成交价 {money(quotePrice, 4)} USDT · 名义金额约 {quantity && quotePrice ? money(Number(quantity) * Number(quotePrice), 2) : '—'} USDT</p>
-        <button disabled={!quote || busy || !quantity} onClick={place} className="mt-3 rounded-btn bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{busy ? '处理中…' : '提交虚拟订单'}</button>
-        {loading && <p className="mt-2 text-xs text-muted">正在同步模拟账本、公开行情和账户估值…</p>}
-        {!loading && refreshing && <p className="mt-2 text-xs text-muted">正在同步最新账本与估值…</p>}
-      </section>
-      <section className="rounded-card border border-border bg-surface p-4">
-        <h2 className="text-sm font-semibold">{market === 'spot' ? '币安现货' : '币安合约'}手动虚拟账户</h2>
-        <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
-          <div className="rounded-btn border border-border p-3"><span className="text-xs text-muted">可用 USDT</span><div className="mt-1 font-mono">{money(wallet?.cash)}</div></div>
-          <div className="rounded-btn border border-border p-3"><span className="text-xs text-muted">估算总权益</span><div className="mt-1 font-mono">{money(valuation?.[market].equity)}</div></div>
-          <div className="rounded-btn border border-border p-3"><span className="text-xs text-muted">已实现盈亏</span><div className="mt-1 font-mono">{money(wallet?.realized_pnl)}</div></div>
-          <div className="rounded-btn border border-border p-3"><span className="text-xs text-muted">估算总盈亏</span><div className="mt-1 font-mono">{money(valuation?.[market].total_pnl)}</div></div>
-        </div>
-        <div className="mt-4 text-xs font-semibold">当前持仓</div>
-        <div className="mt-2 space-y-2 text-xs">{market === 'spot' ?
-          (spotPositions.length ? spotPositions.map(([code, pos]) => <div key={code} className="rounded-btn border border-border p-2">{code} · {pos.qty} · 成本 {money(pos.cost)} USDT</div>) : <p className="text-muted">暂无现货持仓</p>) :
-          (futurePositions.length ? futurePositions.map(([code, pos]) => <div key={code} className="rounded-btn border border-border p-2">{code} · {pos.side === 'long' ? '多' : '空'} {pos.qty} · 入场 {money(pos.entry, 4)} · 保证金 {money(pos.margin)} · {pos.leverage}x</div>) : <p className="text-muted">暂无合约持仓</p>)}
-        </div>
-      </section>
-    </div>
-    <section className="rounded-card border border-border bg-surface p-4">
-      <h2 className="text-sm font-semibold">币安手动虚拟账本事件</h2>
-      <div className="mt-2 overflow-x-auto"><table className="w-full min-w-[760px] text-left text-xs"><thead className="border-b border-border text-muted"><tr><th className="py-2">时间</th><th>市场</th><th>交易对</th><th>事件 / 方向</th><th>数量</th><th>价格</th><th>手续费</th><th>资金费用</th><th>已实现盈亏</th></tr></thead><tbody>{account?.trades.slice(-30).reverse().map(item => <tr key={item.id} className="border-b border-border/50"><td className="py-2">{new Date(item.at).toLocaleString()}</td><td>{item.market}</td><td>{item.symbol}</td><td>{item.kind === 'funding' ? '资金费' : item.kind === 'liquidation' ? '强平' : item.action}</td><td>{item.quantity ?? '—'}</td><td>{money(item.price, 4)}</td><td>{money(item.fee, 4)}</td><td>{money(item.funding_amount, 4)}</td><td>{money(item.realized_pnl)}</td></tr>)}</tbody></table></div>
-      {!account?.trades.length && <p className="mt-3 text-xs text-muted">尚无虚拟成交</p>}
+    <PageHeader title="数字资产模拟" subtitle="Bitget 公开行情 · 独立策略账户与虚拟账本" titleExtra={<Coins className="h-4 w-4 text-accent" />} />
+    <div className="rounded-card border border-amber-500/35 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-300">当前只开放 Bitget USDT 本位合约模拟，无需交易 API Key。策略依据已收盘 K 线，后台每 30 秒检查一次；行情过期时暂停本轮模拟下单。新建账户默认暂停，10x/20x 为研究杠杆，费用与简化强平模型计入虚拟账本。</div>
+    <section className="rounded-card border border-border bg-surface p-3 md:p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="mr-auto text-sm font-semibold">Bitget 合约行情</h2>
+        <label className="text-xs text-muted">交易对<select aria-label="图表交易对" value={symbol} onChange={event => { setSymbol(event.target.value as CryptoSymbol); setSelected(null) }} className="ml-2 rounded-btn border border-border bg-base p-2 text-foreground">{SYMBOLS.map(item => <option key={item}>{item}</option>)}</select></label>
+        <label className="text-xs text-muted">周期<select aria-label="图表周期" value={interval} onChange={event => setIntervalValue(event.target.value as CryptoChartInterval)} className="ml-2 rounded-btn border border-border bg-base p-2 text-foreground">{PERIODS.map(item => <option key={item} value={item}>{PERIOD_NAMES[item]}</option>)}</select></label>
+        <button onClick={refresh} className="flex items-center gap-1 rounded-btn border border-border px-3 py-2 text-xs text-secondary"><RefreshCcw className="h-3.5 w-3.5" />刷新</button>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+        <div className="rounded-btn border border-border p-2"><span className="text-muted">买一</span><div className="mt-1 font-mono">{money(price?.bid, 4)}</div></div>
+        <div className="rounded-btn border border-border p-2"><span className="text-muted">卖一</span><div className="mt-1 font-mono">{money(price?.ask, 4)}</div></div>
+        <div className="rounded-btn border border-border p-2"><span className="text-muted">标记价格</span><div className="mt-1 font-mono">{money(price?.mark, 4)}</div></div>
+        <div className="rounded-btn border border-border p-2"><span className="text-muted">行情连接</span><div className={`mt-1 ${price ? 'text-accent' : 'text-amber-300'}`}>{live ? '公开实时推送' : restFresh ? 'REST 报价回退' : '行情暂不可用'}</div></div>
+      </div>
+      <p className="mt-2 text-[11px] text-muted">{price ? `行情时间 ${new Date(price.asof_ms).toLocaleString()} · ` : ''}仅展示已收盘 K 线，图表时间为北京时间。下方选择“在图表查看”可关联账户成交与风险线。</p>
+      {feedError && !live && <p className="mt-2 text-xs text-amber-300">{feedError}</p>}
+      {quoteQuery.error && !live && <p className="mt-2 text-xs text-danger">{quoteQuery.error.message}</p>}
+      {candleQuery.error && <p className="mt-2 text-xs text-danger">{candleQuery.error.message}；已有历史图保留供查看。</p>}
+      {candleQuery.isPending && <p className="mt-2 text-xs text-muted">正在获取 Bitget 历史 K 线…</p>}
+      <CryptoMarketChart bars={candleQuery.data?.bars ?? []} symbol={symbol} interval={interval} market="usdm" trades={detail?.trades ?? []} levels={levels} />
+      {selected && <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted"><span>图表关联：{selected.name} · {selected.symbol} · {selected.leverage}x</span><button onClick={() => setSelected(null)} className="text-accent">清除关联</button>{detailQuery.error && <span className="text-danger">账户明细暂不可用，风险线待核对</span>}</div>}
+      {levels.length > 0 && <p className="mt-2 text-[11px] text-muted">止盈止损线按入场价与账户百分比计算，未乘杠杆；成交仍受滑点、费用和轮询时点影响。</p>}
     </section>
-    <StrategyAccountsPanel />
+    <StrategyAccountsPanel onInspectAccount={selectAccount} />
+    <details open={historyOpen} onToggle={event => setHistoryOpen(event.currentTarget.open)} className="rounded-card border border-border bg-surface p-4">
+      <summary className="cursor-pointer text-sm text-secondary">旧币安手动账本（只读历史）</summary>
+      <p className="mt-2 text-xs text-muted">保留原有持仓和成交，停止行情请求和实时估值，不迁移为 Bitget 账户。</p>
+      {historyQuery.isPending && historyOpen && <p className="mt-2 text-xs text-muted">正在读取历史账本…</p>}
+      {historyQuery.error && <p className="mt-2 text-xs text-danger">{historyQuery.error.message}</p>}
+      {historyQuery.data && <>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">{(['spot', 'usdm'] as const).map(market => <div key={market} className="rounded-btn border border-border p-3 text-xs"><div className="font-semibold">{market === 'spot' ? '历史现货' : '历史合约'} · 账面现金 {money(historyQuery.data[market].cash)} USDT</div><div className="mt-2 space-y-1">{Object.entries(historyQuery.data[market].positions).map(([code, position]) => <div key={code}>{code} · 数量 {position.qty}</div>)}{!Object.keys(historyQuery.data[market].positions).length && <span className="text-muted">无历史持仓</span>}</div></div>)}</div>
+        <div className="mt-3 overflow-x-auto"><table className="w-full min-w-[540px] text-left text-xs"><thead className="border-b border-border text-muted"><tr><th className="py-2">记录时间</th><th>交易对</th><th>事件</th><th>数量</th><th>价格</th></tr></thead><tbody>{historyQuery.data.trades.slice(-30).reverse().map(item => <tr key={item.id} className="border-b border-border/50"><td className="py-2">{new Date(item.at).toLocaleString()}</td><td>{item.symbol}</td><td>{item.kind ?? item.action}</td><td>{item.quantity ?? '—'}</td><td>{money(item.price, 4)}</td></tr>)}</tbody></table></div>
+      </>}
+    </details>
   </div>
 }

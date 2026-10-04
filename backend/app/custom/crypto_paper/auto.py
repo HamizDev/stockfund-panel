@@ -33,8 +33,8 @@ _RUNTIME_LOCK = threading.RLock()
 _BARS: dict[tuple[str, str, str, str], tuple[float, list[dict]]] = {}
 
 
-def _exchange(account: dict) -> str:
-    exchange = account.get("exchange", "binance")
+def _exchange(account: dict, *, default: str = "binance") -> str:
+    exchange = account.get("exchange", default)
     if exchange not in ("binance", "bitget"):
         raise ValueError("不支持的模拟行情源")
     if exchange == "bitget" and account.get("market") != "usdm":
@@ -43,10 +43,10 @@ def _exchange(account: dict) -> str:
 
 
 def _source(exchange: str):
-    if exchange == "binance":
-        return client
     if exchange == "bitget":
         return bitget
+    if exchange == "binance":
+        raise ValueError("旧版 Binance 策略账户仅保留历史记录，本阶段不请求 Binance 行情")
     raise ValueError("不支持的模拟行情源")
 
 
@@ -95,7 +95,9 @@ def _config(body: dict) -> dict:
     config = {key: body.get(key) for key in (
         "name", "market", "symbol", "strategy_id", "interval", "leverage",
         "initial_cash", "allocation_pct", "stop_loss_pct", "take_profit_pct")}
-    config["exchange"] = _exchange(body)
+    config["exchange"] = _exchange(body, default="bitget")
+    if config["exchange"] != "bitget":
+        raise ValueError("当前仅支持新建 Bitget USDT 本位合约策略账户")
     if (config["market"] not in client.MARKETS or config["symbol"] not in client.SYMBOLS
             or config["strategy_id"] not in {s["id"] for s in STRATEGIES}
             or config["interval"] not in ("1h", "4h")):
@@ -127,8 +129,10 @@ def _row(account: dict) -> dict:
     equity = account.get("equity")
     initial = ledger._num(account["initial_cash"], positive=True)
     pnl = ledger._num(equity) - initial if equity is not None else None
-    return {
-        "exchange": _exchange(account), "taker_fee_rate": account.get("taker_fee_rate"),
+    exchange = _exchange(account)
+    effective_readonly = exchange != "bitget" or market != "usdm"
+    row = {
+        "exchange": exchange, "taker_fee_rate": account.get("taker_fee_rate"),
         "strategy_params": rules.parameters(account["strategy_id"], account.get("strategy_params")),
         **{key: account.get(key) for key in (
             "id", "name", "market", "symbol", "strategy_id", "interval", "leverage",
@@ -145,6 +149,16 @@ def _row(account: dict) -> dict:
         "trade_count": sum(t.get("kind", "trade") != "funding" for t in records),
         "positions": copy.deepcopy(book[market]["positions"]),
     }
+    if effective_readonly:
+        row.update(
+            enabled=False,
+            status="readonly",
+            effective_readonly=True,
+            readonly_reason="旧版 Binance 模拟账户仅保留历史记录，本阶段不会估值或运行策略。",
+        )
+    else:
+        row.update(effective_readonly=False, readonly_reason=None)
+    return row
 
 
 def accounts(data_dir: Path) -> list[dict]:
@@ -214,6 +228,8 @@ def set_enabled(data_dir: Path, account_id: str, enabled: bool) -> dict:
         account = state["accounts"].get(account_id)
         if account is None:
             raise KeyError("策略模拟账户不存在")
+        if enabled and (_exchange(account) != "bitget" or account["market"] != "usdm"):
+            raise ValueError("旧版 Binance 策略账户仅保留只读，不能启用")
         account["enabled"] = enabled
         account["status"] = "waiting" if enabled else "paused"
         account["last_error"] = None
@@ -425,6 +441,8 @@ def run_once(data_dir: Path, account_id: str | None = None, *, stop: threading.E
                 return {"stopped": True}
             market, symbol = account["market"], account["symbol"]
             exchange = _exchange(account)
+            if exchange != "bitget" or market != "usdm":
+                continue
             if not account["enabled"] and not account["ledger"][market]["positions"]:
                 continue
             try:
@@ -435,7 +453,7 @@ def run_once(data_dir: Path, account_id: str | None = None, *, stop: threading.E
                     quotes[key] = quote
                 observed_ms = quote["asof_ms"]
                 if (quote.get("exchange", "binance") != exchange or quote.get("market") != market
-                        or quote.get("symbol") != symbol or abs(int(time.time() * 1000) - observed_ms) > 60_000):
+                        or quote.get("symbol") != symbol or not -5000 <= int(time.time() * 1000) - observed_ms <= 60_000):
                     raise ValueError("公开行情过期或标的错误，已停止本轮策略下单")
                 bars, signal_error = [], None
                 if account["enabled"]:
@@ -449,7 +467,7 @@ def run_once(data_dir: Path, account_id: str | None = None, *, stop: threading.E
                             quotes[key] = quote
                             observed_ms = quote["asof_ms"]
                             if (quote.get("exchange", "binance") != exchange or quote.get("market") != market
-                                    or quote.get("symbol") != symbol or abs(int(time.time() * 1000) - observed_ms) > 60_000):
+                                    or quote.get("symbol") != symbol or not -5000 <= int(time.time() * 1000) - observed_ms <= 60_000):
                                 raise ValueError("新信号后的公开行情过期或标的错误")
                         required = rules.minimum_bars(account["strategy_id"], account.get("strategy_params"))
                         if len(bars) < required or not 0 <= observed_ms - bars[-1]["close_time_ms"] <= period_ms * 2:
@@ -488,7 +506,7 @@ def run_once(data_dir: Path, account_id: str | None = None, *, stop: threading.E
                     signal_error = signal_error or "策略尚未取得已收盘 K 线，等待下一轮"
                 try:
                     commit_ms = int(time.time() * 1000)
-                    if commit_ms - quote["asof_ms"] > 60_000:
+                    if not -5000 <= commit_ms - quote["asof_ms"] <= 60_000:
                         raise ValueError("提交时公开行情已过期，等待下一轮")
                     _evaluate(candidate, quote, bars, funding, observed_ms, signal_error, through)
                 except (ValueError, KeyError, TypeError) as exc:
@@ -501,66 +519,15 @@ def run_once(data_dir: Path, account_id: str | None = None, *, stop: threading.E
                 if stop and stop.is_set():
                     return {"stopped": True}
                 _save(data_dir, state)
-        _maintain_manual(data_dir, quotes, now_ms, stop)
         return {"processed": len(results), "busy": False}
     finally:
         _RUN_LOCK.release()
 
 
 def _maintain_manual(data_dir: Path, quotes: dict, now_ms: int, stop: threading.Event | None) -> None:
-    # The legacy manual wallet remains separate; only funding/liquidation are
-    # automatic. It never receives strategy orders or moves strategy funds.
-    with ledger._LOCK:
-        snapshot = copy.deepcopy(ledger.load(data_dir))
-    if not snapshot["usdm"]["positions"]:
-        if snapshot.get("maintenance_error") and not (stop and stop.is_set()):
-            with ledger._LOCK:
-                current = ledger.load(data_dir)
-                if current == snapshot:
-                    current["maintenance_error"] = None
-                    ledger._save(data_dir, current)
-        return
-    try:
-        histories = {}
-        for symbol in snapshot["usdm"]["positions"]:
-            if stop and stop.is_set():
-                return
-            key = ("usdm", symbol)
-            if key not in quotes:
-                quotes[key] = client.quote("usdm", symbol)
-            quote = quotes[key]
-            observed_ms = quote["asof_ms"]
-            if quote.get("market") != "usdm" or quote.get("symbol") != symbol or abs(int(time.time() * 1000) - observed_ms) > 60_000:
-                raise ValueError("手动合约公开行情过期或标的错误")
-            events, through = _funding_window(snapshot, symbol, observed_ms)
-            histories[symbol] = (events, through, observed_ms)
-        if stop and stop.is_set():
-            return
-        with ledger._LOCK:
-            if stop and stop.is_set():
-                return
-            current = ledger.load(data_dir)
-            # Never apply a fetched funding window to a reopened position.
-            if current != snapshot:
-                return
-            state = copy.deepcopy(current)
-            pending = False
-            for symbol, (events, through, observed_ms) in histories.items():
-                ledger.settle_funding(state, symbol, events, through)
-                if through < observed_ms and state["usdm"]["positions"].get(symbol):
-                    pending = True
-                else:
-                    ledger.liquidate(state, symbol, quotes[("usdm", symbol)]["mark"], observed_ms)
-            state["maintenance_error"] = "历史资金费补账中，风险记账与净值尚未完成" if pending else None
-            if not (stop and stop.is_set()):
-                ledger._save(data_dir, state)
-    except (httpx.HTTPError, ValueError, KeyError, TypeError):
-        logger.warning("手动合约资金费/强平核对失败，保留原账本")
-        with ledger._LOCK:
-            current = ledger.load(data_dir)
-            if current == snapshot and not (stop and stop.is_set()):
-                current["maintenance_error"] = "资金费或行情不可用，风险记账与净值尚未完成"
-                ledger._save(data_dir, current)
+    # Legacy manual positions were valued through Binance. Keep them intact and
+    # readable until a Bitget-specific maintenance path is explicitly added.
+    return
 
 
 def manual_order(data_dir: Path, *, market: str, symbol: str, action: str, quantity: str,

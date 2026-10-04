@@ -318,7 +318,7 @@ def test_klines_reject_duplicate_gap_and_bad_rows(monkeypatch, rows, match):
     [
         ("spot", "BTCUSDT", "1h", 2),
         ("usdm", "DOGEUSDT", "1h", 2),
-        ("usdm", "BTCUSDT", "15m", 2),
+        ("usdm", "BTCUSDT", "30m", 2),
         ("usdm", "BTCUSDT", "1h", 1),
         ("usdm", "BTCUSDT", "1h", 1001),
     ],

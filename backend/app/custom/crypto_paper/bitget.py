@@ -13,11 +13,15 @@ from types import MappingProxyType
 import httpx
 
 from . import client as common
+from .public_stream import stream
 
 SYMBOLS = common.SYMBOLS
 MARKETS = ("usdm",)
 PRODUCT_TYPE = "USDT-FUTURES"
 KLINE_INTERVALS = {
+    "1m": (60 * 1000, "1m"),
+    "5m": (5 * 60 * 1000, "5m"),
+    "15m": (15 * 60 * 1000, "15m"),
     "1h": (60 * 60 * 1000, "1H"),
     "4h": (4 * 60 * 60 * 1000, "4H"),
 }
@@ -38,6 +42,7 @@ _MAX_FUNDING_PAGES = 10
 _RULES_TTL_SECONDS = 600
 _MARK_CACHE_SIZE = 512
 _RULES: dict[tuple[str, str], tuple[float, Mapping[str, object]]] = {}
+_WS_FUNDING: dict[str, tuple[float, dict]] = {}
 _MARKS: OrderedDict[tuple[str, int], str] = OrderedDict()
 _LOCK = threading.RLock()
 
@@ -163,6 +168,29 @@ def _contract_rules(symbol: str) -> dict:
 
 def quote(market: str, symbol: str) -> dict:
     _validate(market, symbol)
+    pushed = stream.ticker(symbol)
+    if pushed is not None:
+        with _LOCK:
+            cached_funding = _WS_FUNDING.get(symbol)
+        if (cached_funding and time.monotonic() - cached_funding[0] < 20
+                and cached_funding[1]["next_update_ms"] > int(time.time() * 1000)):
+            funding = dict(cached_funding[1])
+        else:
+            funding = _current_funding(symbol)
+            with _LOCK:
+                _WS_FUNDING[symbol] = (time.monotonic(), dict(funding))
+        rules = _contract_rules(symbol)
+        # REST metadata may take several seconds. Re-read the freshest ticker
+        # afterwards, rather than using a pre-fetch price to create an order.
+        pushed = stream.ticker(symbol)
+        if pushed is not None:
+            if funding["next_update_ms"] <= max(pushed["asof_ms"], int(time.time() * 1000)):
+                raise ValueError("Bitget资金费结算时间待更新")
+            return {"market": market, "exchange": "bitget", **pushed,
+                    "last_funding_rate": str(funding["rate"]),
+                    "next_funding_time": funding["next_update_ms"],
+                    "funding_interval_hours": funding["interval_hours"],
+                    "source": "bitget_public_websocket", **rules}
     ticker_rows = _data(_request("ticker", {
         "productType": PRODUCT_TYPE,
         "symbol": symbol,
@@ -180,6 +208,8 @@ def quote(market: str, symbol: str) -> dict:
 
     funding = _current_funding(symbol)
     rules = _contract_rules(symbol)
+    if funding["next_update_ms"] <= max(asof_ms, int(time.time() * 1000)):
+        raise ValueError("Bitget资金费结算时间待更新")
     return {
         "market": market,
         "exchange": "bitget",

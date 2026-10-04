@@ -1,14 +1,20 @@
-"""Research-only Binance spot and USD-M paper trading API."""
+"""Research-only Bitget strategies; legacy Binance ledgers are read-only."""
+# ruff: noqa: RUF001 -- localized Chinese UI messages use Chinese punctuation.
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import time
 from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.custom.crypto_paper import auto, client, ledger, strategy_draft
+from app.custom.crypto_paper import auto, bitget, ledger, market, strategy_draft
+from app.custom.crypto_paper.public_stream import stream
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +30,8 @@ class PaperOrder(BaseModel):
 
 class StrategyAccount(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    exchange: str = "binance"
-    market: str
+    exchange: str = "bitget"
+    market: str = "usdm"
     symbol: str
     strategy_id: str
     strategy_params: dict[str, int] | None = None
@@ -51,13 +57,7 @@ def _data_dir(request: Request) -> Path:
 
 
 def _quote(market: str, symbol: str) -> dict:
-    if market not in client.MARKETS or symbol not in client.SYMBOLS:
-        raise HTTPException(status_code=400, detail="不支持的市场或交易对")
-    try:
-        return client.quote(market, symbol)
-    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
-        logger.warning("Binance public quote unavailable: %s %s: %s", market, symbol, exc)
-        raise HTTPException(status_code=503, detail="币安公开行情暂不可用; 没有创建模拟订单") from exc
+    raise HTTPException(status_code=410, detail="币安手动模拟已停用，历史账本只读；请使用 Bitget 策略模拟")
 
 
 def build_router() -> APIRouter:
@@ -76,44 +76,46 @@ def build_router() -> APIRouter:
 
     @router.get("/valuation")
     def get_valuation(request: Request) -> dict:
-        try:
-            account = ledger.load(_data_dir(request))
-            if account.get("maintenance_error"):
-                raise ValueError(account["maintenance_error"])
-            quotes = {
-                (market, symbol): _quote(market, symbol)
-                for market in ("spot", "usdm")
-                for symbol in account[market]["positions"]
-            }
-            return ledger.value_account(account, quotes)
-        except ValueError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=410, detail="历史币安账户已停止实时估值，账本和持仓保留")
 
     @router.post("/orders")
     def place_order(request: Request, body: PaperOrder) -> dict:
+        raise HTTPException(status_code=410, detail="币安手动模拟已停用，原订单和持仓保留")
+
+    @router.get("/market/{symbol}/quote")
+    def market_quote(symbol: str) -> dict:
+        if symbol not in bitget.SYMBOLS:
+            raise HTTPException(status_code=400, detail="不支持的交易对")
         try:
-            prior = ledger.replay(
-                _data_dir(request), market=body.market, symbol=body.symbol,
-                action=body.action, quantity=body.quantity, leverage=body.leverage,
-                request_id=body.request_id,
-            )
-            if prior:
-                order, account = prior
-                return {"order": order, "account": account}
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        quote = _quote(body.market, body.symbol)
+            quote = bitget.quote("usdm", symbol)
+            if not -5000 <= int(time.time() * 1000) - quote["asof_ms"] <= 60_000:
+                raise ValueError("Bitget 行情过期")
+            return {"quote": {"source": "bitget_public_rest", **quote}, "stream": stream.status(symbol)}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(status_code=503, detail="Bitget 公开行情暂不可用，暂停生成模拟订单") from exc
+
+    @router.get("/market/{symbol}/candles")
+    def market_candles(symbol: str, interval: str = "1h") -> dict:
+        if symbol not in bitget.SYMBOLS or interval not in bitget.KLINE_INTERVALS:
+            raise HTTPException(status_code=400, detail="不支持的交易对或图表周期")
         try:
-            order, account = auto.manual_order(
-                _data_dir(request), market=body.market, symbol=body.symbol,
-                action=body.action, quantity=body.quantity, leverage=body.leverage,
-                quote=quote, request_id=body.request_id,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except (httpx.HTTPError, KeyError, TypeError) as exc:
-            raise HTTPException(status_code=503, detail="合约资金费暂不可用; 本次没有创建订单") from exc
-        return {"order": order, "account": account}
+            return market.candles(symbol, interval)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(status_code=503, detail="Bitget 历史 K 线暂不可用") from exc
+
+    @router.get("/market/{symbol}/stream")
+    async def market_stream(request: Request, symbol: str):
+        if symbol not in bitget.SYMBOLS:
+            raise HTTPException(status_code=400, detail="不支持的交易对")
+
+        async def events():
+            while not await request.is_disconnected():
+                payload = {"ticker": stream.ticker(symbol), "stream": stream.status(symbol)}
+                yield "data: " + json.dumps(payload, separators=(",", ":")) + "\n\n"
+                await asyncio.sleep(1)
+
+        return StreamingResponse(events(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
     @router.get("/strategies")
     def strategies() -> dict:

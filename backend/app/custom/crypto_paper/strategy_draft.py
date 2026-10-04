@@ -60,6 +60,8 @@ class ModelDraft(BaseModel):
 
 
 def _validate_request(req: DraftRequest) -> None:
+    if req.exchange != "bitget":
+        raise ValueError("当前 AI 策略草案仅支持 Bitget USDT 本位合约")
     auto._exchange(req.model_dump())
     if req.market == "spot" and req.leverage != 1:
         raise ValueError("现货草案只能使用1倍杠杆")
@@ -80,7 +82,7 @@ def market_context(req: DraftRequest) -> tuple[dict, list[dict]]:
     now = round(time.time() * 1000)
     stamp = client._timestamp(quote.get("asof_ms"), "行情时间", allow_zero=False)
     if (quote.get("exchange", "binance") != req.exchange or quote.get("market") != req.market
-            or quote.get("symbol") != req.symbol or abs(now - stamp) > 60_000):
+            or quote.get("symbol") != req.symbol or not -5000 <= now - stamp <= 60_000):
         raise ValueError("草案行情来源、标的或时间无效")
     if req.market == "usdm" and req.leverage > int(quote.get("max_leverage", 20)):
         raise ValueError("请求杠杆超过公开合约规则")

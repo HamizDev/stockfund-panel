@@ -6,8 +6,6 @@ import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import { api } from '@/lib/api'
 import {
   cryptoApi,
-  type CryptoExchange,
-  type CryptoMarket,
   type CryptoStrategyDraft,
   type CryptoStrategyDraftRequest,
   type CryptoStrategyDraftResult,
@@ -18,8 +16,6 @@ import {
 const RESULT_STORAGE_KEY = 'stockfund.crypto-paper.ai-strategy-draft.v1'
 const SYMBOLS: CryptoSymbol[] = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
 const INITIAL_INPUT: DraftForm = {
-  exchange: 'bitget',
-  market: 'usdm',
   symbol: 'ETHUSDT',
   interval: '1h',
   leverage: '10',
@@ -27,7 +23,7 @@ const INITIAL_INPUT: DraftForm = {
   focus: '',
 }
 
-type DraftForm = Omit<CryptoStrategyDraftRequest, 'leverage' | 'allocation_pct' | 'focus'> & {
+type DraftForm = Pick<CryptoStrategyDraftRequest, 'symbol' | 'interval'> & {
   leverage: string
   allocation_pct: string
   focus: string
@@ -108,7 +104,11 @@ function loadSavedDraft(): SavedDraft | null {
     const raw = window.sessionStorage.getItem(RESULT_STORAGE_KEY)
     if (!raw) return null
     const value: unknown = JSON.parse(raw)
-    if (!isRecord(value) || !isDraftRequest(value.request) || !isDraftResult(value.result)) return null
+    if (!isRecord(value) || !isDraftRequest(value.request) || !isDraftResult(value.result) ||
+      value.result.draft.exchange !== value.request.exchange ||
+      value.result.draft.market !== value.request.market ||
+      value.result.draft.symbol !== value.request.symbol ||
+      value.result.draft.interval !== value.request.interval) return null
     return { request: value.request, result: value.result }
   } catch {
     return null
@@ -117,7 +117,8 @@ function loadSavedDraft(): SavedDraft | null {
 
 function inputFromRequest(request: CryptoStrategyDraftRequest): DraftForm {
   return {
-    ...request,
+    symbol: request.symbol,
+    interval: request.interval,
     leverage: String(request.leverage),
     allocation_pct: String(request.allocation_pct),
     focus: request.focus ?? '',
@@ -182,19 +183,10 @@ export function AiStrategyDraftPanel({ onApply }: { onApply: (draft: CryptoStrat
     }
   }, [result, resultRequest])
 
-  const setMarket = (market: CryptoMarket) => {
-    setInput(current => ({
-      ...current,
-      market,
-      exchange: market === 'spot' ? 'binance' : current.exchange,
-      leverage: market === 'spot' ? '1' : current.leverage,
-    }))
-  }
-
   const generate = async () => {
     setError('')
     setNotice('')
-    const leverage = input.market === 'spot' ? 1 : Number(input.leverage)
+    const leverage = Number(input.leverage)
     const allocation = Number(input.allocation_pct)
     const focus = input.focus.trim()
     if (!Number.isInteger(leverage) || leverage < 1 || leverage > 20) {
@@ -211,8 +203,8 @@ export function AiStrategyDraftPanel({ onApply }: { onApply: (draft: CryptoStrat
     }
 
     const request: CryptoStrategyDraftRequest = {
-      exchange: input.market === 'spot' ? 'binance' : input.exchange,
-      market: input.market,
+      exchange: 'bitget',
+      market: 'usdm',
       symbol: input.symbol,
       interval: input.interval,
       leverage,
@@ -226,7 +218,9 @@ export function AiStrategyDraftPanel({ onApply }: { onApply: (draft: CryptoStrat
     try {
       const response: unknown = await cryptoApi.strategyDraft(request, controller.signal)
       if (controller.signal.aborted) return
-      if (!isDraftResult(response)) throw new Error('AI 策略草案响应格式无效')
+      if (!isDraftResult(response) || response.draft.exchange !== request.exchange ||
+        response.draft.market !== request.market || response.draft.symbol !== request.symbol ||
+        response.draft.interval !== request.interval) throw new Error('AI 策略草案响应与请求条件不一致')
       const next = response
       setResult(next)
       setResultRequest(request)
@@ -251,6 +245,7 @@ export function AiStrategyDraftPanel({ onApply }: { onApply: (draft: CryptoStrat
 
   const configured = modelStatus.data?.configured
   const draft = result?.draft
+  const readOnlyDraft = Boolean(draft && (draft.exchange !== 'bitget' || draft.market !== 'usdm'))
   const evidence = result?.evidence
   const diagnostics = result?.diagnostics
   const riskNotes = result?.risk_notes ?? []
@@ -259,7 +254,7 @@ export function AiStrategyDraftPanel({ onApply }: { onApply: (draft: CryptoStrat
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div>
         <div className="flex items-center gap-2 text-sm font-semibold"><Sparkles className="h-4 w-4 text-accent" />AI 加密策略草案</div>
-        <p className="mt-1 text-xs leading-relaxed text-muted">先读取公开 K 线、计算样本和信号证据，再请求已配置的模型生成参数建议。草案只会填入下方表单，不会自动创建或启用账户。</p>
+        <p className="mt-1 text-xs leading-relaxed text-muted">仅为 Bitget USDT 本位合约读取公开 K 线、计算样本和信号证据，再请求已配置的模型生成参数建议。草案只会填入下方表单，不会自动创建或启用账户。</p>
       </div>
       <div className="text-right text-[11px] text-muted">
         {modelStatus.isLoading ? '正在检查 AI 配置…' : modelStatus.isError ? 'AI 配置状态暂不可用；生成请求仍会由服务端校验。' : configured === false
@@ -269,11 +264,11 @@ export function AiStrategyDraftPanel({ onApply }: { onApply: (draft: CryptoStrat
     </div>
 
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-      <label className="text-xs text-muted">市场<select aria-label="AI 草案市场" value={input.market} onChange={event => setMarket(event.target.value as CryptoMarket)} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground"><option value="spot">现货</option><option value="usdm">U 本位合约</option></select></label>
-      {input.market === 'usdm' && <label className="text-xs text-muted">交易所<select aria-label="AI 草案交易所" value={input.exchange} onChange={event => setInput(current => ({ ...current, exchange: event.target.value as CryptoExchange }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground"><option value="binance">Binance</option><option value="bitget">Bitget</option></select></label>}
+      <div className="text-xs text-muted">交易所<div className="mt-1 rounded-btn border border-border bg-base p-2 text-foreground">Bitget</div></div>
+      <div className="text-xs text-muted">市场<div className="mt-1 rounded-btn border border-border bg-base p-2 text-foreground">USDT 本位合约</div></div>
       <label className="text-xs text-muted">交易对<select aria-label="AI 草案交易对" value={input.symbol} onChange={event => setInput(current => ({ ...current, symbol: event.target.value as CryptoSymbol }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{SYMBOLS.map(symbol => <option key={symbol}>{symbol}</option>)}</select></label>
       <label className="text-xs text-muted">K 线周期<select aria-label="AI 草案周期" value={input.interval} onChange={event => setInput(current => ({ ...current, interval: event.target.value as CryptoStrategyInterval }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground"><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label>
-      <label className="text-xs text-muted">杠杆<input aria-label="AI 草案杠杆" type="number" min="1" max="20" step="1" disabled={input.market === 'spot'} value={input.market === 'spot' ? '1' : input.leverage} onChange={event => setInput(current => ({ ...current, leverage: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground disabled:opacity-60" /></label>
+      <label className="text-xs text-muted">杠杆<input aria-label="AI 草案杠杆" type="number" min="1" max="20" step="1" value={input.leverage} onChange={event => setInput(current => ({ ...current, leverage: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>
       <label className="text-xs text-muted">单次仓位（%）<input aria-label="AI 草案单次仓位" type="number" min="0.000001" max="100" step="any" value={input.allocation_pct} onChange={event => setInput(current => ({ ...current, allocation_pct: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>
       <label className="text-xs text-muted sm:col-span-2">补充关注点（可选）<textarea aria-label="AI 草案关注点" maxLength={600} rows={2} value={input.focus} onChange={event => setInput(current => ({ ...current, focus: event.target.value }))} placeholder="例如：关注趋势过滤与较低换手；最多 600 字" className="mt-1 block w-full resize-y rounded-btn border border-border bg-base p-2 text-foreground placeholder:text-muted" /></label>
     </div>
@@ -298,8 +293,9 @@ export function AiStrategyDraftPanel({ onApply }: { onApply: (draft: CryptoStrat
           <div className="mt-1 text-xs text-secondary">{draft.exchange === 'bitget' ? 'Bitget' : 'Binance'} · {draft.market === 'spot' ? '现货' : 'U 本位合约'} · {draft.symbol} · {draft.interval} · {draft.strategy_id === 'ema_trend' ? 'EMA 趋势' : '通道突破'}</div>
           <div className="mt-1 text-xs text-muted">{strategyParamsLabel(draft)} · 杠杆 {draft.leverage}x · 仓位 {draft.allocation_pct}% · 初始资金 {draft.initial_cash.toLocaleString()} USDT · 止损 / 止盈 {draft.stop_loss_pct}% / {draft.take_profit_pct}%</div>
         </div>
-        <button type="button" onClick={() => { onApply(draft); setNotice('已将草案填入下方创建表。请核对策略参数后，再手动创建暂停账户。') }} className="shrink-0 rounded-btn border border-accent/50 px-3 py-2 text-xs font-medium text-accent hover:bg-accent/10">填入账户创建表</button>
+        <button type="button" onClick={() => { if (!readOnlyDraft) { onApply(draft); setNotice('已将草案填入下方创建表。请核对策略参数后，再手动创建暂停账户。') } }} disabled={readOnlyDraft} title={readOnlyDraft ? 'Binance 历史草案仅供查看，不能用于创建 Bitget 账户。' : undefined} className="shrink-0 rounded-btn border border-accent/50 px-3 py-2 text-xs font-medium text-accent hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-50">填入账户创建表</button>
       </div>
+      {readOnlyDraft && <p className="rounded-btn border border-border bg-elevated/30 p-2 text-[11px] leading-relaxed text-muted">这是恢复的 Binance 历史草案，仅供查看。新生成的草案和新建账户固定使用 Bitget USDT 本位合约。</p>}
 
       <div className="rounded-btn border border-amber-500/30 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-300">下方指标是所示 K 线样本的行情统计与规则信号检查；没有执行逐笔回测，不是策略表现或未来收益预测。</div>
       <p className="text-[11px] leading-relaxed text-secondary">固定执行口径：信号后按实际取得的公开报价模拟成交，加入 5 bps 滑点；止盈止损按轮询观察到的价格检查，不按历史 K 线高低价还原盘中成交。AI 说明不会改变这些规则。</p>

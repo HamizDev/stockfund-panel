@@ -42,9 +42,14 @@ def _model(**changes):
 
 @pytest.fixture
 def source(monkeypatch):
-    state = {"bars": _bars(), "quote": _quote(), "messages": None}
+    state = {"bars": _bars(), "quote": _quote(), "messages": None, "source_calls": []}
     module = SimpleNamespace(klines=lambda *a, **k: state["bars"], quote=lambda *a: state["quote"])
-    monkeypatch.setattr(auto, "_source", lambda _: module)
+
+    def source_for(exchange):
+        state["source_calls"].append(exchange)
+        return module
+
+    monkeypatch.setattr(auto, "_source", source_for)
     monkeypatch.setattr(draft.time, "time", lambda: _NOW / 1000)
     monkeypatch.setattr(draft.ai_provider, "ai_configured", lambda: True)
     monkeypatch.setattr(draft.ai_provider, "current_ai_model", lambda: "configured-model")
@@ -79,8 +84,15 @@ def test_generation_uses_public_observations_without_creating_accounts(source, t
     assert not list(tmp_path.iterdir())
 
 
+def test_binance_draft_is_rejected_before_any_market_request(source):
+    with pytest.raises(ValueError, match="仅支持 Bitget"):
+        asyncio.run(draft.generate(draft.DraftRequest(exchange="binance")))
+    assert source["source_calls"] == []
+    assert source["messages"] is None
+
+
 @pytest.mark.parametrize("change", [
-    {"asof_ms": _NOW - 60_001}, {"exchange": "binance"}, {"symbol": "BTCUSDT"},
+    {"asof_ms": _NOW - 60_001}, {"asof_ms": _NOW + 5001}, {"exchange": "binance"}, {"symbol": "BTCUSDT"},
     {"market": "spot"}, {"bid": "301"}, {"max_leverage": 5},
     {"last_funding_rate": "NaN"}, {"last_funding_rate": "not-a-rate"},
 ])
@@ -187,8 +199,8 @@ def test_parameters_change_executed_signal_and_need_sufficient_history():
 
 
 def test_old_idempotent_account_request_keeps_default_rules(tmp_path):
-    body = {"name": "legacy", "market": "spot", "symbol": "BTCUSDT", "strategy_id": "ema_trend",
-            "interval": "1h", "leverage": 1, "initial_cash": 10000, "allocation_pct": 10,
+    body = {"name": "legacy", "market": "usdm", "symbol": "BTCUSDT", "strategy_id": "ema_trend",
+            "interval": "1h", "leverage": 10, "initial_cash": 10000, "allocation_pct": 10,
             "stop_loss_pct": 2, "take_profit_pct": 4, "request_id": "legacy-draft"}
     original = auto.create(tmp_path, body)[0]
     state = auto._load(tmp_path)
