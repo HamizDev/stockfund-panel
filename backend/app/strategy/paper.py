@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import shutil
 import threading
@@ -166,6 +167,7 @@ def create_account(
     slippage_bps: float = DEFAULT_SLIPPAGE_BPS,
     queue_limit_orders: bool = False,
     strategy_id: str | None = None,
+    asset_type: str | None = None,
 ) -> dict:
     """创建账户 (同 id 已存在则原样返回, 不覆盖 — 幂等)。"""
     validate_account_id(account_id)
@@ -189,6 +191,10 @@ def create_account(
         }
         if strategy_id is not None:
             acc["strategy_id"] = strategy_id
+        if asset_type is not None:
+            if asset_type not in ("stock", "etf"):
+                raise ValueError("策略账户市场必须是股票或 ETF")
+            acc["asset_type"] = asset_type
         atomic_write_text(_root(data_dir, account_id) / "account.json", json.dumps(acc, ensure_ascii=False, indent=2))
         return acc
 
@@ -374,6 +380,8 @@ def create_order(
             return None, "symbol 不能为空"
         if asset_type is None:
             asset_type = "etf" if symbol.endswith((".SH", ".SZ")) and symbol.split(".")[0].startswith(("51", "56", "58", "15")) else "stock"
+        if acc.get("strategy_id") and acc.get("asset_type") and asset_type != acc["asset_type"]:
+            return None, "订单市场与策略账户不一致"
 
         # ETF 即时单 → 次日开盘 (盘中钩子只喂股票快照)
         if order_type == "market" and asset_type == "etf":
@@ -1019,16 +1027,19 @@ def daily_nav(
         return None
     positions = load_positions(data_dir, account_id)
     prices = price_map if price_map is not None else latest_prices_from_daily(data_dir, day, account_id)
-    missing = [s for s, p in positions.items() if p["qty"] > 0 and s not in prices]
+    missing = [s for s, p in positions.items() if p["qty"] > 0 and
+               (not isinstance(prices.get(s), (int, float)) or isinstance(prices.get(s), bool)
+                or not math.isfinite(prices[s]) or prices[s] <= 0)]
     if missing:
         logger.warning("paper nav %s: 缺行情按成本计: %s", day, missing)
     mv = 0.0
     for symbol, pos in positions.items():
         if pos["qty"] <= 0:
             continue
-        price = prices.get(symbol, pos["avg_cost"])
+        price = pos["avg_cost"] if symbol in missing else prices[symbol]
         mv += pos["qty"] * price
-    return {"date": day, "cash": round(float(acc["cash"]), 2), "mv": round(mv, 2), "nav": round(float(acc["cash"]) + mv, 2)}
+    return {"date": day, "cash": round(float(acc["cash"]), 2), "mv": round(mv, 2), "nav": round(float(acc["cash"]) + mv, 2),
+            "valuation_complete": not missing, "missing_symbols": missing}
 
 
 def _write_nav_line(data_dir: Path, day: str, nav: dict, account_id: str = DEFAULT_ACCOUNT_ID) -> None:
@@ -1163,6 +1174,7 @@ def stats(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> dict:
     mdd = max_drawdown([n["nav"] for n in load_nav(data_dir, account_id)])
     return {
         "rounds": len(rounds),
+        "wins": len(wins),
         "win_rate": round(len(wins) / len(rounds) * 100, 2) if rounds else 0.0,
         "profit_loss_ratio": round(avg_win / avg_loss, 2) if avg_loss else None,
         "avg_holding_days": round(sum(r["holding_days"] for r in rounds) / len(rounds), 1) if rounds else 0.0,

@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers, BookmarkPlus, Download } from 'lucide-react'
@@ -38,6 +39,8 @@ import { WatchlistGroupMenu } from '@/components/WatchlistAddMenu'
 import { ScoringEditor } from '@/components/ScoringEditor'
 import { strategyResultCandidate } from './researchCandidates'
 import { buildDailyNavItems, buildTradeKeyMap, buildTradesNavItems, type TradeNavItem } from './tradeNav'
+import { ResearchAIButton } from '@/components/research/ResearchAIButton'
+import { backtestResearchPrompt, researchLink, strategyResearchPrompt } from '@/components/research/researchContext'
 
 const formatDate = (date: Date) => date.toISOString().slice(0, 10)
 const monthsAgo = (months: number) => {
@@ -932,18 +935,23 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
   )
 }
 
-export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
+export function StrategyBacktest({ loadCandidate, onLoadConsumed, onResearchContextChange }: {
   /** 候选方案「载入复测」: 回填保存的回测配置 (消费后由父组件清空) */
   loadCandidate?: ResearchCandidate | null
   onLoadConsumed?: () => void
+  onResearchContextChange?: (context: { strategyId: string | null; assetType: 'stock' | 'etf' }) => void
 }) {
   const queryClient = useQueryClient()
+  const [researchParams] = useSearchParams()
+  const requestedStrategy = researchParams.get('strategy')
+  const requestedAsset = researchParams.get('asset_type')
   const signalNames = useSignalNames()
   const [saved] = useState(() => storage.strategyBacktestLast.get(null))
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(saved?.selectedStrategy ?? null)
   const [strategyGroup, setStrategyGroup] = useState<StrategyGroup>('all')
   const [symbols, setSymbols] = useState(saved?.symbols ?? '')
   const [assetType, setAssetType] = useState<'stock' | 'etf'>(saved?.assetType ?? 'stock')
+  useEffect(() => { onResearchContextChange?.({ strategyId: selectedStrategy, assetType }) }, [selectedStrategy, assetType, onResearchContextChange])
   const [start, setStart] = useState(saved?.start ?? THREE_MONTHS_AGO)
   const [end, setEnd] = useState(saved?.end ?? TODAY)
   // 成交口径: 建仓/清仓可独立配置。向后兼容老 matching (派生为 entry=exit=matching)。
@@ -985,6 +993,11 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   // 跨会话/拉新代码后自动渲染一个可能对应已失效策略的旧结果会造成困惑
   // (切页不卸载组件,内存中的 result 仍保留,无需靠 localStorage 恢复)。
   const [result, setResult] = useState<StrategyBacktestResult | null>(null)
+  useEffect(() => {
+    if (requestedAsset === 'stock' || requestedAsset === 'etf') setAssetType(requestedAsset)
+    if (requestedStrategy) setSelectedStrategy(requestedStrategy)
+    setResult(null)
+  }, [requestedStrategy, requestedAsset])
 
   // 候选方案「载入复测」: 把保存的 23 项回测配置回填到表单 (字段缺失时保留当前值)
   useEffect(() => {
@@ -1612,6 +1625,11 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     <div className="h-full min-h-0 overflow-hidden rounded-card border border-border bg-surface/80 grid grid-cols-1 xl:grid-cols-[18rem_minmax(0,1fr)]">
       {/* 配置面板 */}
       <section className="space-y-3 border-b xl:border-b-0 xl:border-r border-border bg-base/25 px-3 py-3 xl:overflow-y-auto">
+        <div className="rounded-btn border border-accent/20 bg-accent/5 px-3 py-2 text-[11px] leading-5 text-secondary">
+          先选策略和历史区间，再运行回测。仓位模拟会限制资金与持仓；全量模拟把每个候选独立计算，不能直接当作账户收益。
+        </div>
+        <ResearchAIButton label="AI 解释策略与回测步骤" disabled={!detail || strategyDetail.isLoading}
+          prompt={detail ? strategyResearchPrompt(detail, assetType) : ''} />
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <label className="text-xs font-medium text-secondary">选择策略</label>
@@ -1997,6 +2015,14 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
 
       {/* 结果面板 */}
       <section className="min-w-0 space-y-3 bg-base/15 px-3 py-3 xl:overflow-y-auto">
+        {result && !result.error && result.stats && <div className="rounded-btn border border-accent/20 bg-surface p-3">
+          <div className="mb-2 text-xs font-medium">最近一次成功回测 · {result.strategy_info?.name ?? result.strategy_info?.id} · {String(result.config?.start ?? resultStartDate).slice(0, 10)} ~ {String(result.config?.end ?? resultEndDate).slice(0, 10)}</div>
+          <div className="flex flex-wrap gap-2">
+            <ResearchAIButton label="AI 解读上次成功回测" disabled={isPending} prompt={backtestResearchPrompt(result)} />
+            <Link to={researchLink('paper', result.strategy_info?.id, result.config?.asset_type)} className="rounded-btn border border-border px-3 py-1.5 text-xs text-secondary hover:text-accent">准备独立虚拟仓 →</Link>
+          </div>
+          <p className="mt-2 text-[11px] leading-5 text-muted">AI 解读的是上面这次成功结果。虚拟仓使用当前已保存策略与自己的费用、跟单设置，不会自动继承回测临时参数；创建前请核对，初始状态暂停。</p>
+        </div>}
         {/* 模式切换: 仓位模拟 / 全量模拟 */}
         <div className="flex items-center justify-between gap-2">
           <div className="inline-flex rounded-btn border border-border bg-surface/80 p-0.5 shadow-sm">

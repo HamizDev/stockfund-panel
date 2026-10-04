@@ -245,6 +245,15 @@ export function sendMessage(textRaw: string) {
   void runGeneration()
 }
 
+/** Research actions start a separate conversation and never interrupt a current request. */
+export function sendResearchMessage(prompt: string): boolean {
+  if (state.sending || !prompt.trim() || prompt.length > MAX_INPUT_CHARS) return false
+  newSession()
+  openAssistant()
+  sendMessage(prompt)
+  return true
+}
+
 /** 重试: 丢弃最后一个 user 消息之后的失败产物, 用同一上下文重新生成。 */
 export function retryLast() {
   if (state.sending) return

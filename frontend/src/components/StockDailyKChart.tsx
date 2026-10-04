@@ -13,6 +13,7 @@ import {
   type OHLC,
   type VolumeCompareConfig,
 } from '@/components/EChartsCandlestick'
+import { TradingViewDailyChart } from '@/components/TradingViewDailyChart'
 
 const SUB_INFO_H = 16
 const SUB_GAP = 4
@@ -150,6 +151,7 @@ export function StockDailyKChart({
 }: Props) {
   const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
   const [showMarkers, setShowMarkers] = useState(true)
+  const [requestedChartMode, setRequestedChartMode] = useState<'tradingview' | 'professional'>('tradingview')
   // 加入自选日标注（与「异动」标记相互独立）
   const [showAddedMark, setShowAddedMark] = useState(true)
   const [volumeCompare, setVolumeCompare] = useState<VolumeCompareConfig>(() =>
@@ -167,6 +169,15 @@ export function StockDailyKChart({
     ...(markers ?? []),
     ...(showLimitMarkers ? limitMarkers : []),
   ], [limitMarkers, markers, showLimitMarkers])
+  const professionalReasons = useMemo(() => {
+    const reasons: string[] = []
+    if (ranges?.length) reasons.push('回测区间标注')
+    if (addedDate) reasons.push('加入自选日标注')
+    if (priceLines?.some(line => line.start != null || line.end != null)) reasons.push('带日期范围的价格线')
+    return reasons
+  }, [addedDate, priceLines, ranges])
+  const requiresProfessional = professionalReasons.length > 0
+  const chartMode = requiresProfessional ? 'professional' : requestedChartMode
 
   const toggleIndicator = useCallback((key: string) => {
     setActiveIndicators(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])
@@ -186,13 +197,50 @@ export function StockDailyKChart({
   let subExtraH = 0
   activeSubDefs.forEach(def => { subExtraH += SUB_INFO_H + def.height })
   if (activeSubDefs.length > 0) subExtraH += activeSubDefs.length * SUB_GAP + 14
-  const chartHeight = height + subExtraH
+  const chartHeight = chartMode === 'professional' ? height + subExtraH : height
 
   if (!symbol) return null
 
   return (
     <div className={className} style={{ minHeight: chartHeight }}>
-      {showIndicatorControls && rows.length > 0 && (
+      <div className="flex items-center gap-1.5 pb-1" role="group" aria-label="日K图表模式">
+        <button
+          type="button"
+          aria-pressed={chartMode === 'tradingview'}
+          disabled={requiresProfessional}
+          title={requiresProfessional ? professionalReasons.join('、') + '仅在专业指标图中完整显示' : undefined}
+          onClick={() => setRequestedChartMode('tradingview')}
+          className={chartMode === 'tradingview'
+            ? 'rounded px-2 py-0.5 text-[10px] transition-colors bg-accent/20 text-accent'
+            : 'rounded px-2 py-0.5 text-[10px] transition-colors bg-elevated text-muted hover:text-secondary disabled:cursor-not-allowed disabled:opacity-40'}
+        >
+          TradingView
+        </button>
+        <button
+          type="button"
+          aria-pressed={chartMode === 'professional'}
+          onClick={() => setRequestedChartMode('professional')}
+          className={chartMode === 'professional'
+            ? 'rounded px-2 py-0.5 text-[10px] transition-colors bg-accent/20 text-accent'
+            : 'rounded px-2 py-0.5 text-[10px] transition-colors bg-elevated text-muted hover:text-secondary'}
+        >
+          专业指标
+        </button>
+        {requiresProfessional && (
+          <span role="status" className="text-[10px] text-muted">
+            {professionalReasons.join('、')}仅在专业指标图中完整显示，已默认切换以保留原标注。
+          </span>
+        )}
+        {showIndicatorControls && chartMode === 'tradingview' && showMarkerToggle && showLimitMarkers && (
+          <ChartPill
+            active={showMarkers}
+            label="异动"
+            activeClass="text-[#FACC15] bg-[#FACC15]/10"
+            onClick={() => setShowMarkers(value => !value)}
+          />
+        )}
+      </div>
+      {showIndicatorControls && chartMode === 'professional' && rows.length > 0 && (
         <div className="flex items-center gap-1.5 px-1 pb-0.5">
           {SUB_CHARTS.map(ind => (
             <ChartPill
@@ -271,7 +319,23 @@ export function StockDailyKChart({
       {!kline.isLoading && !kline.isError && (kline.data?.rows?.length ?? 0) > 0 && rows.length === 0 && (
         <div className="text-sm text-danger py-2">数据格式异常，请刷新页面</div>
       )}
-      {rows.length > 0 && (
+      {rows.length > 0 && chartMode === 'tradingview' && (
+        <TradingViewDailyChart
+          data={kline.data?.rows ?? []}
+          symbol={symbol}
+          height={height}
+          showMA={showMA}
+          showControls={showIndicatorControls}
+          contextKey={[symbol, dateRange.start, dateRange.end].join('|')}
+          markers={showMarkers ? allMarkers : []}
+          priceLines={priceLines}
+          linkedPrice={linkedPrice}
+          onDateClick={onDateClick}
+          onPriceDoubleClick={onPriceDoubleClick}
+          visibleBars={visibleBars}
+        />
+      )}
+      {rows.length > 0 && chartMode === 'professional' && (
         <EChartsCandlestick
           data={rows}
           markers={allMarkers}

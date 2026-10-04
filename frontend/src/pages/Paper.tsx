@@ -6,6 +6,7 @@
  * 多账户: 所有查询按账户隔离 (queryKey 前缀 'paper'), 切换即换一套数据。
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as echarts from 'echarts'
 import { Banknote, CircleDollarSign, GitCompare, PieChart, Plus, Settings, TrendingUp, Wallet, X } from 'lucide-react'
@@ -16,8 +17,18 @@ import { fmtPct, priceColorClass } from '@/lib/format'
 import { boardTag } from '@/components/stock-table/primitives'
 import { PageHeader } from '@/components/PageHeader'
 import { Modal } from '@/components/Modal'
+import { ResearchFlow } from '@/components/research/ResearchFlow'
+import { ResearchAIButton } from '@/components/research/ResearchAIButton'
+import { paperResearchPrompt } from '@/components/research/researchContext'
+import { StrategyPaperTable } from '@/components/research/StrategyPaperTable'
 
 const ACC_STORAGE_KEY = 'paper.account'
+const PAPER_HEADER_CLASS_NAME = [
+  'flex-wrap items-start justify-start gap-x-4 gap-y-2 pl-14 pr-3 md:items-center md:justify-between md:px-5',
+  '[&>div:first-child]:flex-wrap [&>div:first-child]:min-w-0 [&>div:first-child]:max-w-full [&>div:first-child]:shrink-0',
+  '[&>div:first-child>h1]:shrink-0 [&>div:first-child>h1]:whitespace-nowrap',
+  '[&>div:last-child]:min-w-0 [&>div:last-child]:max-w-full',
+].join(' ')
 
 const ORDER_TYPE_LABEL: Record<string, string> = {
   market: '即时',
@@ -543,7 +554,7 @@ function CandidateCompareCard({ paper }: { paper: PaperCompareStats }) {
     ['夏普比率', '—', num(m.sharpe, 2)],
   ]
   return (
-    <div className="rounded-card border border-border/60 bg-surface p-3">
+    <div className="min-w-0 rounded-card border border-border/60 bg-surface p-3">
       <div className="flex items-center gap-2">
         <div className="shrink-0 text-sm font-medium">策略对比</div>
         {candidates.length > 0 ? (
@@ -562,24 +573,26 @@ function CandidateCompareCard({ paper }: { paper: PaperCompareStats }) {
         )}
       </div>
       {sel ? (
-        <table className="mt-2 w-full text-[11px]">
-          <thead>
-            <tr className="text-muted">
-              <th className="py-0.5 text-left font-normal">指标</th>
-              <th className="py-0.5 text-right font-normal">模拟盘</th>
-              <th className="max-w-0 truncate py-0.5 text-right font-normal" title={sel.name}>{sel.name} (回测)</th>
-            </tr>
-          </thead>
-          <tbody className="font-mono">
-            {rows.map(([label, p, c]) => (
-              <tr key={label} className="border-t border-border/40">
-                <td className="py-1 font-sans text-muted">{label}</td>
-                <td className="py-1 text-right text-secondary">{p}</td>
-                <td className="py-1 text-right text-secondary">{c}</td>
+        <div className="mt-2 min-w-0 max-w-full overflow-x-auto">
+          <table className="w-full text-[11px]">
+            <thead>
+              <tr className="text-muted">
+                <th className="py-0.5 text-left font-normal">指标</th>
+                <th className="py-0.5 text-right font-normal">模拟盘</th>
+                <th className="max-w-0 truncate py-0.5 text-right font-normal" title={sel.name}>{sel.name} (回测)</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="font-mono">
+              {rows.map(([label, p, c]) => (
+                <tr key={label} className="border-t border-border/40">
+                  <td className="py-1 font-sans text-muted">{label}</td>
+                  <td className="py-1 text-right text-secondary">{p}</td>
+                  <td className="py-1 text-right text-secondary">{c}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : (
         <div className="mt-2 text-[11px] leading-relaxed text-muted">
           在策略页保存回测候选后, 可与模拟盘同口径对比 (累计/年化/回撤/胜率等)。
@@ -836,9 +849,12 @@ function AccountCompareModal({ onClose }: { onClose: () => void }) {
   )
 }
 
-function StrategyAccountsPanel({ onSelect }: { onSelect: (accountId: string) => void }) {
+function StrategyAccountsPanel({ onSelect, selectedAccount }: { onSelect: (accountId: string) => void; selectedAccount: string }) {
   const qc = useQueryClient()
-  const compareQ = useQuery({ queryKey: QK.paperCompare, queryFn: api.paperCompare })
+  const [researchParams] = useSearchParams()
+  const requestedStrategy = researchParams.get('strategy')
+  const requestedAsset = researchParams.get('asset_type')
+  const compareQ = useQuery({ queryKey: QK.paperCompare, queryFn: api.paperCompare, refetchInterval: 30_000 })
   const strategiesQ = useQuery({
     queryKey: QK.screenerStrategies('any', 'all'),
     queryFn: () => api.screenerStrategies(undefined, 'all'),
@@ -846,22 +862,34 @@ function StrategyAccountsPanel({ onSelect }: { onSelect: (accountId: string) => 
   })
   const [creating, setCreating] = useState(false)
   const [strategyId, setStrategyId] = useState('')
+  const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
   const [cash, setCash] = useState('200000')
   const [entryPct, setEntryPct] = useState('10')
   const [error, setError] = useState('')
+  useEffect(() => {
+    setAssetType(requestedAsset === 'etf' ? 'etf' : 'stock')
+    if (!requestedStrategy) return
+    setCreating(true)
+    setStrategyId(requestedStrategy)
+    setAssetType(requestedAsset === 'etf' ? 'etf' : 'stock')
+    setError('')
+  }, [requestedStrategy, requestedAsset])
   const rows = (compareQ.data?.accounts ?? [])
     .filter(row => row.strategy_id)
-    .sort((a, b) => (b.pnl_pct ?? -Infinity) - (a.pnl_pct ?? -Infinity))
+    .sort((a, b) => (b.settled_pnl_pct ?? -Infinity) - (a.settled_pnl_pct ?? -Infinity))
+  const existing = rows.find(row => row.strategy_id === strategyId && row.asset_type === assetType)
+  const selectedRow = rows.find(row => row.account === selectedAccount)
+  const flowStrategy = creating ? strategyId || requestedStrategy : selectedRow?.strategy_id || strategyId || requestedStrategy
+  const flowAsset = creating ? assetType : selectedRow?.asset_type || assetType
   const options = (strategiesQ.data?.presets ?? []).filter(strategy =>
     !strategy.research_only && strategy.timeframes.includes('1d') &&
-    /^mr_strategy_[a-z0-9_]{1,28}$/.test(`mr_strategy_${strategy.id}`) &&
-    strategy.asset_types.some(asset => asset === 'stock' || asset === 'etf') &&
-    !rows.some(row => row.strategy_id === strategy.id))
+    strategy.asset_types.includes(assetType))
   const createM = useMutation({
     mutationFn: () => api.paperCreateStrategyAccount({
       strategy_id: strategyId,
       initial_cash: Number(cash),
       entry_pct: Number(entryPct),
+      asset_type: assetType,
     }),
     onSuccess: result => {
       qc.invalidateQueries({ queryKey: QK.paperAll })
@@ -876,23 +904,27 @@ function StrategyAccountsPanel({ onSelect }: { onSelect: (accountId: string) => 
     onSuccess: () => { qc.invalidateQueries({ queryKey: QK.paperCompare }); setError('') },
     onError: cause => setError(cause instanceof Error ? cause.message : '切换自动跟单失败'),
   })
-  const valid = strategyId && Number(cash) > 0 && Number(entryPct) > 0 && Number(entryPct) <= 100
+  const valid = options.some(strategy => strategy.id === strategyId) && Number.isFinite(Number(cash)) && Number(cash) > 0 && Number.isFinite(Number(entryPct)) && Number(entryPct) > 0 && Number(entryPct) <= 100
 
-  return <section className="mb-4 rounded-card border border-border bg-surface p-4">
+  return <section className="mb-4 min-w-0 max-w-full rounded-card border border-border bg-surface p-4">
+    <div className="mb-3"><ResearchFlow active="paper" strategyId={flowStrategy} assetType={flowAsset} /></div>
     <div className="flex flex-wrap items-center justify-between gap-2">
       <div><h2 className="text-sm font-semibold">策略模拟仓</h2><p className="mt-1 text-[11px] text-muted">每个策略使用独立虚拟账户；收益、胜率和净值仅按该账户实际成交计算。</p></div>
-      <button onClick={() => setCreating(value => !value)} className="inline-flex items-center gap-1 rounded-btn border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs text-accent"><Plus className="h-3.5 w-3.5" />新建策略仓</button>
+      <div className="flex flex-wrap gap-2"><ResearchAIButton label="AI 解读全部策略仓" disabled={!rows.length || compareQ.isError} prompt={paperResearchPrompt(rows)} /><button onClick={() => setCreating(value => !value)} className="inline-flex items-center gap-1 rounded-btn border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs text-accent"><Plus className="h-3.5 w-3.5" />新建策略仓</button></div>
     </div>
-    {creating && <div className="mt-3 grid gap-2 rounded-btn border border-border bg-base/40 p-3 md:grid-cols-[minmax(0,1fr)_120px_110px_auto]">
+    {creating && <div className="mt-3 grid gap-2 rounded-btn border border-border bg-base/40 p-3 lg:grid-cols-[90px_minmax(0,1fr)_120px_110px_auto]">
+      <label className="space-y-1 text-[11px] text-muted">市场<select aria-label="策略仓市场" value={assetType} onChange={event => { setAssetType(event.target.value as 'stock' | 'etf'); setStrategyId('') }} className="h-9 w-full rounded-btn border border-border bg-base px-2 text-xs text-foreground"><option value="stock">股票</option><option value="etf">ETF</option></select></label>
       <label className="space-y-1 text-[11px] text-muted">策略<select aria-label="模拟仓策略" value={strategyId} onChange={event => setStrategyId(event.target.value)} className="h-9 w-full rounded-btn border border-border bg-base px-2 text-xs text-foreground"><option value="">选择策略</option>{options.map(strategy => <option key={strategy.id} value={strategy.id}>{strategy.name} · {strategy.id}</option>)}</select></label>
       <label className="space-y-1 text-[11px] text-muted">初始资金（元）<input aria-label="初始资金" type="number" min="1" value={cash} onChange={event => setCash(event.target.value)} className="h-9 w-full rounded-btn border border-border bg-base px-2 text-xs text-foreground" /></label>
       <label className="space-y-1 text-[11px] text-muted">每笔买入权益 %<input aria-label="每笔买入权益百分比" type="number" min="1" max="100" value={entryPct} onChange={event => setEntryPct(event.target.value)} className="h-9 w-full rounded-btn border border-border bg-base px-2 text-xs text-foreground" /></label>
-      <button onClick={() => createM.mutate()} disabled={!valid || createM.isPending} className="self-end rounded-btn bg-accent px-3 py-2 text-xs font-medium text-white disabled:opacity-40">{createM.isPending ? '创建中…' : '创建并监控'}</button>
+      <button onClick={() => existing ? onSelect(existing.account) : createM.mutate()} disabled={!valid || createM.isPending || compareQ.isLoading || compareQ.isError} className="self-end rounded-btn bg-accent px-3 py-2 text-xs font-medium text-white disabled:opacity-40">{createM.isPending ? '创建中…' : existing ? `打开已有账户 · ${existing.auto_enabled ? '已启用' : '已暂停'}` : '创建暂停账户'}</button>
+      <p className="text-[11px] leading-5 text-muted lg:col-span-5">仅支持已保存的日线股票/ETF策略。每个策略在每个市场独立记账；重复创建会返回已有账户，保留其资金与启用状态。回测临时参数和费用不会自动复制。</p>
+      {strategyId && !options.some(strategy => strategy.id === strategyId) && !strategiesQ.isLoading && <p role="alert" className="text-[11px] text-warning lg:col-span-5">带入的策略不在所选市场的可模拟日线策略中，请重新选择。</p>}
     </div>}
     {error && <div role="alert" className="mt-2 text-xs text-danger">{error}</div>}
+    {compareQ.isError && <div role="alert" className="mt-2 text-xs text-danger">策略账本读取失败，请稍后重试。</div>}
     <p className="mt-2 text-[11px] leading-5 text-muted">买入信号按下一交易日开盘模拟下单；卖出信号仅对已有持仓下单。暂停只阻止新信号下单，已有待成交订单仍按原规则处理。策略监控、行情和撮合均需正常运行。</p>
-    {compareQ.isLoading ? <div className="py-5 text-center text-xs text-muted">正在读取策略账本…</div> : rows.length === 0 ? <div className="py-5 text-center text-xs text-muted">暂无策略模拟仓。现有手动账户仍可在上方切换。</div> :
-      <div className="mt-3 overflow-x-auto"><table className="w-full min-w-[850px] text-xs"><thead><tr className="border-b border-border text-left text-[11px] text-muted"><th className="py-2 font-normal">策略 / 独立账户</th><th className="text-right font-normal">累计收益</th><th className="text-right font-normal">胜率</th><th className="text-right font-normal">回合</th><th className="text-right font-normal">当前权益</th><th className="text-right font-normal">最大回撤</th><th className="text-right font-normal">自动跟单</th><th className="text-right font-normal">操作</th></tr></thead><tbody>{rows.map(row => <tr key={row.account} className="border-b border-border/50 last:border-0 hover:bg-elevated/30"><td className="py-2"><div className="font-medium text-foreground">{row.name}</div><div className="font-mono text-[10px] text-muted">{row.strategy_id}</div></td><td className={cn('text-right font-mono', priceColorClass((row.pnl_pct ?? 0) / 100))}>{row.pnl_pct == null ? '—' : `${row.pnl_pct > 0 ? '+' : ''}${row.pnl_pct.toFixed(2)}%`}</td><td className="text-right font-mono">{row.rounds ? `${row.win_rate.toFixed(1)}%` : '—'}</td><td className="text-right font-mono">{row.rounds}</td><td className="text-right font-mono">¥{fmtMoney(row.total)}</td><td className="text-right font-mono">{row.max_drawdown == null ? '—' : `-${row.max_drawdown.toFixed(2)}%`}</td><td className="text-right"><button onClick={() => autoM.mutate({ account: row.account, enabled: !row.auto_enabled })} disabled={autoM.isPending} className={cn('rounded-btn px-2 py-1 disabled:opacity-40', row.auto_enabled ? 'bg-accent/10 text-accent' : 'bg-elevated text-muted')}>{row.auto_enabled ? '已启用 · 暂停' : '已暂停 · 启用'}</button></td><td className="text-right"><button onClick={() => onSelect(row.account)} className="rounded-btn border border-border px-2 py-1 text-accent hover:border-accent/40">查看账户</button></td></tr>)}</tbody></table></div>}
+    {compareQ.isLoading ? <div className="py-5 text-center text-xs text-muted">正在读取策略账本…</div> : rows.length === 0 && !compareQ.isError ? <div className="py-5 text-center text-xs text-muted">暂无策略模拟仓。先选择策略、历史回测，再创建暂停账户；现有手动账户仍可在上方切换。</div> : <StrategyPaperTable rows={rows} strategies={strategiesQ.data?.presets ?? []} onSelect={onSelect} onToggle={(account, enabled) => autoM.mutate({ account, enabled })} togglePending={autoM.isPending} />}
   </section>
 }
 
@@ -917,7 +949,7 @@ function AutoRulesPanel({ acc }: { acc: string }) {
     return <AutoRuleForm acc={acc} onDone={() => { setCreating(false); invalidate() }} onCancel={() => setCreating(false)} />
   }
   return (
-    <div className="rounded-card border border-border bg-surface p-4">
+    <div className="min-w-0 max-w-full rounded-card border border-border bg-surface p-4">
       <div className="flex items-center justify-between">
         <div className="text-sm font-medium">自动跟单规则</div>
         <button onClick={() => setCreating(true)} className="flex items-center gap-1 rounded-btn bg-accent/10 px-2.5 py-1 text-xs text-accent transition-colors hover:bg-accent/20">
@@ -930,16 +962,16 @@ function AutoRulesPanel({ acc }: { acc: string }) {
       {rules.length === 0 ? (
         <div className="py-8 text-center text-xs text-muted">暂无规则 — 新建一条, 让策略信号自动进入模拟盘</div>
       ) : (
-        <div className="mt-2 space-y-1">
+        <div className="mt-2 min-w-0 max-w-full space-y-1 overflow-x-auto">
           {rules.map(r => (
-            <div key={r.id} className="flex items-center gap-2 rounded-btn px-2 py-1.5 text-xs transition-colors hover:bg-elevated/40">
+            <div key={r.id} className="flex min-w-max items-center gap-2 rounded-btn px-2 py-1.5 text-xs transition-colors hover:bg-elevated/40">
               <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', r.enabled ? 'bg-bear' : 'bg-muted')} />
               <span className="w-28 shrink-0 truncate font-medium">{r.name}</span>
               <span className="w-20 shrink-0 text-muted">{r.match_kind === 'strategy' ? '跟策略' : '跟规则'}</span>
               <span className="w-32 shrink-0 truncate font-mono text-[11px] text-muted" title={r.match_id}>{r.match_id}</span>
               <span className={cn('w-8 shrink-0 font-medium', r.side === 'buy' ? 'text-bull' : 'text-bear')}>{r.side === 'buy' ? '买' : '卖'}</span>
               <span className="w-24 shrink-0 font-mono text-[11px] text-muted">
-                {r.size_mode === 'fixed_amount' ? fmtMoney(r.size_value, 0) : `${r.size_value}% 权益`}
+                {r.size_mode === 'full_position' ? '全部可卖持仓' : r.size_mode === 'fixed_amount' ? fmtMoney(r.size_value, 0) : `${r.size_value}% 权益`}
               </span>
               <span className="w-16 shrink-0 text-[11px] text-muted">{ORDER_TYPE_LABEL[r.order_type]} · 冷却{r.cooldown_days}天</span>
               <button
@@ -1160,12 +1192,13 @@ export function Paper() {
       if (!accounts.some(a => a.id === accId)) setAccId(accounts[0].id)
     }
     return (
-      <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <PageHeader
           title="模拟盘"
           subtitle="虚拟账户 · 用假钱验证你的策略"
+          className={PAPER_HEADER_CLASS_NAME}
           right={cancellable ? (
-            <div className="flex items-center gap-1.5">
+            <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
               <select
                 value={selectedId}
                 onChange={e => { setDraftId(null); setAccId(e.target.value) }}
@@ -1186,8 +1219,8 @@ export function Paper() {
             </div>
           ) : undefined}
         />
-        <div className="flex-1 overflow-y-auto">
-          <div className="px-5 pt-5"><StrategyAccountsPanel onSelect={createdId => { setDraftId(null); setAccId(createdId) }} /></div>
+        <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+          <div className="min-w-0 max-w-full space-y-3 px-3 pt-4 md:px-5"><StrategyAccountsPanel selectedAccount={selectedId} onSelect={createdId => { setDraftId(null); setAccId(createdId) }} /></div>
           <SetupCard
             accId={draftId ?? accId}
             onDone={createdId => {
@@ -1236,10 +1269,11 @@ export function Paper() {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <PageHeader
         title="模拟盘"
         subtitle="虚拟账户 · 用假钱验证你的策略"
+        className={PAPER_HEADER_CLASS_NAME}
         titleExtra={
           <>
             {ov.status === 'frozen' && <span className="rounded-full bg-warning/15 px-2 py-0.5 text-[10px] text-warning">已冻结</span>}
@@ -1251,8 +1285,8 @@ export function Paper() {
           </>
         }
         right={
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5">
+          <div className="flex min-w-0 max-w-full flex-wrap items-center justify-start gap-2 md:justify-end">
+            <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
               <select
                 value={accId}
                 onChange={e => setAccId(e.target.value)}
@@ -1273,7 +1307,7 @@ export function Paper() {
             </div>
             <button
               onClick={() => setFeeOpen(true)}
-              className="flex items-center gap-1 rounded-btn border border-border px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-accent/40 hover:text-accent"
+              className="flex max-w-full flex-wrap items-center gap-1 whitespace-normal rounded-btn border border-border px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-accent/40 hover:text-accent"
               title={`佣金 ${((ov.fees?.commission_pct ?? 0) * 10000).toFixed(1)}‱ (最低5元) · 印花税 ${((ov.fees?.stamp_tax_pct ?? 0) * 1000).toFixed(1)}‰ 仅卖出 · 滑点 ${ov.fees?.slippage_bps ?? 0}bps — 点击调整`}
             >
               <Settings className="h-3 w-3" />
@@ -1296,8 +1330,8 @@ export function Paper() {
           </div>
         }
       />
-      <div className="min-h-0 flex-1 overflow-y-auto p-5">
-        <StrategyAccountsPanel onSelect={setAccId} />
+      <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-3 md:p-5">
+        <StrategyAccountsPanel selectedAccount={accId} onSelect={setAccId} />
         {/* 总览卡片 */}
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <StatCard label="总资产 (虚拟)" value={fmtMoney(ov.total)} icon={Wallet} iconCls="text-accent" />
@@ -1312,7 +1346,7 @@ export function Paper() {
           />
         </div>
 
-        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[1fr_320px]">
+        <div className="mt-4 grid min-w-0 grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
           {/* 左列: 净值 + 持仓 + 流水 */}
           <div className="min-w-0 space-y-4">
             <div className="rounded-card border border-border bg-surface p-4">
@@ -1325,40 +1359,42 @@ export function Paper() {
               {holdings.length === 0 ? (
                 <div className="py-8 text-center text-xs text-muted">暂无持仓 — 右侧下单或等自动跟单触发</div>
               ) : (
-                <table className="mt-2 w-full text-xs">
-                  <thead className="sticky top-0 bg-surface">
-                    <tr className="text-left text-[10px] text-muted">
-                      <th className="py-1.5 font-normal">代码</th>
-                      <th className="py-1.5 text-right font-normal">数量</th>
-                      <th className="py-1.5 text-right font-normal">可卖(T+1)</th>
-                      <th className="py-1.5 text-right font-normal">成本</th>
-                      <th className="py-1.5 text-right font-normal">现价</th>
-                      <th className="py-1.5 text-right font-normal">市值</th>
-                      <th className="py-1.5 text-right font-normal">盈亏</th>
-                    </tr>
-                  </thead>
-                  <tbody className="font-mono">
-                    {holdings.map(h => (
-                      <tr key={h.symbol} className="border-t border-border/50 transition-colors hover:bg-elevated/40">
-                        <td className="py-1.5 font-sans">{h.symbol}</td>
-                        <td className="py-1.5 text-right">{h.qty}</td>
-                        <td className="py-1.5 text-right text-muted">{h.available_qty}</td>
-                        <td className="py-1.5 text-right">{fmtMoney(h.avg_cost, 3)}</td>
-                        <td className="py-1.5 text-right">{fmtMoney(h.last_price, 3)}</td>
-                        <td className="py-1.5 text-right">{fmtMoney(h.market_value, 0)}</td>
-                        <td className={cn('py-1.5 text-right', priceColorClass(h.pnl))}>
-                          {(h.pnl >= 0 ? '+' : '') + fmtMoney(h.pnl, 0)} ({fmtPct(h.pnl_pct / 100)})
-                        </td>
+                <div className="mt-2 min-w-0 max-w-full overflow-x-auto">
+                  <table className="w-full min-w-[560px] text-xs">
+                    <thead className="sticky top-0 bg-surface">
+                      <tr className="text-left text-[10px] text-muted">
+                        <th className="py-1.5 font-normal">代码</th>
+                        <th className="py-1.5 text-right font-normal">数量</th>
+                        <th className="py-1.5 text-right font-normal">可卖(T+1)</th>
+                        <th className="py-1.5 text-right font-normal">成本</th>
+                        <th className="py-1.5 text-right font-normal">现价</th>
+                        <th className="py-1.5 text-right font-normal">市值</th>
+                        <th className="py-1.5 text-right font-normal">盈亏</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody className="font-mono">
+                      {holdings.map(h => (
+                        <tr key={h.symbol} className="border-t border-border/50 transition-colors hover:bg-elevated/40">
+                          <td className="py-1.5 font-sans">{h.symbol}</td>
+                          <td className="py-1.5 text-right">{h.qty}</td>
+                          <td className="py-1.5 text-right text-muted">{h.available_qty}</td>
+                          <td className="py-1.5 text-right">{fmtMoney(h.avg_cost, 3)}</td>
+                          <td className="py-1.5 text-right">{fmtMoney(h.last_price, 3)}</td>
+                          <td className="py-1.5 text-right">{fmtMoney(h.market_value, 0)}</td>
+                          <td className={cn('py-1.5 text-right', priceColorClass(h.pnl))}>
+                            {(h.pnl >= 0 ? '+' : '') + fmtMoney(h.pnl, 0)} ({fmtPct(h.pnl_pct / 100)})
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
 
             {/* 订单 / 成交流水 */}
             <div className="rounded-card border border-border bg-surface p-4">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 {(['orders', 'trades'] as const).map(t => (
                   <button
                     key={t}
@@ -1380,7 +1416,7 @@ export function Paper() {
                 )}
                 {stats && (
                   <span className="ml-auto text-[11px] text-muted" title="回合为 FIFO 配对的完整买卖; 回撤按定版净值序列">
-                    回合 {stats.rounds} · 胜率 {stats.win_rate}% · 盈亏比 {stats.profit_loss_ratio ?? '--'} · 均持 {stats.avg_holding_days}天 · 回撤{' '}
+                    回合 {stats.rounds} · 胜率 {stats.rounds > 0 ? `${stats.win_rate}%` : '—'} · 盈亏比 {stats.profit_loss_ratio ?? '--'} · 均持 {stats.avg_holding_days}天 · 回撤{' '}
                     {stats.max_drawdown != null ? `-${stats.max_drawdown}%` : '--'} ·{' '}
                     <span className={cn('font-mono', priceColorClass(stats.realized_pnl))}>
                       已实现 {stats.realized_pnl >= 0 ? '+' : ''}{fmtMoney(stats.realized_pnl, 0)}
@@ -1389,10 +1425,10 @@ export function Paper() {
                 )}
               </div>
               {tab === 'orders' ? (
-                <div className="mt-2 space-y-1">
+                <div className="mt-2 min-w-0 max-w-full space-y-1 overflow-x-auto">
                   {orders.length === 0 && <div className="py-6 text-center text-xs text-muted">暂无订单</div>}
                   {orders.map((o: PaperOrder) => (
-                    <div key={o.id} className="flex items-center gap-2 rounded-btn px-2 py-1.5 text-xs hover:bg-elevated/50">
+                    <div key={o.id} className="flex min-w-max items-center gap-2 rounded-btn px-2 py-1.5 text-xs hover:bg-elevated/50">
                       <span className={cn('w-8 shrink-0 font-medium', o.side === 'buy' ? 'text-bull' : 'text-bear')}>
                         {o.side === 'buy' ? '买入' : '卖出'}
                       </span>
@@ -1425,10 +1461,10 @@ export function Paper() {
                   ))}
                 </div>
               ) : (
-                <div className="mt-2 space-y-1">
+                <div className="mt-2 min-w-0 max-w-full space-y-1 overflow-x-auto">
                   {trades.length === 0 && <div className="py-6 text-center text-xs text-muted">暂无成交</div>}
                   {trades.map((f: PaperFill) => (
-                    <div key={`${f.seq}-${f.order_id ?? 'corp'}`} className="flex items-center gap-2 rounded-btn px-2 py-1.5 font-mono text-xs hover:bg-elevated/50">
+                    <div key={`${f.seq}-${f.order_id ?? 'corp'}`} className="flex min-w-max items-center gap-2 rounded-btn px-2 py-1.5 font-mono text-xs hover:bg-elevated/50">
                       <span className="w-14 shrink-0 text-muted">{f.date}</span>
                       {f.kind === 'corp_action' ? (
                         <span className="text-accent">除权 ×{f.factor} ({f.symbol}: {f.qty_before} → )</span>
@@ -1451,7 +1487,7 @@ export function Paper() {
           </div>
 
           {/* 右列: 下单 + 自动跟单 + 策略对比 */}
-          <div className="space-y-4">
+          <div className="min-w-0 space-y-4">
             <OrderForm acc={accId} onDone={invalidateAll} />
             <AutoRulesPanel acc={accId} />
             <CandidateCompareCard paper={{

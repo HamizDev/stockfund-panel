@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { BookmarkCheck, FlaskConical, ShieldCheck } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
+import { ResearchFlow } from '@/components/research/ResearchFlow'
 import { ResearchCandidatesDialog } from './backtest/ResearchCandidatesDialog'
 import { RobustnessValidation } from './backtest/RobustnessValidation'
 import { StrategyBacktest } from './backtest/StrategyBacktest'
@@ -30,6 +31,7 @@ export function Backtest() {
   const [candidatesOpen, setCandidatesOpen] = useState(false)
   // 候选「载入复测」: 弹窗选定 → 关闭弹窗切到策略页 → StrategyBacktest 消费后清空
   const [pendingLoad, setPendingLoad] = useState<ResearchCandidate | null>(null)
+  const [researchContext, setResearchContext] = useState<{ strategyId: string | null; assetType: 'stock' | 'etf' }>({ strategyId: null, assetType: 'stock' })
 
   // 跨页「载入复测」: 因子页候选弹窗经 router state 传入 (location.state), 消费后清除防止刷新重复载入
   const stateCandidate = (location.state as { loadCandidate?: ResearchCandidate } | null)?.loadCandidate ?? null
@@ -69,7 +71,7 @@ export function Backtest() {
       <PageHeader
         title="回测"
         subtitle={<span className="hidden md:inline">{MODES[activeTab].subtitle}</span>}
-        className="shrink-0 flex-wrap gap-x-4 gap-y-2 bg-base/95 px-3 lg:flex-nowrap lg:px-5"
+        className="shrink-0 flex-wrap gap-x-4 gap-y-2 bg-base/95 pl-14 pr-3 md:pl-5 lg:flex-nowrap lg:pr-5 [&_h1]:shrink-0"
         right={(
           <div className="flex w-full min-w-0 items-center gap-1.5 sm:gap-2 lg:w-auto">
             <button
@@ -112,10 +114,12 @@ export function Backtest() {
       />
 
       <main className="min-h-0 flex-1 px-3 pb-3 pt-3 lg:px-4 lg:pb-4">
+        <div className="mb-3"><ResearchFlow active="backtest" strategyId={researchContext.strategyId} assetType={researchContext.assetType} /></div>
         {activeTab === 'strategy' && (
           <StrategyBacktest
             loadCandidate={pendingLoad}
             onLoadConsumed={() => setPendingLoad(null)}
+            onResearchContextChange={setResearchContext}
           />
         )}
         {activeTab === 'robustness' && <RobustnessValidation />}

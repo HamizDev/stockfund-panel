@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import uuid
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -46,6 +47,7 @@ class StrategyAccountModel(BaseModel):
     strategy_id: str
     initial_cash: float = Field(default=200_000, gt=0, allow_inf_nan=False)
     entry_pct: float = Field(default=10, gt=0, le=100, allow_inf_nan=False)
+    asset_type: Literal["stock", "etf"] | None = None
 
 
 def _monitor_has_both_sides(monitor: dict | None) -> bool:
@@ -142,7 +144,7 @@ def create_strategy_account(request: Request, body: StrategyAccountModel):
     """Create one isolated paper account per monitored strategy.
 
     Entry and exit use separate direction-aware rules. Creating the account
-    also enables its strategy monitor so subsequent live signals can be seen.
+    starts its own monitor but leaves both order rules paused until enabled.
     Existing user-managed monitor rules are left untouched.
     """
     from app.strategy import monitor_rules, paper_auto
@@ -157,16 +159,24 @@ def create_strategy_account(request: Request, body: StrategyAccountModel):
     asset_types = set(meta.get("asset_types", ["stock"]))
     if not asset_types.intersection({"stock", "etf"}):
         raise HTTPException(status_code=400, detail="目前仅支持股票和 ETF 策略")
+    asset_type = body.asset_type or ("stock" if "stock" in asset_types else "etf")
+    if asset_type not in asset_types:
+        raise HTTPException(status_code=400, detail="该策略不支持所选市场")
     data_dir = _data_dir(request)
     with paper.PAPER_LOCK:
         existing_id = next(
             (aid for aid in paper.list_account_ids(data_dir)
-             if (paper.get_account(data_dir, aid) or {}).get("strategy_id") == body.strategy_id),
+             if (paper.get_account(data_dir, aid) or {}).get("strategy_id") == body.strategy_id
+             and ((paper.get_account(data_dir, aid) or {}).get("asset_type") or
+                  (monitor_rules.load_one(data_dir, _paper_monitor_id(aid)) or {}).get("asset_type", "stock")) == asset_type),
             None,
         )
         account_id = existing_id or f"strat_{uuid.uuid4().hex[:16]}"
         monitor_id = _paper_monitor_id(account_id)
         monitor = monitor_rules.load_one(data_dir, monitor_id)
+        if monitor and (monitor.get("strategy_id") != body.strategy_id or
+                        monitor.get("asset_type", "stock") != asset_type):
+            raise HTTPException(status_code=409, detail="专属监控的市场或策略与账户不一致。请先核对")
         if monitor and monitor.get("enabled") and not _monitor_has_both_sides(monitor):
             raise HTTPException(status_code=409, detail="策略模拟仓监控缺少买入或卖出事件。请先在监控中心补齐")
         try:
@@ -174,6 +184,7 @@ def create_strategy_account(request: Request, body: StrategyAccountModel):
                 data_dir, body.initial_cash, account_id=account_id,
                 name=f"策略 · {meta.get('name') or body.strategy_id}",
                 strategy_id=body.strategy_id,
+                asset_type=asset_type,
             )
             rules = paper_auto.load_auto_rules(data_dir, account_id)
             for side, size_mode, size_value, cooldown in (
@@ -188,6 +199,8 @@ def create_strategy_account(request: Request, body: StrategyAccountModel):
                         "match_kind": "strategy", "match_id": body.strategy_id,
                         "side": side, "size_mode": size_mode, "size_value": size_value,
                         "order_type": "next_open", "cooldown_days": cooldown,
+                        "enabled": False, "asset_type": asset_type,
+                        "monitor_rule_id": monitor_id,
                     }, account_id))
 
             if monitor is None:
@@ -195,7 +208,7 @@ def create_strategy_account(request: Request, body: StrategyAccountModel):
                     "id": monitor_id,
                     "name": f"策略模拟仓监控 · {meta.get('name') or body.strategy_id}",
                     "type": "strategy", "scope": "all",
-                    "asset_type": "stock" if "stock" in asset_types else "etf",
+                    "asset_type": asset_type,
                     "strategy_id": body.strategy_id, "direction": "entry",
                     "notify_events": ["buy_signal", "sell_signal", "pool_entry", "pool_exit"],
                     "conditions": [], "cooldown_seconds": 0, "enabled": True,
@@ -319,7 +332,15 @@ def compare_accounts(request: Request):
             continue  # 空壳目录 (懒创建) 不进对比
         st = paper.stats(data_dir, acc_id)
         initial = float(acc.get("initial_cash") or 0)
+        nav = paper.load_nav(data_dir, acc_id)
+        latest_nav = max(nav, key=lambda item: item["date"]) if nav else None
+        valuation_complete = bool(latest_nav and latest_nav.get("valuation_complete") is True)
+        nav_status = ("unavailable" if not latest_nav else "complete" if valuation_complete
+                      else "missing_prices" if latest_nav.get("valuation_complete") is False else "legacy_unknown")
+        settled_drawdown = paper.max_drawdown([item["nav"] for item in nav]) if nav and all(
+            item.get("valuation_complete") is True for item in nav) else None
         auto_enabled = None
+        monitor = None
         if acc.get("strategy_id"):
             from app.strategy import monitor_rules, paper_auto
             strategy_id = acc["strategy_id"]
@@ -327,12 +348,23 @@ def compare_accounts(request: Request):
                      if r.get("match_kind") == "strategy" and r.get("match_id") == strategy_id]
             monitor = monitor_rules.load_one(data_dir, _paper_monitor_id(acc_id))
             auto_enabled = (bool(monitor and monitor.get("enabled") and _monitor_has_both_sides(monitor)) and
+                            monitor.get("strategy_id") == strategy_id and
+                            (acc.get("asset_type") is None or monitor.get("asset_type", "stock") == acc["asset_type"]) and
+                            all(r.get("asset_type") in (None, acc.get("asset_type") or monitor.get("asset_type", "stock")) for r in rules) and
                             {r.get("side") for r in rules if r.get("enabled")} == {"buy", "sell"})
         rows.append({
             "account": acc_id,
             "name": acc.get("name") or acc_id,
             "strategy_id": acc.get("strategy_id"),
             "auto_enabled": auto_enabled,
+            "asset_type": acc.get("asset_type") or (monitor or {}).get("asset_type"),
+            "wins": st.get("wins"),
+            "holdings_count": len(ov.get("holdings") or []),
+            "nav_date": latest_nav["date"] if latest_nav else None,
+            "settled_nav_status": nav_status,
+            "settled_max_drawdown": round(settled_drawdown * 100, 2) if settled_drawdown is not None else None,
+            "settled_total": latest_nav["nav"] if valuation_complete else None,
+            "settled_pnl_pct": round((latest_nav["nav"] / initial - 1) * 100, 2) if valuation_complete and initial > 0 else None,
             "status": acc.get("status"),
             "initial_cash": initial,
             "fees": {k: acc.get(k) for k in ("commission_pct", "stamp_tax_pct", "slippage_bps")},
@@ -347,7 +379,7 @@ def compare_accounts(request: Request):
             "avg_holding_days": st.get("avg_holding_days"),
             "realized_pnl": st.get("realized_pnl"),
             "max_drawdown": st.get("max_drawdown"),
-            "nav": [{"date": n["date"], "nav": n["nav"]} for n in paper.load_nav(data_dir, acc_id)],
+            "nav": [{"date": n["date"], "nav": n["nav"], "valuation_complete": n.get("valuation_complete")} for n in nav],
         })
     return {"accounts": rows}
 
@@ -364,15 +396,22 @@ def set_strategy_account_enabled(request: Request, account_id: str, enabled: boo
         strategy_id = account.get("strategy_id") if account else None
         if not strategy_id:
             raise HTTPException(status_code=404, detail="策略模拟仓不存在")
+        if enabled and account.get("status") == "frozen":
+            raise HTTPException(status_code=409, detail="冻结账户不能启用自动跟单")
         monitor = monitor_rules.load_one(data_dir, _paper_monitor_id(account_id))
         if enabled and (monitor is None or not monitor.get("enabled")):
             raise HTTPException(status_code=409, detail="策略监控尚未启用。请先在监控中心启用")
         if enabled and not _monitor_has_both_sides(monitor):
             raise HTTPException(status_code=409, detail="策略监控缺少买入或卖出事件。请先在监控中心补齐")
+        if enabled and (monitor.get("strategy_id") != strategy_id or
+                        (account.get("asset_type") is not None and monitor.get("asset_type", "stock") != account["asset_type"])):
+            raise HTTPException(status_code=409, detail="专属监控的市场或策略与账户不一致。请先核对")
         rules = [r for r in paper_auto.load_auto_rules(data_dir, account_id)
                  if r.get("match_kind") == "strategy" and r.get("match_id") == strategy_id]
         if {r.get("side") for r in rules} != {"buy", "sell"}:
             raise HTTPException(status_code=409, detail="买入或卖出跟单规则缺失")
+        if enabled and any(r.get("asset_type") not in (None, account.get("asset_type") or monitor.get("asset_type", "stock")) for r in rules):
+            raise HTTPException(status_code=409, detail="跟单规则的市场与账户不一致。请先核对")
         for rule in rules:
             paper_auto.set_enabled(data_dir, rule["id"], enabled, account_id)
     return {"enabled": enabled}

@@ -9,18 +9,10 @@ import { TrendingUp } from 'lucide-react'
 import type { FrontendExtension, FrontendSlotContextMap } from '@/extensions/types'
 import { MarketFlowPage } from './MarketFlowPage'
 import { marketFlowApi, yuanToYi, type MemberItem, type StockFlow } from './client'
+import { toSuffixed } from './symbol'
 
 type AnySlotContext = FrontendSlotContextMap[keyof FrontendSlotContextMap]
 type StockPreviewContext = FrontendSlotContextMap['stock-preview.footer']
-
-/** 6 位代码 → 带后缀格式 (600900 → 600900.SH) */
-function toSuffixed(symbol: string): string {
-  const s = symbol.trim()
-  if (/^[68]/.test(s)) return `${s}.SH`
-  if (/^[03]/.test(s)) return `${s}.SZ`
-  if (/^[49]/.test(s)) return `${s}.BJ`
-  return s
-}
 
 /** 个股预览底部: 人气/资金/主力 + 概念/行业标签 (标签可点看成分股) */
 function StockConcepts(props: AnySlotContext) {

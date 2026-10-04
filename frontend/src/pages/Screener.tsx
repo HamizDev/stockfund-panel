@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, SlidersHorizontal } from 'lucide-react'
@@ -24,6 +25,9 @@ import { StrategySettingsDialog } from '@/components/screener/StrategySettingsDi
 import { DefaultStrategyParamsDialog } from '@/components/screener/DefaultStrategyParamsDialog'
 import { StrategyPoolDialog } from '@/components/screener/StrategyPoolDialog'
 import { StrategyBuilderDialog } from '@/components/screener/StrategyBuilderDialog'
+import { ResearchFlow } from '@/components/research/ResearchFlow'
+import { ResearchAIButton } from '@/components/research/ResearchAIButton'
+import { researchLink, strategyResearchPrompt } from '@/components/research/researchContext'
 import { StrategyStoreDialog } from '@/components/screener/StrategyStoreDialog'
 import { CompositeStrategyDialog } from '@/components/screener/CompositeStrategyDialog'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
@@ -42,11 +46,18 @@ import {
 const SHOW_STRATEGY_STORE = false
 
 export function Screener() {
+  const [researchParams] = useSearchParams()
+  const requestedStrategy = researchParams.get('strategy')
+  const requestedAsset = researchParams.get('asset_type')
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
   // 周期显示筛选: 全部 / 日线 / 分钟 — 只过滤卡片显示, 不影响池和执行;
   // 执行按每个策略自己声明的 timeframes 路由 (日线走盘后缓存, 分钟走本地分钟K分区)
   const [tfFilter, setTfFilter] = useState<'all' | '1d' | '1m'>('all')
   const [activeStrategy, setActiveStrategy] = useState<string | null>(null)
+  useEffect(() => {
+    if (requestedAsset) setAssetType(requestedAsset === 'etf' ? 'etf' : 'stock')
+    if (requestedStrategy) setActiveStrategy(requestedStrategy)
+  }, [requestedAsset, requestedStrategy])
   const [result, setResult] = useState<ScreenerResult | null>(null)
   const [asOf, setAsOf] = useState<string>('')
   const [batchMsg, setBatchMsg] = useState<string>('')
@@ -222,6 +233,7 @@ export function Screener() {
     }
     return map
   }, [strategyPresets])
+  const researchStrategy = strategies.data?.presets.find(strategy => strategy.id === activeStrategy)
 
   const allStrategyIds = useMemo(
     () => new Set((strategies.data?.presets ?? []).map(s => s.id)),
@@ -745,7 +757,8 @@ export function Screener() {
     <>
       <PageHeader
         title="策略"
-        subtitle="基于本地 enriched 表 · 毫秒级 SQL"
+        subtitle="理解规则 → 历史验证 → 虚拟资金观察"
+        className="flex-wrap gap-3 pl-14 md:pl-5 [&>div]:flex-wrap [&_h1]:shrink-0"
         right={
           <div className="flex items-center gap-2">
             {/* 资产类型切换: 股票 / ETF (分钟策略 asset_types 仅股票, ETF 列表自然不含) */}
@@ -892,7 +905,12 @@ export function Screener() {
         }
       />
 
-      <div className="px-8 py-4 space-y-3">
+      <div className="px-3 py-4 space-y-3 md:px-5">
+        <ResearchFlow active="strategy" strategyId={activeStrategy} assetType={assetType} onCreate={() => { setBuilderMode('create'); setShowBuilder(true) }} />
+        {activeStrategy && researchStrategy && <div className="flex flex-wrap items-center gap-2">
+          <ResearchAIButton label="AI 解释所选策略" prompt={strategyResearchPrompt(researchStrategy, assetType)} />
+          <Link to={researchLink('backtest', activeStrategy, assetType)} className="rounded-btn border border-border px-3 py-1.5 text-xs text-secondary hover:text-accent">带入历史回测 →</Link>
+        </div>}
         {/* 策略卡片 */}
         {cardSize !== 'hidden' && (
         <section>

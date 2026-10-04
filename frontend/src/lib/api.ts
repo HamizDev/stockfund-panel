@@ -1112,6 +1112,14 @@ export interface PaperCompareRow {
   name: string
   strategy_id?: string | null
   auto_enabled?: boolean | null
+  asset_type?: 'stock' | 'etf' | null
+  wins?: number
+  holdings_count?: number
+  nav_date?: string | null
+  settled_total?: number | null
+  settled_pnl_pct?: number | null
+  settled_max_drawdown?: number | null
+  settled_nav_status?: 'complete' | 'missing_prices' | 'legacy_unknown' | 'unavailable'
   status: 'active' | 'frozen'
   initial_cash: number
   fees: { commission_pct: number; stamp_tax_pct: number; slippage_bps: number }
@@ -1189,7 +1197,7 @@ export interface PaperAutoRule {
   match_kind: 'strategy' | 'rule'
   match_id: string
   side: 'buy' | 'sell'
-  size_mode: 'fixed_amount' | 'pct_equity'
+  size_mode: 'fixed_amount' | 'pct_equity' | 'full_position'
   size_value: number
   order_type: 'market' | 'next_open' | 'close'
   cooldown_days: number
@@ -3798,7 +3806,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  paperCreateStrategyAccount: (body: { strategy_id: string; initial_cash: number; entry_pct: number }) =>
+  paperCreateStrategyAccount: (body: { strategy_id: string; initial_cash: number; entry_pct: number; asset_type?: 'stock' | 'etf' }) =>
     request<{ account: PaperAccount; monitor_enabled: boolean }>('/api/paper/strategy_accounts', {
       method: 'POST',
       body: JSON.stringify(body),

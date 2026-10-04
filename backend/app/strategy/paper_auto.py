@@ -53,6 +53,8 @@ def validate_rule(rule: dict) -> None:
         raise ValueError("match_id 不能为空")
     if rule.get("side") not in ("buy", "sell"):
         raise ValueError(f"side 非法: {rule.get('side')!r}")
+    if rule.get("asset_type") is not None and rule["asset_type"] not in ("stock", "etf"):
+        raise ValueError("自动规则市场必须是股票或 ETF")
     if rule.get("size_mode") not in ("fixed_amount", "pct_equity", "full_position"):
         raise ValueError(f"size_mode 非法: {rule.get('size_mode')!r}")
     if rule.get("size_mode") == "full_position" and rule.get("side") != "sell":
@@ -126,6 +128,10 @@ def set_enabled(data_dir: Path, rule_id: str, enabled: bool, account_id: str = p
 
 
 def _matches(rule: dict, ev: dict) -> bool:
+    # Newly created market-specific accounts only consume their own monitor.
+    # Older generic rules without this field retain their original matching.
+    if rule.get("monitor_rule_id") and ev.get("rule_id") != rule["monitor_rule_id"]:
+        return False
     if rule["match_kind"] == "strategy":
         if ev.get("source") != "strategy" or ev.get("strategy_id") != rule["match_id"]:
             return False
@@ -229,15 +235,26 @@ def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.D
     created: list[dict] = []
     if not events:
         return created
-    rules = load_auto_rules(data_dir, account_id, enabled_only=True)
-    if not rules:
-        return created
     with paper.PAPER_LOCK:
+        rules = load_auto_rules(data_dir, account_id, enabled_only=True)
+        if not rules:
+            return created
         account = paper.get_account(data_dir, account_id)
         if account is None:
             return created
+        account_market = account.get("asset_type")
+        if account.get("strategy_id"):
+            from app.strategy import monitor_rules
+            monitor = monitor_rules.load_one(data_dir, f"paper_strategy_{account_id}")
+            if (not monitor or monitor.get("strategy_id") != account["strategy_id"]
+                    or (account_market is not None and monitor.get("asset_type", "stock") != account_market)):
+                logger.warning("paper strategy account %s: monitor context mismatch", account_id)
+                return created
+            account_market = account_market or monitor.get("asset_type", "stock")
         buy_cash = _cash_after_pending_buys(data_dir, account_id, account)
         for ev in events:
+            if account.get("strategy_id") and ev.get("rule_id") != f"paper_strategy_{account_id}":
+                continue
             symbol = (ev.get("symbol") or "").strip()
             try:
                 price = float(ev.get("price"))
@@ -246,6 +263,10 @@ def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.D
             if not symbol or not math.isfinite(price) or price <= 0:
                 continue
             for rule in rules:
+                if account.get("strategy_id") and (rule.get("match_kind") != "strategy" or
+                        rule.get("match_id") != account["strategy_id"] or
+                        rule.get("asset_type") not in (None, account_market)):
+                    continue
                 if not _matches(rule, ev):
                     continue
                 if _in_cooldown(data_dir, rule, symbol, int(rule.get("cooldown_days", 0)), account_id):
@@ -263,6 +284,7 @@ def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.D
                     account_id=account_id,
                     qty=qty,
                     order_type=rule["order_type"],
+                    asset_type=rule.get("asset_type") or account_market or "stock",
                     ref_price=price,
                     source=f"auto:{rule['id']}",
                 )
