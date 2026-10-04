@@ -1,0 +1,10 @@
+# zzshare — 匿名单标的股票 1 分钟数据源
+name: zzshare
+display_name: "zzshare（匿名股票分钟）"
+runtime: none
+entry: app.plugins.zzshare.provider:ZZShareProvider
+check: app.plugins.zzshare.provider:availability
+datasets: [minute]
+description: "匿名单标的 A 股股票 1 分钟K。仅支持 .SH/.SZ/.BJ 股票代码；不支持 ETF/指数、实时快照或全市场分钟。历史深度与复权口径尚未验证。"
+install_hint: "无需额外安装（使用后端已有 httpx）"
+homepage: "https://github.com/zzquant/zzshare"

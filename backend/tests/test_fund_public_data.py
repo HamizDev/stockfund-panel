@@ -234,6 +234,7 @@ def test_analyzer_reports_window_and_unadjusted_basis():
     assert stats["统计起始日"] == "2026-09-28"
     assert stats["统计截止日"] == "2026-09-29"
     assert "未经复权" in stats["统计口径"]
+    assert "最大回撤%" not in stats
 
 
 def test_research_cache_bounds_payloads_and_sweeps_expired(monkeypatch):

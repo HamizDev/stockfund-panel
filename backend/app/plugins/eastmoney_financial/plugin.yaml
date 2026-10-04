@@ -1,0 +1,9 @@
+name: eastmoney_financial
+display_name: "Eastmoney Financial"
+runtime: none
+entry: app.plugins.eastmoney_financial.provider:EastmoneyFinancialProvider
+check: app.plugins.eastmoney_financial.provider:availability
+datasets: [financial]
+description: "东财公开财务报表接口：利润表、资产负债表、现金流量表及财务指标；无 Key。"
+install_hint: "无需单独安装依赖"
+homepage: "https://datacenter.eastmoney.com/"

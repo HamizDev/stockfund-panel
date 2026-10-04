@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ _SYSTEM_PROMPT = """你是一位客观的公募基金研究助手. 基于提供�
 概括当前净值状态和样本局限, 引用有效日期, 不作收益保证.
 
 ### 2. 净值与风险表现
-列出输入可支持的区间涨跌, 波动, 最大回撤, 样本窗口和口径. 区分未复权单位净值回撤与来源累计收益序列回撤; 不把它们混称为总收益回撤.
+列出输入可支持的区间涨跌、波动及样本窗口. 最大回撤仅引用 research.risk 中的原值, 并说明 horizon、basis、起止日期、观测点数和采样说明; 若 risk 不可用或缺失, 明确写未提供, 不得从未复权单位净值重新计算或替代最大回撤.
 
 ### 3. 持仓与基金资料
 如有数据, 说明披露报告期, 覆盖比例, 行业/个股集中情况, 基金经理, 公司, 基准和资料缺口. 持仓是报告期披露, 不是实时或完整组合.
@@ -107,17 +108,15 @@ def _build_user_prompt(nav_tail, profile, thscode, name, focus="", holdings=None
     if research:
         parts.extend(["", "公开研究资料 (费率、观测回撤、持仓报告/公告日期及缺失字段):",
                       json.dumps(research, ensure_ascii=False),
-                      "null 不等于 0; 费率需按条件/渠道核对; 回撤的窗口与采样局限必须说明。",
-                      "单位净值未经复权, 分红可能影响其回撤; 累计净值不等于复权净值。"])
+                      "null 不等于 0; 费率需按条件/渠道核对; 最大回撤仅使用 research.risk, 并说明其窗口、basis、日期、观测数和采样局限。",
+                      "未复权单位净值不得用于补算或替代最大回撤; 累计净值不等于复权净值。"])
     if focus:
         parts.extend(["", "用户特别关注: " + focus])
     return "\n".join(parts)
 
 
 def _calc_stats(nav):
-    """计算净值序列的简单统计: 区间涨跌幅、最大回撤、波动率、历史分位。"""
-    import math
-
+    """计算单位净值样本统计; 最大回撤由 research.risk 单独提供。"""
     from app.custom.fund.public_data import number
 
     valid = [(row, number(row.get("unit_nav"))) for row in nav]
@@ -131,18 +130,9 @@ def _calc_stats(nav):
             base = vals[-n]
             if base > 0:
                 stats[label] = round((vals[-1] - base) / base * 100, 2)
-    peak = vals[0]
-    max_dd = 0.0
-    for v in vals:
-        if v > peak:
-            peak = v
-        dd = (peak - v) / peak if peak > 0 else 0
-        if dd > max_dd:
-            max_dd = dd
-    stats["最大回撤%"] = round(max_dd * 100, 2)
     stats["最新净值"] = vals[-1]
     stats["样本天数"] = len(vals)
-    stats["统计口径"] = "单位净值样本, 未经复权; 分红可能影响回撤, 不代表总收益回撤"
+    stats["统计口径"] = "单位净值样本, 未经复权; 最大回撤单独采用 research.risk 口径"
     stats["统计起始日"] = valid[0][0].get("nav_date") or valid[0][0].get("date")
     stats["统计截止日"] = valid[-1][0].get("nav_date") or valid[-1][0].get("date")
     # 历史分位: 当前净值在样本中的位置 (0-100, 越高越接近历史高点)
@@ -165,11 +155,64 @@ def _calc_stats(nav):
     return stats
 
 
+def _research_drawdown(research):
+    """Normalize research.risk for the analysis metadata; never derive a fallback."""
+    research = research if isinstance(research, dict) else {}
+    risk = research.get("risk")
+    risk = risk if isinstance(risk, dict) else {}
+    drawdown = {
+        "status": "unavailable",
+        "basis": None,
+        "max_drawdown_pct": None,
+        "start_date": None,
+        "end_date": None,
+        "observations": 0,
+        "source_url": None,
+        "note": "区间观测最大回撤资料不可用; 不以未复权单位净值回撤替代。",
+        "horizon": research.get("horizon"),
+    }
+    drawdown.update(risk)
+    drawdown["horizon"] = research.get("horizon")
+
+    try:
+        value = float(drawdown["max_drawdown_pct"])
+    except (TypeError, ValueError):
+        value = float("nan")
+    if drawdown.get("status") != "ok" or not math.isfinite(value) or value < 0:
+        drawdown["status"] = "unavailable"
+        drawdown["max_drawdown_pct"] = None
+        if not drawdown.get("note"):
+            drawdown["note"] = "区间观测最大回撤资料不可用; 不以未复权单位净值回撤替代。"
+    else:
+        drawdown["max_drawdown_pct"] = value
+    return drawdown
+
+
+def _drawdown_summary(drawdown):
+    if drawdown["status"] != "ok":
+        note = drawdown.get("note")
+        suffix = f"; {note}" if note else ""
+        return "区间观测最大回撤暂不可用(未复权单位净值回撤不作替代)" + suffix
+
+    window = drawdown.get("horizon") or "窗口未提供"
+    basis = drawdown.get("basis") or "口径未提供"
+    start = drawdown.get("start_date") or "起始日未提供"
+    end = drawdown.get("end_date") or "截止日未提供"
+    observations = drawdown.get("observations")
+    count = f"{observations} 个观测点" if observations is not None else "观测点数未提供"
+    note = drawdown.get("note")
+    suffix = f"; {note}" if note else ""
+    return (
+        f"区间观测最大回撤 {drawdown['max_drawdown_pct']}%"
+        f"(窗口 {window}, 口径 {basis}, 日期 {start} 至 {end}, {count}){suffix}"
+    )
+
+
 async def analyze_fund_stream(nav_rows, profile, thscode, name, focus="", holdings=None, estimate=None, research=None):
     """流式基金分析: yield 出每个 NDJSON 事件。
 
     协议(与 stock_analyzer 一致):
-        {"type":"meta","symbol","summary","stats"}
+        {"type":"meta","symbol","summary","stats","drawdown"}
         {"type":"delta","content":"..."}
         {"type":"error","message":"..."}
         {"type":"done"}
@@ -183,10 +226,12 @@ async def analyze_fund_stream(nav_rows, profile, thscode, name, focus="", holdin
         return
 
     stats = _calc_stats(nav_tail)
+    drawdown = _research_drawdown(research)
+    stats["最大回撤%"] = drawdown["max_drawdown_pct"]
     summary = (
         "最新净值 " + str(stats.get("最新净值"))
         + ", 近1年 " + str(stats.get("近1年", "N/A")) + "%"
-        + ", 单位净值样本回撤 " + str(stats.get("最大回撤%", "N/A")) + "% (未复权)"
+        + ", " + _drawdown_summary(drawdown)
     )
     research_holdings = research.get("holdings") if isinstance(research, dict) else None
     holdings_report_date = (research_holdings or {}).get("report_date") or (holdings or {}).get("report_date")
@@ -196,6 +241,7 @@ async def analyze_fund_stream(nav_rows, profile, thscode, name, focus="", holdin
         "symbol": thscode,
         "summary": summary,
         "stats": stats,
+        "drawdown": drawdown,
         "nav_date": nav_tail[-1].get("nav_date") or nav_tail[-1].get("date"),
         "holdings_report_date": holdings_report_date,
     }, ensure_ascii=False)

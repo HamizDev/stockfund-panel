@@ -84,6 +84,7 @@ class TxQuoteProvider:
 
     name = "txquote"
     builtin = True
+    minute_asset_types = ("stock",)
     # 1m 近 5 交易日 (腾讯 day/query); 5m+ 约 20 交易日。声明浅历史, 分时档位自动收窄。
     minute_history_days = 5
 

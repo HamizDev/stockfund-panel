@@ -10,8 +10,8 @@
   - adj_factor   A 股除权因子; adjustment-factors 事件 dump + 自家原始日K前收盘,
                  按交易所公式推导单事件比值, 涨跌停自检
   - financial    财务五表(股本除外): 三表多期序列 + 指标单期, 字段映射为 TickFlow
-                 canonical 列名, 扶摇独有字段原名透传为扩展列; bps 由估值 pb_mrq
-                 反推; shares 无上游接口恒空
+                 canonical 列名, 扶摇独有字段原名透传为扩展列; 无已验证的同报告期
+                 每股净资产指标时 bps 保持空值; shares 无上游接口恒空
 未声明 minute → provider_has_dataset 为 False, 自动回退 tickflow。
 
 单位与口径 (CONTRIBUTING §3.1, 不可凭字段名推断):
@@ -58,7 +58,6 @@ _SH_MS = 28_800_000
 _HIST_MAX_SPAN_MS = 3650 * 86_400_000  # historical 单次窗口上限 10 年, 超出由本层分片
 _HIST_INTERVAL_S = 0.12  # 单标的请求节流(实测 200+ 连发未触发 4001 限频)
 _FINANCIAL_HISTORY_PERIODS = 8  # 财务首装全量历史: 最近 8 期季报(约 2 年)
-_VALUATION_BATCH = 100  # 估值/价格快照端点单次上限 100 只
 # 项目财务表名 → 扶摇报表端点名
 _STATEMENT_ENDPOINTS = {
     "income": "income-statements",
@@ -924,8 +923,8 @@ class FuyaoProvider:
         """拉取财务数据, 映射为 canonical 列(symbol/period_end/announce_date/指标)。
 
         - 三大报表: 单股单请求, latest_only 决定最近 1 期还是 8 期季报;
-        - metrics: 指标接口为单股单期, 恒只拉最新一期(bps 由估值快照 pb_mrq 反推,
-          eps_basic 顺带取自利润表); 历史各期建议切回 TickFlow 同步补齐 —
+        - metrics: 指标接口为单股单期, 恒只拉最新一期, eps_basic 顺带取自利润表。
+          当前没有已验证的同报告期每股净资产指标, 所以 bps 保持空值; 历史各期建议切回 TickFlow —
           报告期合并写入会让两源数据共存, 互不覆盖;
         - shares: 扶摇无股本接口, 恒返回空(已有存量靠合并写入保留)。
         """
@@ -994,8 +993,8 @@ class FuyaoProvider:
                 latest[sym] = rows[0]
         if not latest:
             return pl.DataFrame()
-        bps_by_sym = self._derive_bps(sorted(latest))
         rows_out: list[dict] = []
+        indicator_requests = 0
         for sym, r in latest.items():
             quarter = _report_quarter(r.get("fiscal_period"))
             report = f"{r.get('fiscal_year')}-{quarter}" if quarter else None
@@ -1004,9 +1003,15 @@ class FuyaoProvider:
                 "period_end": _iso_of_ms(r.get("period_end_ms")),
                 "announce_date": _iso_of_ms(r.get("report_date_ms")),
                 "eps_basic": _to_float(r.get("basic_eps")),
-                "bps": bps_by_sym.get(sym),
+                # Current price / PB_MRQ is a current valuation snapshot, not a
+                # book-value-per-share value for this report period. No verified
+                # report-period indicator is mapped to bps, so keep it null.
+                "bps": None,
             }
             if report:
+                if indicator_requests:
+                    time.sleep(_HIST_INTERVAL_S)
+                indicator_requests += 1
                 try:
                     abilities = client.financial_indicators(sym, report)
                 except FuyaoError as e:
@@ -1019,7 +1024,13 @@ class FuyaoProvider:
                             continue
                         value = _to_float(ind.get("value"))
                         if value is not None:
-                            row[self._METRICS_FIELD_MAP.get(index_id, index_id)] = value
+                            mapped = self._METRICS_FIELD_MAP.get(index_id)
+                            # Unmapped source ids remain available as extension
+                            # columns, but cannot populate the reserved canonical
+                            # bps field without an explicit verified mapping.
+                            if mapped is None and index_id == "bps":
+                                continue
+                            row[mapped or index_id] = value
             rows_out.append(row)
         return pl.DataFrame(rows_out) if rows_out else pl.DataFrame()
 
@@ -1047,38 +1058,6 @@ class FuyaoProvider:
         由 services.auction_benchmark 统一做按日缓存/收益enrich/交易日回退。
         """
         return self._get_client().short_term_benchmark(date)
-
-    def _derive_bps(self, symbols: list[str]) -> dict[str, float]:
-        """估值快照 pb_mrq 与行情快照最新价同源同刻 → bps = price / pb_mrq。
-
-        与财报口径 bps 可能差几个百分点(上游权益基准不完全透明), 用于补齐
-        metrics.bps 使回测 pb_latest 因子可用。接口失败只影响 bps 列, 不致命。
-        """
-        client = self._get_client()
-        pb: dict[str, float] = {}
-        price: dict[str, float] = {}
-        for i in range(0, len(symbols), _VALUATION_BATCH):
-            if i:
-                time.sleep(_HIST_INTERVAL_S)
-            batch = symbols[i : i + _VALUATION_BATCH]
-            for fetch, store in (
-                (client.valuations_snapshot, pb),
-                (client.price_snapshot_batch, price),
-            ):
-                time.sleep(_HIST_INTERVAL_S)
-                try:
-                    for r in fetch(batch):
-                        value = _to_float(r.get("pb_mrq" if store is pb else "last_price"))
-                        code = r.get("thscode")
-                        if code and value is not None and value != 0:
-                            store[code] = value
-                except FuyaoError as e:
-                    logger.warning("扶摇 bps 推导快照失败(%d 只): %s", len(batch), e)
-        return {
-            sym: price[sym] / pb[sym]
-            for sym in symbols
-            if sym in pb and pb[sym] and sym in price
-        }
 
     def _fetch_closes(self, symbol: str, start_d: date, end_d: date) -> dict[date, float]:
         rows = self._historical_bars(symbol, start_d, end_d)

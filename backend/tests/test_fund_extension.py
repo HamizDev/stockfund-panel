@@ -85,6 +85,161 @@ def test_map_quote_no_thscode_returns_none():
     assert svc.map_quote({"last_price": 1.0}) is None
 
 
+# ---------- map_holdings ----------
+
+def _holding_row(**overrides):
+    row = {
+        "thscode": "600519.SH",
+        "stock_name": "贵州茅台",
+        "hold_ratio": 5.72,
+        "asset_type": "stock",
+        "start_date_ms": 1774972800000,
+        "end_date_ms": 1782748800000,
+        "publish_date_ms": 1784563200000,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_map_holdings_maps_report_and_publication_dates_to_items_and_skipped():
+    data = {
+        "timestamp": 1784563200000,
+        "stock_ratio_pct": 43.21,
+        "total_stock_ratio_pct": 89.21,
+        "concentration_ratio": 0.52,
+        "item": [
+            _holding_row(),
+            _holding_row(thscode="110022.SH", stock_name="转债", asset_type="bond"),
+        ],
+    }
+
+    out = svc.map_holdings(data)
+
+    assert out["stock_ratio_pct"] == 43.21
+    assert out["total_stock_ratio_pct"] == 89.21
+    assert out["concentration_ratio"] == 0.52
+    assert out["report_start_date"] == "2026-04-01"
+    assert out["report_date"] == "2026-06-30"
+    assert out["publication_date"] == "2026-07-21"
+    assert out["report_periods"] == [{
+        "report_start_date": "2026-04-01",
+        "report_date": "2026-06-30",
+        "publication_dates": ["2026-07-21"],
+        "item_count": 2,
+        "missing_publication_date_count": 0,
+    }]
+    for row in [*out["items"], *out["skipped"]]:
+        assert row["report_start_date"] == "2026-04-01"
+        assert row["report_date"] == "2026-06-30"
+        assert row["publication_date"] == "2026-07-21"
+
+
+def test_map_holdings_missing_dates_do_not_fall_back_to_root_timestamps():
+    out = svc.map_holdings({
+        "timestamp": 1784563200000,
+        "item": [_holding_row(
+            start_date_ms=None,
+            end_date_ms=None,
+            publish_date_ms=None,
+            modify_time_ms=1784563200000,
+        )],
+    })
+
+    assert out["report_start_date"] is None
+    assert out["report_date"] is None
+    assert out["publication_date"] is None
+    assert out["report_periods"] == [{
+        "report_start_date": None,
+        "report_date": None,
+        "publication_dates": [],
+        "item_count": 1,
+        "missing_publication_date_count": 1,
+    }]
+    row = out["items"][0]
+    assert row["report_start_date"] is None
+    assert row["report_date"] is None
+    assert row["publication_date"] is None
+
+
+def test_map_holdings_mixed_report_periods_leave_summary_dates_empty():
+    out = svc.map_holdings({"item": [
+        _holding_row(),
+        _holding_row(
+            thscode="000001.SZ",
+            stock_name="平安银行",
+            start_date_ms=1767225600000,
+            end_date_ms=1774915200000,
+            publish_date_ms=1776297600000,
+        ),
+    ]})
+
+    assert out["report_start_date"] is None
+    assert out["report_date"] is None
+    assert out["publication_date"] is None
+    assert out["report_periods"] == [
+        {
+            "report_start_date": "2026-01-01",
+            "report_date": "2026-03-31",
+            "publication_dates": ["2026-04-16"],
+            "item_count": 1,
+            "missing_publication_date_count": 0,
+        },
+        {
+            "report_start_date": "2026-04-01",
+            "report_date": "2026-06-30",
+            "publication_dates": ["2026-07-21"],
+            "item_count": 1,
+            "missing_publication_date_count": 0,
+        },
+    ]
+
+
+def test_map_holdings_different_publication_dates_do_not_get_one_summary_date():
+    out = svc.map_holdings({"item": [
+        _holding_row(),
+        _holding_row(
+            thscode="000001.SZ",
+            stock_name="平安银行",
+            asset_type="bond",
+            publish_date_ms=1784649600000,
+        ),
+    ]})
+
+    assert out["report_date"] == "2026-06-30"
+    assert out["publication_date"] is None
+    assert out["report_periods"] == [{
+        "report_start_date": "2026-04-01",
+        "report_date": "2026-06-30",
+        "publication_dates": ["2026-07-21", "2026-07-22"],
+        "item_count": 2,
+        "missing_publication_date_count": 0,
+    }]
+
+
+def test_map_holdings_dates_are_converted_to_beijing_calendar_date():
+    out = svc.map_holdings({"item": [_holding_row(
+        start_date_ms=1774972800000,
+        end_date_ms=1782763200000,  # 2026-06-29 20:00 UTC, June 30 in Beijing
+        publish_date_ms=1784563200000,
+    )]})
+
+    assert out["items"][0]["report_date"] == "2026-06-30"
+    assert out["report_date"] == "2026-06-30"
+
+
+@pytest.mark.parametrize("invalid_ms", [float("inf"), float("nan"), 10**100, -1])
+def test_map_holdings_invalid_dates_remain_unavailable(invalid_ms):
+    out = svc.map_holdings({"item": [_holding_row(
+        start_date_ms=invalid_ms,
+        end_date_ms=invalid_ms,
+        publish_date_ms=invalid_ms,
+    )]})
+
+    assert out["items"][0]["report_date"] is None
+    assert out["items"][0]["publication_date"] is None
+    assert out["report_date"] is None
+
+
 # ---------- map_kline ----------
 
 def test_map_kline_marks_forward_adjusted():

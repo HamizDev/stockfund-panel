@@ -52,6 +52,7 @@ class StockSDKProvider:
 
     name = "stocksdk"
     builtin = True
+    minute_asset_types = ("stock", "etf")
     # 分钟历史深度能力(可选声明, 未声明视为深历史): stock-sdk 免费分时接口
     # 只保留最近 5 个交易日的 1 分钟数据, 分时档位/默认值据此收窄。
     minute_history_days = 5

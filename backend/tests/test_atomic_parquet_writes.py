@@ -182,9 +182,19 @@ def test_enrich_names_interrupted_keeps_existing_table(tmp_path: Path, crash) ->
 
 def test_financial_table_interrupted_keeps_existing_file(tmp_path: Path, crash) -> None:
     target = tmp_path / "financials" / "income" / "part.parquet"
-    old = pl.DataFrame({"symbol": ["600000.SH"], "revenue": [1.0]})
+    old = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "period_end": ["2025-12-31"],
+        "announce_date": ["2026-03-29"],
+        "revenue": [1.0],
+    })
     _seed(old, target)
-    new = pl.DataFrame({"symbol": ["600000.SH", "000001.SZ"], "revenue": [2.0, 3.0]})
+    new = pl.DataFrame({
+        "symbol": ["600000.SH", "000001.SZ"],
+        "period_end": ["2025-12-31", "2025-12-31"],
+        "announce_date": ["2026-03-29", "2026-04-22"],
+        "revenue": [2.0, 3.0],
+    })
 
     crash.armed = True
     with pytest.raises(OSError, match="simulated kill"):

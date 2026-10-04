@@ -85,8 +85,35 @@ def _minute_allowed(capset) -> bool:
     provider = preferences.get_minute_data_provider()
     _, fallback, error = kline_sync._resolve_minute_provider(provider)
     if error is not None:
-        logger.warning("minute provider resolution failed while checking access: %s", error)
+            logger.warning("minute provider resolution failed while checking access: %s", error)
     return not fallback
+
+
+def _minute_provider_symbol_budget(provider_name: str) -> int | None:
+    """Return an explicitly declared per-request symbol limit for the selected minute source.
+
+    The full-market backfill endpoint must not turn a single-symbol provider into
+    thousands of serial upstream requests. Sources without this explicit contract
+    keep the existing route behavior.
+    """
+    if not provider_name or provider_name == "tickflow":
+        return None
+    try:
+        from app.data_providers import custom as custom_sources
+
+        if not custom_sources.provider_has_dataset(provider_name, "minute"):
+            return None
+        provider = custom_sources.get_provider(provider_name)
+        limit = getattr(provider, "minute_max_symbols_per_request", None)
+    except Exception as e:
+        # A source that cannot be inspected is not explicitly budgeted here;
+        # existing capability and resolver checks remain authoritative.
+        logger.warning("minute provider %s budget lookup failed: %s", provider_name, e)
+        return None
+
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        return None
+    return limit
 
 
 @lru_cache(maxsize=8192)
@@ -1233,6 +1260,18 @@ async def sync_minute(request: Request):
     override_days = body.get("days")
     extend_flag = body.get("extend")
 
+    from app.services import preferences
+    minute_provider = preferences.get_minute_data_provider()
+    symbol_budget = _minute_provider_symbol_budget(minute_provider)
+    if symbol_budget is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"当前分钟数据源 {minute_provider} 声明单次请求最多 {symbol_budget} 个标的, "
+                "不支持全市场分钟同步; 单标的同步和候选补拉仍可使用。"
+            ),
+        )
+
     # 分钟K全市场同步是长任务(数据量是日K的 ~240 倍),用更宽松的卡死阈值
     job_id, is_new = job_store.create(long_running=True)
     if not is_new:
@@ -1262,29 +1301,63 @@ async def sync_minute(request: Request):
             # 剔除指数 symbol: 指数分钟K无本地存储, 落库会污染 kline_minute
             index_set = repo.get_index_symbol_set()
             universe = [s for s in universe if s not in index_set]
-            progress("sync_minute", 10, f"标的池 {len(universe)} 只")
+            etf_set = repo.get_etf_symbol_set()
+            stock_symbols = [s for s in universe if s not in etf_set]
+            etf_symbols = [s for s in universe if s in etf_set]
+            groups = (
+                ("stock", stock_symbols, "股票"),
+                ("etf", etf_symbols, "ETF"),
+            )
+            progress(
+                "sync_minute", 10,
+                f"标的池 {len(stock_symbols)} 只股票、{len(etf_symbols)} 只 ETF",
+            )
 
             days = override_days if override_days else get_minute_sync_days()
             # extend=1 → 向前扩展; days>=365 也自动向前扩展
             extend_backward = bool(extend_flag) or days >= 365
 
-            def _on_chunk(done: int, total: int, seg_label: str) -> None:
-                # 进度映射: 10% (标的池解析完) → 95%, 留 5% 给写入+刷新
-                pct = 10 + int((done / max(total, 1)) * 85)
-                progress("sync_minute", pct, f"拉取分钟K… {done}/{total} 批 [{seg_label}]")
-
             def _run():
-                return kline_sync.sync_and_persist_minute(
-                    universe, repo, capset, days=days,
-                    extend_backward=extend_backward,
-                    on_chunk_done=_on_chunk,
-                )
+                written = 0
+                processed_weight = 0
+                universe_weight = max(len(universe), 1)
+                for asset_type, symbols, asset_label in groups:
+                    group_offset = processed_weight
+                    group_weight = len(symbols)
+
+                    def _on_chunk(
+                        done: int,
+                        total: int,
+                        seg_label: str,
+                        *,
+                        offset: int = group_offset,
+                        weight: int = group_weight,
+                        label: str = asset_label,
+                    ) -> None:
+            # 按分组规模合并进度, 避免 ETF 阶段从 95% 回退到低百分比。
+                        group_progress = min(max(done, 0), max(total, 1)) / max(total, 1)
+                        completed = offset + group_progress * weight
+                        pct = 10 + int((completed / universe_weight) * 85)
+                        progress(
+                            "sync_minute", pct,
+                            f"拉取{label}分钟K… {done}/{total} 批 [{seg_label}]",
+                        )
+
+                    written += kline_sync.sync_and_persist_minute(
+                        symbols, repo, capset, days=days,
+                        extend_backward=extend_backward,
+                        on_chunk_done=_on_chunk,
+                        asset_type=asset_type,
+                    )
+                    processed_weight += group_weight
+                return written
 
             written = await loop.run_in_executor(_long_task_executor, run_with_capacity, job_id, _run)
 
-            # 刷新视图
+            # 股票与 ETF 分区独立落盘, 逐一刷新对应视图。
             from app.jobs.daily_pipeline import _refresh_single_view
             _refresh_single_view(repo, "kline_minute")
+            _refresh_single_view(repo, "kline_etf_minute")
 
             progress("done", 100, f"分钟 K 同步完成,{written} 行")
             job_store.succeed(job_id, {"minute_rows": written, "universe_size": len(universe)})
@@ -1304,7 +1377,7 @@ async def sync_minute(request: Request):
 
 @router.post("/sync_minute_single")
 async def sync_minute_single(request: Request, body: dict):
-    """手动拉取单只股票的分钟K并落库 (口径随基准标记: 未迁移=前复权, 已迁移=原始)。
+    """手动拉取单只股票或 ETF 的分钟K并落库 (口径随基准标记: 未迁移=前复权, 已迁移=原始)。
 
     body: { "symbol": "000001.SZ" }
     用于个股分时图"获取数据"按钮: 本地无数据时单独拉取并持久化。
@@ -1329,7 +1402,8 @@ async def sync_minute_single(request: Request, body: dict):
 
     # 指数分钟K无本地存储, 落库会污染股票分钟表 kline_minute;
     # 指数分钟数据走 /api/index/minute 实时读取, 此端点显式拒绝。
-    if repo.resolve_asset_type(symbol) == "index":
+    asset_type = repo.resolve_asset_type(symbol)
+    if asset_type == "index":
         raise HTTPException(status_code=400, detail="指数分钟K不支持落库同步 (指数分钟数据走 /api/index/minute 实时读取)")
 
     if not _minute_allowed(capset):
@@ -1339,13 +1413,17 @@ async def sync_minute_single(request: Request, body: dict):
     loop = asyncio.get_event_loop()
 
     def _run():
-        return kline_sync.sync_and_persist_minute([symbol], repo, capset, days=days, force_full_days=True)
+        return kline_sync.sync_and_persist_minute(
+            [symbol], repo, capset, days=days, force_full_days=True,
+            asset_type=asset_type,
+        )
 
     written = await loop.run_in_executor(_long_task_executor, _run)
 
     # 刷新视图
     from app.jobs.daily_pipeline import _refresh_single_view
-    _refresh_single_view(repo, "kline_minute")
+    minute_view = "kline_etf_minute" if asset_type == "etf" else "kline_minute"
+    _refresh_single_view(repo, minute_view)
 
     return {"status": "ok", "symbol": symbol, "rows": written}
 

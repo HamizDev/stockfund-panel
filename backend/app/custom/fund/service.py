@@ -50,11 +50,11 @@ def _beijing_date(ms) -> str | None:
     """毫秒戳 → 北京时间日期字符串 (YYYY-MM-DD)。"""
     try:
         ms = int(ms)
-    except (TypeError, ValueError):
+        if ms <= 0:
+            return None
+        return datetime.fromtimestamp(ms / 1000, tz=_BEIJING).date().isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
         return None
-    if ms <= 0:
-        return None
-    return datetime.fromtimestamp(ms / 1000, tz=_BEIJING).date().isoformat()
 
 
 def map_quote(row: dict, name: str | None = None) -> dict | None:
@@ -217,20 +217,46 @@ def _to_qq_symbol(thscode: str) -> str | None:
 
 
 def map_holdings(data: dict) -> dict:
-    """持仓数据 → {stock_ratio_pct, items: [{thscode, name, hold_ratio, asset_type}]}。
+    """持仓数据 → {stock_ratio_pct, report dates, items: [{...}]}。
 
     hold_ratio 为百分数原值 (如 5.72), 保持原值不转小数 (前端直接展示 %)。
     A 股 + 港股纳入穿透估算 (腾讯 q= 均有实时行情), 债券/基金等标注跳过。
+    报告期和公告日期按每条持仓的上游字段映射; 混合或缺失时不合并成摘要日期。
     """
     items = []
     skipped = []
-    for r in data.get("item") or []:
+    raw_rows = data.get("item") or []
+    periods: dict[tuple[str | None, str | None], dict] = {}
+    for r in raw_rows:
+        report_start_date = _beijing_date(r.get("start_date_ms"))
+        report_date = _beijing_date(r.get("end_date_ms"))
+        publication_date = _beijing_date(r.get("publish_date_ms"))
+        period_key = (report_start_date, report_date)
+        period = periods.setdefault(
+            period_key,
+            {
+                "publication_dates": set(),
+                "item_count": 0,
+                "missing_publication_date_count": 0,
+            },
+        )
+        period["item_count"] += 1
+        if publication_date is None:
+            period["missing_publication_date_count"] += 1
+        else:
+            period["publication_dates"].add(publication_date)
+
         thscode = r.get("thscode") or ""
         name = r.get("stock_name") or ""
         ratio = _to_float(r.get("hold_ratio"))
         asset_type = r.get("asset_type") or ""
         if not thscode or ratio is None:
             continue
+        mapped_dates = {
+            "report_start_date": report_start_date,
+            "report_date": report_date,
+            "publication_date": publication_date,
+        }
         qq = _to_qq_symbol(thscode)
         if asset_type == "stock" and qq:
             items.append(
@@ -239,20 +265,62 @@ def map_holdings(data: dict) -> dict:
                     "name": name,
                     "hold_ratio": ratio,
                     "asset_type": asset_type,
+                    **mapped_dates,
                 }
             )
         else:
-            skipped.append({"thscode": thscode, "name": name, "hold_ratio": ratio,
-                            "asset_type": asset_type, "reason": "无实时行情"})
+            skipped.append(
+                {
+                    "thscode": thscode,
+                    "name": name,
+                    "hold_ratio": ratio,
+                    "asset_type": asset_type,
+                    **mapped_dates,
+                    "reason": "无实时行情",
+                }
+            )
     # 按权重降序
     items.sort(key=lambda x: x["hold_ratio"], reverse=True)
+    report_periods = [
+        {
+            "report_start_date": period_start,
+            "report_date": period_end,
+            "publication_dates": sorted(period["publication_dates"]),
+            "item_count": period["item_count"],
+            "missing_publication_date_count": period["missing_publication_date_count"],
+        }
+        for (period_start, period_end), period in sorted(
+            periods.items(), key=lambda entry: (entry[0][0] or "", entry[0][1] or "")
+        )
+    ]
+    summary_period = report_periods[0] if len(report_periods) == 1 else None
+    summary_period_is_verifiable = bool(
+        summary_period
+        and summary_period["report_start_date"]
+        and summary_period["report_date"]
+    )
+    summary_report_start_date = (
+        summary_period["report_start_date"] if summary_period_is_verifiable else None
+    )
+    summary_report_date = (
+        summary_period["report_date"] if summary_period_is_verifiable else None
+    )
+    summary_publication_date = None
+    if (
+        summary_period_is_verifiable
+        and summary_period["missing_publication_date_count"] == 0
+        and len(summary_period["publication_dates"]) == 1
+    ):
+        summary_publication_date = summary_period["publication_dates"][0]
     return {
         "stock_ratio_pct": _to_float(data.get("stock_ratio_pct")),
         "total_stock_ratio_pct": _to_float(data.get("total_stock_ratio_pct")),
         "concentration_ratio": _to_float(data.get("concentration_ratio")),
         "report_note": "季报披露持仓，非实时",
-        "report_date": None,
-        "publication_date": None,
+        "report_start_date": summary_report_start_date,
+        "report_date": summary_report_date,
+        "publication_date": summary_publication_date,
+        "report_periods": report_periods,
         "coverage_weight_pct": round(sum(row["hold_ratio"] for row in items), 4),
         "items": items,
         "skipped": skipped,

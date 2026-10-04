@@ -77,9 +77,8 @@ def _fetch_table(
             df = provider.get_financials(table, symbols, latest_only=latest_only)
         except Exception as e:  # noqa: BLE001
             logger.warning("sync_%s custom provider failed: %s", table, e)
-            return pl.DataFrame()
-        if df.is_empty() or "symbol" not in df.columns:
-            return pl.DataFrame()
+            raise
+        _validate_table(df)
         return df
 
     from app.tickflow.client import get_client
@@ -106,16 +105,20 @@ def _fetch_table(
         try:
             data = api_method(chunk, latest=latest_only)
             # data 格式: { "600519.SH": [record, ...], ... }
-            if isinstance(data, dict):
-                for sym, records in data.items():
-                    if isinstance(records, list):
-                        for rec in records:
-                            if isinstance(rec, dict):
-                                rec["symbol"] = sym
-                                all_records.append(rec)
-            logger.debug("sync_%s batch %d/%d: %d records", table, batch_num, total_batches, len(data) if isinstance(data, dict) else 0)
+            if not isinstance(data, dict):
+                raise ValueError("Financial batch must map symbols to record lists")
+            for sym, records in data.items():
+                if sym not in chunk or not isinstance(records, list):
+                    raise ValueError("Financial batch contains an invalid symbol or record list")
+                for rec in records:
+                    if not isinstance(rec, dict):
+                        raise ValueError("Financial batch contains a non-object record")
+                    all_records.append({**rec, "symbol": sym})
+            logger.debug("sync_%s batch %d/%d: %d records", table, batch_num, total_batches, len(data))
         except Exception as e:
             logger.warning("sync_%s batch %d/%d failed: %s", table, batch_num, total_batches, e)
+            # A failed page must not be published as a complete market snapshot.
+            raise
 
     if not all_records:
         return pl.DataFrame()
@@ -126,8 +129,22 @@ def _fetch_table(
     return df
 
 
+def _validate_table(df: pl.DataFrame) -> None:
+    if df.is_empty():
+        return
+    required = {"symbol", "period_end"}
+    if not required.issubset(df.columns):
+        raise ValueError("Financial data requires symbol and period_end")
+    if df.select(pl.any_horizontal(pl.col("symbol").is_null(), pl.col("period_end").is_null()).any()).item():
+        raise ValueError("Financial report keys cannot be null")
+    dates = df["period_end"].cast(pl.String).str.slice(0, 10).str.to_date(format="%Y-%m-%d", strict=False)
+    if dates.null_count():
+        raise ValueError("Financial period_end must be a valid date")
+
+
 def _write_table(table: str, df: pl.DataFrame, data_dir: Path) -> int:
-    if df.is_empty() or "symbol" not in df.columns:
+    _validate_table(df)
+    if df.is_empty():
         return 0
 
     # 写入 Parquet (全量覆盖)
@@ -214,6 +231,11 @@ def _sync_history_table_for_symbols(
     )
     current_symbols = [symbol for symbol in symbols if symbol in existing_symbols]
     latest = _fetch_table(table, current_symbols, capset, latest_only=True)
+    _validate_table(missing_history)
+    _validate_table(latest)
+    if missing_history.is_empty() and latest.is_empty():
+        # Preserve the existing file and its last successful synchronization time.
+        return 0
     merged = _merge_report_history(existing, missing_history, latest)
     return _write_table(table, merged, data_dir)
 
@@ -376,7 +398,7 @@ class FinancialScheduler:
             from app.services import preferences
             preferences.set_financial_sync_time(table, ts)
         except Exception as e:  # noqa: BLE001
-            logger.warning("persist financial_sync_time(%s) failed: %s", e)
+            logger.warning("persist financial_sync_time(%s) failed: %s", table, e)
 
     def update_capabilities(self, capset: CapabilitySet) -> None:
         """刷新调度器持有的能力集。
@@ -414,7 +436,8 @@ class FinancialScheduler:
                 # 每周: 只同步 metrics
                 try:
                     rows = sync_metrics(self._data_dir, self._capset)
-                    self._record_sync("metrics")
+                    if rows > 0:
+                        self._record_sync("metrics")
                     logger.info("FinancialScheduler: metrics synced, %d rows", rows)
                 except Exception as e:
                     logger.warning("FinancialScheduler: metrics sync failed: %s", e)
@@ -445,7 +468,8 @@ class FinancialScheduler:
             if not fn:
                 return {}
             rows = fn(self._data_dir, self._capset)
-            self._record_sync(table)
+            if rows > 0:
+                self._record_sync(table)
             return {table: rows}
         # 全部同步
         symbols = _get_symbols(self._data_dir)
@@ -454,7 +478,8 @@ class FinancialScheduler:
             result[t] = _sync_history_table_for_symbols(
                 t, symbols, self._data_dir, self._capset
             )
-            self._record_sync(t)
+            if result[t] > 0:
+                self._record_sync(t)
         _refresh_financials_views(self._data_dir)
         return result
 

@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 
 import httpx
 import polars as pl
+import pytest
 
 from app.plugins.stocksdk import provider as sp
 from app.plugins.stocksdk.provider import StockSDKProvider
@@ -336,6 +337,209 @@ def test_get_minute_batch_splits_stock_and_etf(monkeypatch):
     assert "510300.SH" in result["data"]
 
 
+@pytest.mark.parametrize(
+    ("symbol", "asset_type", "minute_dir"),
+    [
+        ("600519.SH", "stock", "kline_minute"),
+        ("510300.SH", "etf", "kline_etf_minute"),
+    ],
+)
+def test_sync_minute_single_persists_to_asset_partition(
+    monkeypatch, tmp_path, symbol, asset_type, minute_dir,
+):
+    """The single-symbol sync endpoint must classify and persist stock/ETF separately."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import kline as kline_api
+    from app.tickflow.capabilities import CapabilitySet
+    from app.tickflow.repository import DataStore, KlineRepository
+
+    requested_assets: list[str] = []
+    frame = _mock_minute_df(symbol=symbol)
+
+    class _Provider:
+        def get_minute(self, symbols, *, start_time, end_time, asset_type, freq, on_chunk_done):
+            requested_assets.append(asset_type)
+            assert symbols == [symbol]
+            return frame
+
+    provider = _Provider()
+    _setup_custom_provider(monkeypatch, provider, has_dataset=True)
+
+    repo = KlineRepository(DataStore(tmp_path))
+    monkeypatch.setattr(repo, "get_etf_symbol_set", lambda: {"510300.SH"})
+    monkeypatch.setattr(repo, "get_index_symbol_set", lambda: set())
+
+    app = FastAPI()
+    app.include_router(kline_api.router)
+    app.state.repo = repo
+    app.state.capabilities = CapabilitySet()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/kline/sync_minute_single",
+            json={"symbol": symbol, "days": 1},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["rows"] == frame.height
+    assert requested_assets == [asset_type]
+    stored_path = tmp_path / minute_dir / f"date={frame['datetime'][0].date()}" / "part.parquet"
+    assert stored_path.exists()
+    stored = pl.read_parquet(stored_path)
+    assert stored["symbol"].to_list() == [symbol]
+    other_dir = "kline_etf_minute" if asset_type == "stock" else "kline_minute"
+    assert not list((tmp_path / other_dir).rglob("*.parquet"))
+
+
+def _full_minute_route_context(monkeypatch, tmp_path, *, etf_symbols=(), index_symbols=()):
+    """Isolated route dependencies; the background job is captured for explicit awaiting."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.services import pipeline_jobs, preferences
+    from app.tickflow import pools
+
+    class _Jobs:
+        def __init__(self):
+            self.created = 0
+            self.succeeded = []
+
+        def create(self, **_kwargs):
+            self.created += 1
+            return ("minute-job", True)
+
+        def progress(self, *_args):
+            pass
+
+        def succeed(self, job_id, result):
+            self.succeeded.append((job_id, result))
+
+        def fail(self, *_args):
+            raise AssertionError("unexpected background job failure")
+
+    jobs = _Jobs()
+    scheduled = []
+    monkeypatch.setattr(asyncio, "create_task", lambda coro: scheduled.append(coro))
+    monkeypatch.setattr(pipeline_jobs, "job_store", jobs)
+    monkeypatch.setattr(pipeline_jobs, "try_acquire_run_slot", lambda _job_id: True)
+    monkeypatch.setattr(pipeline_jobs, "release_run_slot", lambda _job_id: None)
+    monkeypatch.setattr(pipeline_jobs, "run_with_capacity", lambda _job_id, run: run())
+
+    capset = MagicMock()
+    capset.has.return_value = True
+    data_dir = Path(tmp_path)
+    instruments = data_dir / "instruments" / "instruments.parquet"
+    instruments.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"symbol": ["000001.SZ", "510300.SH"]}).write_parquet(instruments)
+    repo = SimpleNamespace(
+        store=SimpleNamespace(data_dir=data_dir),
+        get_index_symbol_set=lambda: set(index_symbols),
+        get_etf_symbol_set=lambda: set(etf_symbols),
+    )
+
+    pool_values = {
+        "watchlist": ["510300.SH", *index_symbols],
+        "CN_Equity_A": ["600519.SH"],
+    }
+    monkeypatch.setattr(pools, "get_pool", lambda name: pool_values[name])
+    monkeypatch.setattr(preferences, "get_minute_sync_days", lambda: 1)
+    monkeypatch.setattr(preferences, "get_minute_data_provider", lambda: "legacy-minute")
+    from app.data_providers import custom
+    monkeypatch.setattr(custom, "provider_has_dataset", lambda _name, dataset: dataset == "minute")
+    monkeypatch.setattr(custom, "get_provider", lambda _name: SimpleNamespace())
+    from app.api import data as data_api
+    monkeypatch.setattr(data_api, "invalidate_storage_cache", lambda: None)
+    from app.jobs import daily_pipeline
+    refreshed_views = []
+    monkeypatch.setattr(
+        daily_pipeline, "_refresh_single_view",
+        lambda _repo, name: refreshed_views.append(name),
+    )
+
+    class _Request:
+        app = SimpleNamespace(state=SimpleNamespace(repo=repo, capabilities=capset))
+
+        async def json(self):
+            return {"days": 1}
+
+    request = _Request()
+
+    async def invoke():
+        from app.api import kline as kline_api
+
+        result = await kline_api.sync_minute(request)
+        if scheduled:
+            await scheduled.pop(0)
+        return result
+
+    return invoke, jobs, refreshed_views
+
+
+def test_full_minute_sync_splits_stock_etf_and_refreshes_both_views(monkeypatch, tmp_path):
+    import asyncio
+
+    from app.api import kline as kline_api
+
+    calls = []
+
+    def fake_sync(symbols, _repo, _capset, **kwargs):
+        calls.append((list(symbols), kwargs["asset_type"]))
+        callback = kwargs.get("on_chunk_done")
+        if callback:
+            callback(1, 1, "test")
+        return len(symbols)
+
+    monkeypatch.setattr(kline_api.kline_sync, "sync_and_persist_minute", fake_sync)
+    invoke, jobs, refreshed_views = _full_minute_route_context(
+        monkeypatch, tmp_path,
+        etf_symbols={"510300.SH"}, index_symbols={"000300.SH"},
+    )
+
+    result = asyncio.run(invoke())
+
+    assert result == {"status": "started", "job_id": "minute-job"}
+    assert calls == [
+        (["000001.SZ", "600519.SH"], "stock"),
+        (["510300.SH"], "etf"),
+    ]
+    assert refreshed_views == ["kline_minute", "kline_etf_minute"]
+    assert jobs.succeeded == [("minute-job", {"minute_rows": 3, "universe_size": 3})]
+
+
+def test_full_minute_sync_rejects_explicit_per_request_budget_before_job(monkeypatch, tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.api import kline as kline_api
+    from app.data_providers import custom
+    from app.services import preferences
+
+    invoke, jobs, _refreshed_views = _full_minute_route_context(monkeypatch, tmp_path)
+    monkeypatch.setattr(preferences, "get_minute_data_provider", lambda: "zzshare")
+    monkeypatch.setattr(custom, "provider_has_dataset", lambda name, dataset: name == "zzshare" and dataset == "minute")
+    monkeypatch.setattr(
+        custom, "get_provider",
+        lambda _name: SimpleNamespace(minute_max_symbols_per_request=30),
+    )
+    monkeypatch.setattr(
+        kline_api.kline_sync, "sync_and_persist_minute",
+        lambda *_args, **_kwargs: pytest.fail("budgeted source must be rejected before sync"),
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(invoke())
+
+    assert caught.value.status_code == 400
+    assert "zzshare" in caught.value.detail
+    assert "30" in caught.value.detail
+    assert "候选补拉" in caught.value.detail
+    assert jobs.created == 0
+
+
 # ---------- 测试 9b: 取到即落盘 + 增量拉取 (尾部落后 / 中间洞 / fresh) ----------
 
 def _bars(symbol: str, dts: list) -> pl.DataFrame:
@@ -532,9 +736,9 @@ def test_sync_and_persist_minute_custom_persists(monkeypatch, tmp_path):
     _setup_custom_provider(monkeypatch, mock_provider, has_dataset=True)
 
     # mock sync_and_persist_minute 内部依赖 (通过 monkeypatch kline_sync 模块属性)
-    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo: None)
-    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo: None)
-    monkeypatch.setattr(kline_sync, "_latest_minute_datetime", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo, **kwargs: None)
+    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo, **kwargs: None)
+    monkeypatch.setattr(kline_sync, "_latest_minute_datetime", lambda repo, **kwargs: None)
     monkeypatch.setattr(kline_sync, "resolve_limit", lambda *a, **kw: MagicMock(batch=100, rpm=30))
     monkeypatch.setattr(kline_sync.preferences, "get_minute_sync_segment_days", lambda: 20)
 
@@ -570,9 +774,9 @@ def test_sync_and_persist_minute_holds_repository_write_lock(monkeypatch, tmp_pa
     mock_provider.get_minute.return_value = expected_df
     _setup_custom_provider(monkeypatch, mock_provider, has_dataset=True)
 
-    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo: None)
-    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo: None)
-    monkeypatch.setattr(kline_sync, "_latest_minute_datetime", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo, **kwargs: None)
+    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo, **kwargs: None)
+    monkeypatch.setattr(kline_sync, "_latest_minute_datetime", lambda repo, **kwargs: None)
     monkeypatch.setattr(kline_sync, "resolve_limit", lambda *a, **kw: MagicMock(batch=100, rpm=30))
     monkeypatch.setattr(kline_sync.preferences, "get_minute_sync_segment_days", lambda: 20)
 

@@ -60,8 +60,8 @@ def _capture_minute_window(monkeypatch, tmp_path, local_dt: datetime, **kwargs) 
 
     monkeypatch.setattr(kline_sync.preferences, "get_minute_data_provider", lambda: "tickflow")
     monkeypatch.setattr(kline_sync.preferences, "get_minute_sync_segment_days", lambda: 20)
-    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo: None)
-    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo, **kwargs: None)
+    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo, **kwargs: None)
     monkeypatch.setattr(kline_sync, "resolve_limit", lambda *a, **kw: SimpleNamespace(batch=100, rpm=30))
     monkeypatch.setattr(kline_sync, "sync_minute_batch", _fake_sync_minute_batch)
 

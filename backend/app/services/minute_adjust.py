@@ -181,6 +181,38 @@ def _daily_close_lookup(daily_dir: Path, trade_day: date) -> dict[str, float] | 
     return dict(zip(df["symbol"].to_list(), df["close"].to_list(), strict=True))
 
 
+def verify_minute_raw_anchors(
+    df: pl.DataFrame, data_dir: Path | str, asset_type: str = "stock",
+) -> None:
+    """Accept an unverified source only when every complete-day raw anchor matches.
+
+    This checks the received days, not the provider's universal adjustment policy.
+    Incomplete sessions and missing/mismatched daily anchors fail closed. Never
+    infer or convert an unknown price basis from a guessed adjustment ratio.
+    """
+    if df.is_empty():
+        return
+    daily_root = Path(data_dir) / ("kline_etf_daily" if asset_type == "etf" else "kline_daily")
+    anchors = (
+        df.sort("datetime")
+        .with_columns(pl.col("datetime").dt.date().alias("_day"))
+        .group_by("symbol", "_day")
+        .agg(pl.col("datetime").last(), pl.col("close").last())
+    )
+    lookups = {}
+    for row in anchors.iter_rows(named=True):
+        dt = row["datetime"]
+        if dt.hour != 15 or dt.minute != 0 or dt.second != 0:
+            raise ValueError("分钟价基待验证: 缺少当日 15:00 收盘锚点")
+        day = row["_day"]
+        if day not in lookups:
+            lookups[day] = _daily_close_lookup(daily_root, day) or {}
+        raw_close = lookups[day].get(row["symbol"])
+        close = row["close"]
+        if raw_close is None or close is None or not (raw_close > 0 and abs(close - raw_close) <= 1e-6):
+            raise ValueError("分钟价基待验证: 分钟收盘与原始日K锚点不一致或缺失")
+
+
 def _partition_anchor_ratio(minute_df: pl.DataFrame, daily_close: dict[str, float]) -> pl.DataFrame:
     """按 (symbol) 计算锚点 k = 当日最后一根分钟 close / 日K原始 close。
 

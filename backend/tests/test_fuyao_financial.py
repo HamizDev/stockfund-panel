@@ -1,9 +1,10 @@
 """fuyao 财务适配测试 (不依赖真实网络)。
 
 覆盖: 三大报表字段映射 (canonical 列名 + 扩展列透传 + ISO 日期口径)、
-latest_only 分档 (limit 1 vs 8)、metrics 组装 (eps_basic 顺带 / bps 估值反推 /
+latest_only 分档 (limit 1 vs 8)、metrics 组装 (eps_basic 顺带 / bps 保持空值 /
 指标 index_id 映射与未知 id 透传 / 单股指标失败不弃行)、shares 恒空、
-报告期合并写入的逐列填空语义 (并集共存, 新行缺列不覆盖旧值)。
+报告期合并写入的逐列填空语义 (并集共存, 新行缺列不覆盖旧值)、
+指标端点逐股限频。
 """
 
 from __future__ import annotations
@@ -205,7 +206,8 @@ def test_metrics_assembly(monkeypatch):
     assert row["period_end"] == "2026-06-30"
     assert row["announce_date"] == "2026-08-15"
     assert row["eps_basic"] == 35.57  # 顺带取自利润表
-    assert row["bps"] == pytest.approx(1297.4 / 6.455055)  # 估值反推
+    # 当前行情价格 / PB_MRQ 不是该报告期的每股净资产; 无已验证来源时保持空值。
+    assert row["bps"] is None
     assert row["roe"] == pytest.approx(16.75)  # 字符串 → float
     assert row["gross_margin"] == pytest.approx(89.5552)
     assert row["fixed_asset_invest_expansion_ratio"] == pytest.approx(2.125873)
@@ -214,7 +216,7 @@ def test_metrics_assembly(monkeypatch):
 
 
 def test_metrics_indicator_failure_keeps_row(monkeypatch):
-    """指标端点单股失败 (如未披露期 code=5003) → 行仍写入 (eps/bps 保留)。"""
+    """指标端点单股失败 (如未披露期 code=5003) → 行仍写入, bps 仍为空。"""
     fake = _FakeFinClient(
         statements={"income": [_INCOME_ROW]},
         indicator_error=fc.FuyaoError("code=5003"),
@@ -226,7 +228,27 @@ def test_metrics_indicator_failure_keeps_row(monkeypatch):
     row = df.to_dicts()[0]
     assert row["symbol"] == "600519.SH"
     assert row["eps_basic"] == 35.57
+    assert row["bps"] is None
     assert "roe" not in df.columns
+
+
+def test_metrics_indicator_calls_are_rate_limited(monkeypatch):
+    fake = _FakeFinClient(
+        statements={"income": [_INCOME_ROW]},
+        indicators={"2026-2": _METRICS_ABILITIES},
+    )
+    provider = _provider_with(monkeypatch, fake)
+    monkeypatch.setattr(fp, "_HIST_INTERVAL_S", 0.25)
+    sleeps: list[float] = []
+    monkeypatch.setattr(fp.time, "sleep", sleeps.append)
+
+    provider.get_financials("metrics", ["600519.SH", "000001.SZ"])
+
+    assert fake.ind_calls == ["600519.SH@2026-2", "000001.SZ@2026-2"]
+    # One interval separates the income lookups and another separates the
+    # per-symbol indicators requests; the removed snapshot-derived bps path
+    # contributes no extra market-data calls or sleeps.
+    assert sleeps == [0.25, 0.25]
 
 
 def test_metrics_skips_symbol_without_income(monkeypatch):
