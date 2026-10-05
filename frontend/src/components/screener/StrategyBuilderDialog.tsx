@@ -237,6 +237,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
   const [iterateRounds, setIterateRounds] = useState<AiIterateRound[]>([])
   const [iterateDraftId, setIterateDraftId] = useState('')
   const suppressPersistRef = useRef(false)
+  const restoredModeRef = useRef<string | null>(null)
   // 迭代落盘的代码基准 (检测用户在编辑器是否改过, 见 handleSave)
   const iterateSavedCodeRef = useRef('')
 
@@ -250,7 +251,10 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
 
   // 打开时恢复草稿
   useEffect(() => {
-    if (!open) { setLoaded(false); return }
+    if (!open) { restoredModeRef.current = null; setLoaded(false); return }
+    // 策略列表轮询只更新已有 ID，不能重放 localStorage 覆盖当前编辑/生成结果。
+    if (restoredModeRef.current === mode) return
+    restoredModeRef.current = mode
     const d = draftStore.get(null)
     const draftCodeId = d ? parseMetaField(d.code ?? '', 'id') : ''
     const completedDraft = mode === 'create' && !!d && (
@@ -265,12 +269,16 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
       setStep(d.step ?? 1); setName(d.name ?? ''); setDescription(d.description ?? '')
       setDirection(d.direction ?? 'long')
       setExecutionBackend(
-        (d as any).executionBackend
+        d.executionBackend
         ?? (String(d.code ?? '').includes('matrix_native') ? 'matrix_native' : 'polars_expr'),
       )
       setRules(d.rules ?? ''); setCode(d.code ?? ''); setStrategyId(d.strategyId ?? '')
       setSource(restoredSource)
       setTab(mode === 'modify' || restoredSource === 'custom' ? 'custom' : 'ai')
+      setIterateEnabled(d.iterateEnabled ?? false)
+      setIterateDraftId(d.iterateDraftId ?? '')
+      setIterateRounds(d.iterateRounds ?? [])
+      iterateSavedCodeRef.current = d.iterateSavedCode ?? ''
     } else {
       resetDraftState()
     }
@@ -289,9 +297,11 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
     if (!name && !rules && !code) {
       draftStore.set(null)
     } else {
-      draftStore.set({ name, description, direction, executionBackend, rules, code, step, strategyId, source } as any)
+      draftStore.set({ name, description, direction, executionBackend, rules, code, step, strategyId, source,
+        iterateEnabled, iterateDraftId, iterateRounds, iterateSavedCode: iterateSavedCodeRef.current })
     }
-  }, [draftStore, name, description, direction, executionBackend, rules, code, step, strategyId, source])
+  }, [draftStore, name, description, direction, executionBackend, rules, code, step, strategyId, source,
+    iterateEnabled, iterateDraftId, iterateRounds])
   useEffect(() => {
     if (loaded && !suppressPersistRef.current) persist()
   }, [loaded, persist])
@@ -338,6 +348,12 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
         setStep(2); setValidated(true)
         const genDesc = parseMetaField(result.final_code, 'description')
         const genRules = parseRules(result.final_code)
+        // 请求可能在弹窗隐藏或页面卸载后完成；一次保存完整上下文供重开恢复。
+        draftStore.set({ name, description: genDesc || description, direction, executionBackend,
+          rules: genRules || rules, code: result.final_code, step: 2,
+          strategyId: result.draft_strategy_id, source: 'ai', iterateEnabled: true,
+          iterateDraftId: result.draft_strategy_id, iterateRounds: result.rounds ?? [],
+          iterateSavedCode: result.final_code })
         if (genDesc) setDescription(genDesc)
         if (genRules) setRules(genRules)
       } else {
@@ -419,13 +435,28 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
     if (!draftCode) return
     setSaving(true); setError('')
     try {
+      const codeId = parseMetaField(draftCode, 'id')
+      // 旧 localStorage 没有迭代字段。只在后端确认同 ID 仍为 AI 研究草稿时恢复更新路径。
+      let savedDraftId = iterateDraftId
+      const candidateId = savedDraftId || (mode === 'create' && source === 'ai' && strategyId === codeId ? strategyId : '')
+      if (candidateId) {
+        if (candidateId !== codeId) throw new Error('草稿 ID 与代码不一致，请恢复原 ID 后保存')
+        const listed = await api.strategyList(undefined, 'all', true)
+        const existing = listed.strategies.find(item => item.id === candidateId)
+        if (existing?.source === 'ai' && existing.research_only === true) {
+          savedDraftId = candidateId
+          setIterateDraftId(candidateId)
+        } else if (savedDraftId) {
+          throw new Error('原 AI 草稿已删除或发布，请从策略列表重新打开，避免覆盖已有策略')
+        }
+      }
       // 迭代模式: 后端已把草稿落盘到 data/strategies/ai/
-      if (iterateDraftId) {
+      if (savedDraftId) {
         // 用户若在编辑器改过代码, 先更新落盘草稿 (否则编辑会被静默丢弃)
         let researchOnly = true
         if (draftCode !== iterateSavedCodeRef.current) {
           const savedResult = await api.strategySaveCodeV2({
-            strategy_id: iterateDraftId,
+            strategy_id: savedDraftId,
             code: draftCode,
             target_source: 'ai',
             mode: 'update',
@@ -438,8 +469,8 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
         clearDraft()
         const genRules = parseRules(draftCode)
         const finalRules = (genRules || rules).trim()
-        if (finalRules) { const saved = storage.strategyRules.get({}); saved[iterateDraftId] = finalRules; storage.strategyRules.set(saved) }
-        await onSavedId?.(iterateDraftId, researchOnly)
+        if (finalRules) { const saved = storage.strategyRules.get({}); saved[savedDraftId] = finalRules; storage.strategyRules.set(saved) }
+        await onSavedId?.(savedDraftId, researchOnly)
         setTimeout(() => onClose(), 1000)
         setSaving(false)
         return
@@ -796,7 +827,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
           {/* 底部 */}
           {tab === 'ai' && (
           <div className="flex items-center justify-between px-5 py-3 border-t border-border/50 bg-surface/50">
-            <button onClick={clearDraft} className="text-[10px] text-muted/40 hover:text-danger transition-colors">重新创建</button>
+            <button onClick={clearDraft} disabled={loading || saving} className="text-[10px] text-muted/40 hover:text-danger disabled:opacity-40 transition-colors">重新创建</button>
             <div className="flex items-center gap-2">
               {step === 1 && code && name.trim() && (
                 <button onClick={() => setStep(2)} className="h-7 px-3 rounded-lg border border-border text-xs text-secondary hover:text-foreground flex items-center gap-1">

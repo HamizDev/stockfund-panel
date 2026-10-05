@@ -9,6 +9,8 @@ from app.api.strategy import (
     StrategyCodeValidateRequest,
     _prepare_strategy_code,
     _save_strategy_code,
+    _set_meta_bool_field,
+    publish_ai_strategy,
 )
 from app.strategy.engine import StrategyEngine
 
@@ -136,6 +138,49 @@ def test_save_strategy_code_updates_existing_source_file(tmp_path):
     assert custom_path.exists()
     assert not (tmp_path / "strategies" / "ai" / "custom_update.py").exists()
     assert '"name": "新名称"' in custom_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("submitted_flag", [None, False, True])
+@pytest.mark.parametrize("published", [False, True])
+def test_update_ai_strategy_preserves_existing_publication_state(tmp_path, submitted_flag, published):
+    """保存代码不能发布研究草稿, 也不能把已发布策略悄悄变回草稿。"""
+    request = _request(tmp_path)
+    sid = "ai_update_publication"
+    _save_strategy_code(StrategyCodeSaveRequest(
+        strategy_id=sid, target_source="ai", mode="create", code=_code(sid),
+    ), request)
+    if published:
+        publish_ai_strategy(sid, request)
+
+    submitted_code = _code(sid, "修改后的草稿")
+    if submitted_flag is not None:
+        submitted_code = _set_meta_bool_field(submitted_code, "research_only", submitted_flag)
+    result = _save_strategy_code(StrategyCodeSaveRequest(
+        strategy_id=sid, target_source="ai", mode="update", code=submitted_code,
+    ), request)
+
+    expected_research_only = not published
+    assert result["research_only"] is expected_research_only
+    loaded = request.app.state.strategy_engine.get(sid)
+    assert loaded.meta.get("research_only", False) is expected_research_only
+    assert loaded.meta["name"] == "修改后的草稿"
+    public_ids = {meta["id"] for meta in request.app.state.strategy_engine.list_strategies()}
+    assert (sid in public_ids) is published
+
+
+def test_create_ai_strategy_still_rejects_existing_id(tmp_path):
+    request = _request(tmp_path)
+    req = StrategyCodeSaveRequest(
+        strategy_id="ai_duplicate", target_source="ai", mode="create", code=_code("ai_duplicate"),
+    )
+    _save_strategy_code(req, request)
+    path = tmp_path / "strategies" / "ai" / "ai_duplicate.py"
+    saved_code = path.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="已存在"):
+        _save_strategy_code(req, request)
+
+    assert path.read_text(encoding="utf-8") == saved_code
 
 
 def test_save_strategy_code_rejects_undefined_custom_signal(tmp_path):

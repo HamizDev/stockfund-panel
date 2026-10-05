@@ -5,6 +5,25 @@
  * - 类型安全，不再散落 try/catch。
  */
 
+import type { AiIterateRound } from './api'
+
+export interface StrategyBuilderDraft {
+  name: string
+  description: string
+  direction: string
+  style?: string
+  executionBackend?: 'polars_expr' | 'matrix_native'
+  rules: string
+  code: string
+  step: number
+  strategyId: string
+  source?: 'ai' | 'custom'
+  iterateEnabled?: boolean
+  iterateDraftId?: string
+  iterateRounds?: AiIterateRound[]
+  iterateSavedCode?: string
+}
+
 function kv<T>(key: string) {
   return {
     get(fallback: T): T {
@@ -116,13 +135,13 @@ export const storage = {
   limitLadderSealMode:  kv<'vol' | 'amount'>('limit-ladder-seal-mode'),
 
   /** 策略创建草稿（新建专用） */
-  strategyDraft: kv<{ name: string; description: string; direction: string; style?: string; rules: string; code: string; step: number; strategyId: string; source?: 'ai' | 'custom' } | null>('strategy-draft'),
+  strategyDraft: kv<StrategyBuilderDraft | null>('strategy-draft'),
 
   /** 新建策略默认基础过滤参数 (策略页「默认基础参数」设置; null=未自定义, 用内置默认) */
   defaultStrategyBasicFilter: kv<DefaultStrategyBasicFilter | null>('default-strategy-basic-filter'),
 
   /** 策略修改草稿（AI修改专用，不影响创建按钮） */
-  strategyModify: kv<{ name: string; description: string; direction: string; style?: string; rules: string; code: string; step: number; strategyId: string; source?: 'ai' | 'custom' } | null>('strategy-modify'),
+  strategyModify: kv<StrategyBuilderDraft | null>('strategy-modify'),
 
   /** 策略构建器草稿（旧版兼容，逐渐废弃） */
   strategyBuilderDraft: kv<{ name: string; description: string; direction: string; style?: string; rules: string; code: string; step: number; strategyId: string; source?: 'ai' | 'custom' } | null>('strategy-builder-draft'),

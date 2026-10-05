@@ -781,9 +781,14 @@ def _save_strategy_code(req: StrategyCodeSaveRequest, request: Request, *, legac
     prepared = _prepare_strategy_code(req)
 
     # AI 新建策略默认草稿态(research_only=True): 不进公开列表、不可运行, 需显式 publish。
-    # 仅 create 注入; update 保留既有 research_only, 避免静默取消已发布状态。
-    if expected_source == "ai" and (legacy_ai_path or req.mode == "create"):
-        prepared["code"] = _set_meta_bool_field(prepared["code"], "research_only", True)
+    # update 从已保存策略保留发布状态, 不由客户端代码里的 META 决定。
+    # 草稿只有显式 publish 才公开; 已公开策略更新代码后仍保持公开。
+    if expected_source == "ai":
+        research_only = (
+            True if legacy_ai_path or req.mode == "create"
+            else bool(existing.meta.get("research_only"))
+        )
+        prepared["code"] = _set_meta_bool_field(prepared["code"], "research_only", research_only)
         prepared["meta"] = AIStrategyGenerator._extract_meta(prepared["code"])
 
     previous_code = path.read_text(encoding="utf-8") if path.exists() else None
