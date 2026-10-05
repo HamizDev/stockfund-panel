@@ -5,6 +5,7 @@ __pycache__/
 *.so
 .Python
 .venv/
+.eltdx-venv/
 venv/
 env/
 .python-version

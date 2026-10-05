@@ -1,0 +1,9 @@
+name: eltdx_gateway
+display_name: "通达信 ELTDX(研究分钟)"
+runtime: none
+entry: app.plugins.eltdx_gateway.provider:EltdxGatewayProvider
+check: app.plugins.eltdx_gateway.provider:availability
+datasets: [minute]
+description: "个人非商业研究用股票/ETF 1分钟K，单只按需查询。需单独启动ELTDX 3.2.2本机网关；不提供全市场同步，成交额暂缺，网关在线状态以试拉为准。"
+install_hint: "在独立环境安装 eltdx[http]==3.2.2 并启动本机网关，详见项目文档及上游研究用途许可"
+homepage: "https://github.com/electkismet/eltdx/tree/v3.2.2"

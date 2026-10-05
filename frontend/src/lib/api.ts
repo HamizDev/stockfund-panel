@@ -1975,6 +1975,11 @@ export interface DataSourceTestResult {
   rows: number
   columns: string[]
   preview: Record<string, unknown>[]
+  observed_start?: string | null
+  observed_end?: string | null
+  price_basis?: string
+  volume_unit?: string
+  amount_available?: boolean
 }
 
 /** 插件 Key 保存结果 (先探后存: 无效 Key 返回 ok=false 且不落盘) */

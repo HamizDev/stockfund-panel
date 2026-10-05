@@ -995,18 +995,24 @@ def _resolve_minute_provider(
       - resolver 异常 (registry 损坏 / 插件失效 / provider name 不存在) → (None, True, str(e))
       - 成功 → (provider, False, None)
 
+    已解析且声明 minute_fail_closed=True 的源不支持该资产时直接抛异常,
+    避免用其他来源的数据掩盖所选研究源的错误; 未声明的源保持原回退行为。
+
     上层依据 error_msg 决定是否 logger.warning (区分"未配"与"异常")。
     注意: provider.get_minute() 仍由调用方在自身 try 块内调用 (业务异常, 非解析异常)。
     """
     if provider_name == "tickflow":
         return (None, True, None)
     from app.data_providers import custom as custom_sources
+    provider = None
     try:
         if not custom_sources.provider_has_dataset(provider_name, "minute"):
             return (None, True, None)
         provider = custom_sources.get_provider(provider_name)
         supported = getattr(provider, "minute_asset_types", None)
         if isinstance(supported, (tuple, list, set, frozenset)) and asset_type not in supported:
+            if getattr(provider, "minute_fail_closed", False) is True:
+                raise ValueError("所选分钟数据源不支持此资产类型")
             # Keep ETF minute data available when the primary anonymous source
             # only serves stocks. Use a declared, already installed alternative.
             if asset_type == "etf" and provider_name != "stocksdk" and custom_sources.provider_has_dataset("stocksdk", "minute"):
@@ -1017,6 +1023,8 @@ def _resolve_minute_provider(
             return (None, True, None)
         return (provider, False, None)
     except Exception as e:  # noqa: BLE001
+        if getattr(provider, "minute_fail_closed", False) is True:
+            raise
         return (None, True, str(e))
 
 
@@ -1067,7 +1075,8 @@ def _try_custom_minute(
             asset_type=asset_type, freq=freq, on_chunk_done=wrapped_cb,
         )
         frame = _enforce_minute_beijing_wallclock(frame, source=getattr(current_provider, "name", provider_name))
-        if getattr(current_provider, "minute_price_basis", None) == "unverified":
+        basis = getattr(current_provider, "minute_price_basis", None)
+        if basis == "unverified":
             from app.config import settings
 
             returned = set(frame["symbol"].drop_nulls().to_list()) if "symbol" in frame.columns else set()
@@ -1090,15 +1099,19 @@ def _try_custom_minute(
                         if not expected.issubset(set(row["datetime"])):
                             raise ValueError("分钟数据不完整: 全天请求缺少交易时段分钟柱")
             minute_adjust.verify_minute_raw_anchors(frame, settings.data_dir, asset_type)
-            if not raw_basis:
-                # Existing legacy partitions store forward-adjusted prices. A
-                # checked raw response must use that basis until migration.
-                frame = minute_adjust.apply_minute_adjustment(frame, settings.data_dir, asset_type)
+        if basis in {"raw", "unverified"} and not raw_basis:
+            from app.config import settings
+
+            # Both known raw sources and checked anonymous sources must match
+            # the legacy forward-adjusted partitions on this read path.
+            frame = minute_adjust.apply_minute_adjustment(frame, settings.data_dir, asset_type)
         return frame
 
     try:
         df = _fetch(provider)
     except Exception as e:
+        if getattr(provider, "minute_fail_closed", False) is True:
+            raise
         # The new anonymous source has no published minute adjustment contract.
         # If its complete-day raw anchors cannot be checked (including intraday),
         # retain the installed source rather than mixing unknown price bases.
@@ -1121,6 +1134,8 @@ def _try_custom_minute(
         # 时区契约守卫: 插件/自定义源帧同样收口为北京墙钟 (CONTRIBUTING §3.3)
         df = _enforce_minute_beijing_wallclock(df, source=provider_name)
     except Exception as e:
+        if getattr(provider, "minute_fail_closed", False) is True:
+            raise
         logger.warning("custom minute provider %s datetime 契约校验失败, falling back to TickFlow: %s",
                        provider_name, e)
         return (None, True)

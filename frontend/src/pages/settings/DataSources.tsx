@@ -43,6 +43,7 @@ import { AnchorWrap } from '@/lib/useCardFlash'
 import { CAP_LABELS, TIER_RANK, tierRank, tierStyle, TierTag } from '@/lib/capability-labels'
 import { toast } from '@/components/Toast'
 import { DataSourceEditor } from './DataSourceEditor'
+import { EltdxMinuteTrial } from './EltdxMinuteTrial'
 import { TickFlowKeySection, TierHelpPopover, useInvalidateTierRelated } from './Keys'
 
 const DATASET_LABEL: Record<string, string> = {
@@ -1050,6 +1051,10 @@ function PluginDetail({ plugin, isActive, matrixCaps, servingSet }: {
             <div className={plugin.available ? 'mt-4' : ''}>
               <PluginKeyConfig plugin={plugin} />
             </div>
+          )}
+
+          {plugin.name === 'eltdx_gateway' && (
+            <EltdxMinuteTrial available={plugin.available} />
           )}
         </div>
 
