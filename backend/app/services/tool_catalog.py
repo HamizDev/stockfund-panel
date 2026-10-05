@@ -7,7 +7,7 @@ run_backtest 复用现有 StrategyBacktestConfig + worker, 只读、受控窗口
 设计边界:
   - 本模块只做「序列化 + 分发」, 不持有策略引擎 / 数据目录单例, 依赖由调用方注入。
   - run_backtest 是重任务 (子进程), 由 execute_tool 用 asyncio.to_thread 挪出事件循环。
-  - Codex CLI 无 tools= 协议, 相关门控在 api 层入口 fail-closed, 不在本模块降级。
+  - OpenAI 原生 tools 与 Codex 严格 JSON 工具桥共用本目录和受控执行器。
 """
 from __future__ import annotations
 

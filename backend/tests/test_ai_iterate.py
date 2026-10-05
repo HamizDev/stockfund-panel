@@ -11,10 +11,15 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import re
 import sys
 import tempfile
 import types
 from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from app.strategy import ai_iterator as it
 from app.strategy.ai_generator import AIStrategyGenerator as RealGen, find_meta_assignment
@@ -228,12 +233,13 @@ def _fake_tool_loop(call_log: list):
     """按调用次数返回对话: 第 1 轮 run_backtest→改进, 第 2 轮原样输出(收敛)。"""
     async def fake(messages, tools, *, execute_tool, max_rounds, temperature, max_tokens):
         call_log.append(len(call_log) + 1)
+        draft_id = re.search(r"strategy_id=(ai_\w+)", messages[1]["content"]).group(1)
         if len(call_log) == 1:
             return [
                 {"role": "assistant", "content": None, "tool_calls": [{
                     "id": "call_1", "type": "function",
                     "function": {"name": "run_backtest",
-                                 "arguments": json.dumps({"strategy_id": "draft"})},
+                                 "arguments": json.dumps({"strategy_id": draft_id})},
                 }]},
                 {"role": "tool", "tool_call_id": "call_1",
                  "content": json.dumps({"ok": True, "result": {"stats": {
@@ -242,6 +248,12 @@ def _fake_tool_loop(call_log: list):
                 {"role": "assistant", "content": "改进夏普\n```python\n" + V2_CODE + "\n```"},
             ]
         return [
+            {"role": "assistant", "tool_calls": [{
+                "id": "call_2", "type": "function",
+                "function": {"name": "run_backtest", "arguments": json.dumps({"strategy_id": draft_id})},
+            }]},
+            {"role": "tool", "tool_call_id": "call_2",
+             "content": json.dumps({"ok": True, "result": {"stats": {"sharpe": 1.6}}})},
             {"role": "assistant", "content": "已无改进空间\n```python\n" + V2_CODE + "\n```"},
         ]
 
@@ -274,7 +286,7 @@ def test_iterate_full_flow(monkeypatch):
     r1, r2 = result["rounds"]
     assert r1["stats"] is not None and r1["stats"]["sharpe"] == 1.5
     assert r1["change_summary"] == "改进夏普"
-    assert r2["stats"] is None
+    assert r2["stats"] == {"sharpe": 1.6}
     assert "收敛" in r2["change_summary"]
 
     assert result["final_code"].strip() == V2_CODE.strip()
@@ -333,3 +345,111 @@ def test_iterate_final_backtest_appended(monkeypatch):
     assert r1["change_summary"] == "改进夏普"
     assert r2["change_summary"] == "最终版回测"
     assert r2["stats"] == {"sharpe": 2.0}
+
+
+@pytest.mark.parametrize("name,sid,call_id,ok,stats", [
+    ("list_strategies", "ai_current", "c1", True, {"sharpe": 9}),
+    ("run_backtest", "ai_other", "c1", True, {"sharpe": 9}),
+    ("run_backtest", "ai_current", "unmatched", True, {"sharpe": 9}),
+    ("run_backtest", "ai_current", "c1", False, {"sharpe": 9}),
+    ("run_backtest", "ai_current", "c1", True, {}),
+])
+def test_metrics_require_current_draft_and_matching_tool(name, sid, call_id, ok, stats):
+    messages = [
+        {"role": "assistant", "tool_calls": [{"id": "c1", "function": {
+            "name": name, "arguments": json.dumps({"strategy_id": sid}),
+        }}]},
+        {"role": "tool", "tool_call_id": call_id,
+         "content": json.dumps({"ok": ok, "result": {"stats": stats}})},
+    ]
+    assert it._extract_backtest_stats(messages, "ai_current") is None
+
+
+def test_missing_baseline_keeps_original_draft_and_reports_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(it, "AIStrategyGenerator", FakeGenerator)
+
+    async def no_baseline(*args, **kwargs):
+        return [{"role": "assistant", "content": "伪称已优化\n```python\n" + V2_CODE + "\n```"}]
+
+    async def failed_final(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(it, "generate_ai_text_with_tools", no_baseline)
+    monkeypatch.setattr(AIStrategyIterator, "_backtest_final", failed_final)
+    engine = _FakeEngine()
+    result = asyncio.run(AIStrategyIterator(max_rounds=2).iterate("p", engine=engine, data_dir=str(tmp_path)))
+    assert result["final_code"] == V1_CODE
+    assert engine.reloads == 1
+    assert len(result["rounds"]) == 2
+    assert "未采用本轮改动" in result["rounds"][0]["change_summary"]
+    assert "未完成" in result["rounds"][1]["change_summary"]
+    assert all(r["stats"] is None for r in result["rounds"])
+
+
+@pytest.mark.parametrize("result", [{"stats": {}}, {}, {"stats": None}])
+def test_empty_final_backtest_is_not_success(monkeypatch, tmp_path, result):
+    monkeypatch.setattr(tool_catalog, "run_backtest", lambda *args, **kwargs: result)
+    assert asyncio.run(AIStrategyIterator()._backtest_final(str(tmp_path), "ai_draft")) is None
+
+
+def test_codex_iterate_http_runs_validated_tools_and_keeps_research_draft(monkeypatch, tmp_path):
+    """Real route → iterator → JSON bridge → catalog; only model/backtest are fixtures."""
+    from app.api import strategy as strategy_api
+    from app.services import ai_provider
+    from app.custom.assistant import codex_round
+
+    engine = _FakeEngine()
+    engine.has = lambda sid: (tmp_path / "strategies" / "ai" / f"{sid}.py").exists()
+    monkeypatch.setattr(it, "AIStrategyGenerator", FakeGenerator)
+    monkeypatch.setattr(ai_provider, "is_codex_cli_provider", lambda *args: True)
+    backtests = []
+    evidence = {"total_return": 0.02, "max_drawdown": -0.03, "n_trades": 4}
+
+    def backtest(data_dir, *, strategy_id, **kwargs):
+        assert Path(data_dir) == tmp_path
+        backtests.append(strategy_id)
+        return {"stats": evidence}
+
+    monkeypatch.setattr(tool_catalog, "run_backtest", backtest)
+    decisions = []
+
+    async def generate(messages, **kwargs):
+        transport = json.loads(messages[1]["content"])
+        history = transport["conversation"]
+        decisions.append(history)
+        if len(decisions) == 1:
+            sid = re.search(r"strategy_id=(ai_\w+)", history[1]["content"]).group(1)
+            return json.dumps({"text": "", "tool_calls": [{"name": "run_backtest", "arguments": {"strategy_id": sid}}]})
+        tool_result = json.loads(history[-1]["content"])
+        assert tool_result == {"ok": True, "result": {"stats": evidence}}
+        assert history[-1]["tool_call_id"] == history[-2]["tool_calls"][0]["id"]
+        return json.dumps({"text": "保留基线\n```python\n" + V1_CODE + "\n```", "tool_calls": []})
+
+    monkeypatch.setattr(codex_round, "generate_ai_text", generate)
+    app = FastAPI()
+    app.state.strategy_engine = engine
+    app.state.repo = types.SimpleNamespace(store=types.SimpleNamespace(data_dir=tmp_path))
+    app.include_router(strategy_api.router)
+    with TestClient(app) as client:
+        response = client.post("/api/strategies/ai/iterate", json={"name": "测试", "rules": "close > ma5", "max_rounds": 1})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert backtests == [result["draft_strategy_id"]]
+    assert result["rounds"][0]["stats"] == evidence
+    assert "收敛" in result["rounds"][0]["change_summary"]
+    code = (tmp_path / "strategies" / "ai" / f"{result['draft_strategy_id']}.py").read_text(encoding="utf-8")
+    assert ast.literal_eval(find_meta_assignment(code)[1])["research_only"] is True
+
+
+def test_codex_iterate_http_still_requires_engine_and_valid_request(monkeypatch):
+    from app.api import strategy as strategy_api
+    from app.services import ai_provider
+
+    monkeypatch.setattr(ai_provider, "is_codex_cli_provider", lambda *args: True)
+    app = FastAPI()
+    app.include_router(strategy_api.router)
+    with TestClient(app) as client:
+        assert client.post("/api/strategies/ai/iterate", json={"name": "测试", "rules": "close > ma5", "max_rounds": 0}).status_code == 422
+        response = client.post("/api/strategies/ai/iterate", json={"name": "测试", "rules": "close > ma5"})
+    assert response.status_code == 503
+    assert response.json()["detail"] == "策略引擎未初始化"

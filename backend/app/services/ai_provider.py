@@ -12,9 +12,10 @@ import sys
 import tempfile
 import time
 import tomllib
+import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
-from types import TracebackType
+from types import SimpleNamespace, TracebackType
 from urllib.parse import urlsplit, urlunsplit
 
 from app import secrets_store
@@ -331,27 +332,28 @@ async def generate_ai_text_with_tools(
     timeout: float = 180.0,
     max_rounds: int = 4,
 ) -> list[dict]:
-    """OpenAI 原生 tools 有界循环: 调用 → 逐条执行工具 → role:tool 回填 → 循环。
+    """有界工具循环: 调用 → 逐条执行工具 → role:tool 回填 → 循环。
 
     与 generate_ai_text 的差异: 这里返回「完整 messages」(含 tool 往返), 最后一条
     assistant 消息承载最终文本; 调用方可扫描 role:tool 消息重建逐轮证据 (回测指标)。
     execute_tool 为 async (name, args) -> dict, 返回 {"ok": bool, "result"|"error"},
-    由调用方注入 (见 services.tool_catalog.execute_tool)。tools 是硬能力依赖
-    (Codex CLI 无 tools= 协议), 故入口 fail-closed, 不做纯文本降级。
+    由调用方注入 (见 services.tool_catalog.execute_tool)。OpenAI 使用原生 tools;
+    Codex 使用助手已有的严格 JSON 桥, 整份请求校验后才执行登记工具。
     """
-    if is_codex_cli_provider():
-        raise RuntimeError("当前 AI 供应商不支持工具调用迭代, 请改用 OpenAI 兼容模型")
-
     max_tokens = _resolve_max_tokens(max_tokens)
     if not tools:
         raise ValueError("generate_ai_text_with_tools 需要至少一个工具 schema")
+    if max_rounds < 1:
+        raise ValueError("工具调用轮次必须至少为 1")
 
     req_messages: list[dict] = [dict(m) for m in messages]
     tool_schemas = list(tools)
+    codex = is_codex_cli_provider()
 
     for _ in range(max_rounds):
         _check_input_budget(req_messages, max_tokens=max_tokens)
-        message = await _run_openai_message_once(
+        run_message = _run_codex_message_once if codex else _run_openai_message_once
+        message = await run_message(
             req_messages,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -398,7 +400,35 @@ async def generate_ai_text_with_tools(
                 }
             )
 
-    return req_messages
+    raise ValueError("已达到本轮工具调用上限, AI 尚未返回完整策略; 草稿未发布, 请重试。")
+
+
+async def _run_codex_message_once(
+    messages: list[dict], *, tools: list[dict], temperature: float | None,
+    max_tokens: int | None, timeout: float,
+):
+    # Runtime import avoids a cycle: the existing bridge imports generate_ai_text.
+    from app.custom.assistant.codex_round import stream_codex_round
+
+    content = ""
+    calls = None
+    async for event in stream_codex_round(
+        messages, tools, temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+    ):
+        if event["type"] == "text":
+            content += event["delta"]
+        elif event["type"] == "round_end":
+            calls = event["tool_calls"]
+    if calls is None:
+        raise ValueError("Codex 工具请求未完成; 本轮未执行工具。")
+    # Match native messages. Trusted backend IDs pair every result with its call.
+    return SimpleNamespace(
+        content=content,
+        tool_calls=[SimpleNamespace(
+            id=f"codex_{uuid.uuid4().hex}", type="function",
+            function=SimpleNamespace(name=call["name"], arguments=call["arguments"]),
+        ) for call in calls],
+    )
 
 
 def _parse_tool_arguments(raw: str) -> dict:

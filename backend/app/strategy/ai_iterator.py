@@ -26,7 +26,7 @@ _ITERATION_SUFFIX = """
 
 --- 工具使用与迭代纪律 ---
 
-你拥有以下工具 (通过 OpenAI function calling 调用):
+你拥有以下登记工具 (按供应商的工具协议请求, 由看板后端执行):
 - list_factors(asset_type?, stable_only?): 检索因子目录 (约 100 个因子)
 - list_strategies(): 检索已加载策略目录 (含 research 研究模板)
 - list_data_capabilities(): 检索数据源能力
@@ -89,7 +89,14 @@ class AIStrategyIterator:
                 max_tokens=None,
             )
             # stats 是本轮「改动前」的 current_code 回测基准 (LLM 先回测再产出改进版)
-            stats = _extract_backtest_stats(full)
+            stats = _extract_backtest_stats(full, draft_id)
+            if stats is None:
+                rounds.append({
+                    "round": round_no,
+                    "stats": None,
+                    "change_summary": "未获得当前草稿的有效回测指标, 保留当前版本; 未采用本轮改动",
+                })
+                break
             final_text = _last_assistant_content(full)
             improved = generator.validate_code(final_text)
             if not improved.get("valid"):
@@ -126,7 +133,10 @@ class AIStrategyIterator:
             rounds.append({
                 "round": len(rounds) + 1,
                 "stats": final_stats,
-                "change_summary": "最终版回测",
+                "change_summary": (
+                    "最终版回测" if final_stats is not None
+                    else "最终版回测未完成: 缺少数据或回测失败, 不代表策略已验证"
+                ),
             })
 
         return {
@@ -142,7 +152,8 @@ class AIStrategyIterator:
             result = await asyncio.to_thread(
                 tool_catalog.run_backtest, data_dir, strategy_id=draft_id
             )
-            return result.get("stats")
+            stats = result.get("stats")
+            return stats if isinstance(stats, dict) and stats else None
         except Exception:  # noqa: BLE001 — 末行证据不强依赖回测成功
             return None
 
@@ -230,11 +241,25 @@ def _last_assistant_content(messages: list[dict]) -> str:
     return ""
 
 
-def _extract_backtest_stats(messages: list[dict]) -> dict | None:
-    """从 role:tool 消息中取出最近一次 run_backtest 的精简 stats。"""
+def _extract_backtest_stats(messages: list[dict], draft_id: str) -> dict | None:
+    """只采纳匹配当前草稿 run_backtest 调用 ID 的后端指标。"""
     stats = None
+    backtest_ids: set[str] = set()
     for m in messages:
+        if m.get("role") == "assistant":
+            for call in m.get("tool_calls") or []:
+                function = call.get("function") or {}
+                if function.get("name") != tool_catalog.RUN_BACKTEST:
+                    continue
+                try:
+                    args = json.loads(function.get("arguments") or "")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(args, dict) and args.get("strategy_id") == draft_id and call.get("id"):
+                    backtest_ids.add(call["id"])
         if m.get("role") != "tool":
+            continue
+        if m.get("tool_call_id") not in backtest_ids:
             continue
         try:
             payload = json.loads(m.get("content") or "")
@@ -243,7 +268,7 @@ def _extract_backtest_stats(messages: list[dict]) -> dict | None:
         if not isinstance(payload, dict) or not payload.get("ok"):
             continue
         result = payload.get("result")
-        if isinstance(result, dict) and isinstance(result.get("stats"), dict):
+        if isinstance(result, dict) and isinstance(result.get("stats"), dict) and result["stats"]:
             stats = result["stats"]
     return stats
 

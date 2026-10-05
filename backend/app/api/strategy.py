@@ -969,15 +969,7 @@ async def ai_generate(req: AIGenerateRequest, request: Request):
 @router.post("/ai/iterate")
 async def ai_iterate(req: AIIterateRequest, request: Request):
     """生成→回测→诊断→修改 的有界闭环 (只读回测, 产物为 ai_ 草稿, 不自动上线)。"""
-    from app.services.ai_provider import is_codex_cli_provider
     from app.strategy.ai_iterator import AIStrategyIterator
-
-    # Codex CLI 无 tools= 协议, 迭代能力边界在入口 fail-closed (不静默降级为纯文本)。
-    if is_codex_cli_provider():
-        raise HTTPException(
-            status_code=400,
-            detail="当前 AI 供应商不支持工具调用迭代, 请改用 OpenAI 兼容模型",
-        )
 
     engine = _get_engine(request)
     data_dir = _data_dir(request)

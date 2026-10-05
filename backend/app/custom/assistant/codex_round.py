@@ -124,7 +124,8 @@ async def stream_codex_round(
     messages: list[dict[str, Any]],
     tool_schemas: list[dict[str, Any]],
     *,
-    temperature: float = 0.3,
+    temperature: float | None = 0.3,
+    max_tokens: int | None = 6000,
     timeout: float = 240.0,
 ) -> AsyncIterator[dict[str, Any]]:
     # Serialize the FULL conversation: the text provider deliberately ignores
@@ -133,7 +134,7 @@ async def stream_codex_round(
     response = await generate_ai_text(
         [{"role": "system", "content": _PROTOCOL}, {"role": "user", "content": content}],
         temperature=temperature,
-        max_tokens=6000,
+        max_tokens=max_tokens,
         timeout=timeout,
     )
     decision = parse_decision(response, tool_schemas)
