@@ -13,6 +13,7 @@ import { DateShortcuts } from '@/components/DateShortcuts'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { toNavItems } from '@/lib/listNav'
 import { boardTag } from '@/components/stock-table/primitives'
+import { HoldingsDailyReview, holdingsReviewSignature } from '@/components/HoldingsDailyReview'
 
 const emptyDraft = (): Lot => ({
   id: '',
@@ -54,6 +55,8 @@ export function Lots() {
 
   const lotsQuery = useQuery({ queryKey: QK.lots, queryFn: api.lotsList })
   const lots = lotsQuery.data?.lots ?? []
+  const lotsLoaded = lotsQuery.data !== undefined
+  const reviewSignature = useMemo(() => holdingsReviewSignature(lots), [lots])
 
   const allSymbols = useMemo(() => Array.from(new Set(lots.map(l => l.symbol))), [lots])
   const namesQuery = useQuery({
@@ -115,6 +118,14 @@ export function Lots() {
       <PageHeader title="持仓提醒" subtitle="记录个股 / ETF 买入批次, 自动生成止盈止损 / 到期监控规则" />
       <div className="flex-1 min-h-0 px-5 py-4">
         <div className="mx-auto max-w-5xl space-y-4">
+          {lotsLoaded && (
+            <HoldingsDailyReview
+              scope="lots"
+              holdingSignature={reviewSignature}
+              loaded={lotsLoaded}
+              holdingsRefreshError={lotsQuery.isError ? lotsQuery.error.message : ''}
+            />
+          )}
           <div className="flex items-center justify-between">
             <div className="text-xs text-secondary">{lots.length} 个批次</div>
             <button

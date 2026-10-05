@@ -75,12 +75,13 @@ import { getFrontendExtensionNavigation } from '@/extensions/registry'
 // 品牌色 — 只用于 logo / brand 区域,不影响功能语义色
 const BRAND = '#8B5CF6'
 
-// 核心四只指数 — 与后端 index_const.py 单一权威对齐 (前端展示层固定清单)
+// 核心五只指数 — 与后端 index_const.py 单一权威对齐 (前端展示层固定清单)
 export const CORE_INDEXES = [
   { symbol: '000001.SH', name: '上证指数' },
   { symbol: '399001.SZ', name: '深证成指' },
   { symbol: '399006.SZ', name: '创业板指' },
   { symbol: '000680.SH', name: '科创综指' },
+  { symbol: '000688.SH', name: '科创50' },
 ] as const
 
 type CoreIndex = (typeof CORE_INDEXES)[number]
@@ -477,7 +478,7 @@ export function Layout() {
   const toggleNavCollapsed = () => {
     setNavStatePersist(navState === 'expanded' ? 'rail' : navState === 'rail' ? 'hidden' : 'expanded')
   }
-  // 指数条: 固定核心四只 (产品契约, 不再可配置), 常驻显示
+  // 指数条: 固定核心五只 (产品契约, 不再可配置), 常驻显示
   const sidebarIndexes = CORE_INDEXES
   const { data: sidebarIndexQuotes } = useQuery({
     queryKey: [...QK.indexQuotes, 'sidebar', 'core'] as const,

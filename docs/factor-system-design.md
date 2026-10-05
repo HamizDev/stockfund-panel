@@ -325,7 +325,7 @@ class UniverseSpec:
 ```python
 @dataclass(frozen=True)
 class NeutralizationSpec:
-    benchmark: str | None = "000001.SH"    # 上证指数（index_const.py:12【现状】核心四只之一）；扩展指数见 §9
+    benchmark: str | None = "000001.SH"    # 上证指数（index_const.py【现状】核心指数之一）；扩展指数见 §9
     return_basis: Literal["raw", "excess"] = "excess"   # IC/分层收益口径
     method: Literal["none", "industry_demean", "industry_zscore", "regression_industry_size"] = "none"
     winsorize_sigma: float | None = 3.0    # 因子值截面截尾；None = 不截尾
@@ -507,7 +507,7 @@ class CompositeMember:
 | `st_history` | 点时风险警示状态 | 历史涨跌停幅度修正、宇宙 ST 点时过滤 | 涨跌停用当前名推断 + 注记（现状） |
 | `delisted_kline` | 退市标的日 K + 退市维表 | 幸存者偏差修复（宇宙回补） | 报告永久幸存者注记 |
 | `industry_pit` | 点时行业归属 | 中性化升级为点时 | 行业快照 + 注记（现状） |
-| `index_ext` | 扩展指数日 K | 基准升级（当前限核心四只，index_const.py:12-15【现状】） | 基准限核心四只 |
+| `index_ext` | 扩展指数日 K | 基准升级（当前限核心五只，index_const.py【现状】） | 基准限核心五只 |
 
 各 dataset 完整字段 schema（provider 归一后落 Parquet，命名对齐现有 normalized 契约）：
 
@@ -803,7 +803,7 @@ researchUniverses()
 | share_capital.py:54-56 | announce_date 优先、period_end 兜底 | ✓ |
 | price_limits.py:87-101 | numpy_limit_pct_vectors（当前名推断） | ✓ |
 | capabilities.py:44-45 | 复权口径一致性"不做路由耦合"注释 | ✓ |
-| index_const.py:12-15 | 核心四只代码（000001.SH/399001.SZ/399006.SZ/000680.SH） | ✓ |
+| index_const.py | 核心五只代码（000001.SH/399001.SZ/399006.SZ/000680.SH/000688.SH） | ✓ |
 | daily_pipeline.py:92-125 | _resolve_universe（CN_Equity_A 当前池） | ✓ |
 | kline_sync.py:358-367 | (symbol, trade_date) 去重 keep=last 原子合并 | ✓ |
 | scoring.py:13-51 / 53-66 / 91-104 / 108+ | VIRTUAL 依赖 35 项 / 预热表 / 依赖展开与预热推导 / scoring_value_expr | ✓（全文读取，附录A 由其逐字推导） |

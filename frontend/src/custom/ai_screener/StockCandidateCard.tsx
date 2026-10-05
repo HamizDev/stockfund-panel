@@ -5,9 +5,9 @@ import { formatMoney, formatPct, type Candidate } from './client'
 import { candidateMissing, candidatePriceLabel, numberText, technicalSummary } from './candidateDisplay'
 import { reportExcerpt, type CandidateReport } from './useCandidateResearch'
 
-export function StockCandidateCard({ item, assetType, asOf, provider, quoteTime, selected, report, analysisError, running, busy, configured, cardRef, onSelect, onAnalyze, onPreview }: {
+export function StockCandidateCard({ item, assetType, asOf, provider, quoteTime, selected, rank, report, analysisError, running, busy, configured, cardRef, onSelect, onAnalyze, onPreview }: {
   item: Candidate; assetType: 'stock' | 'etf'; asOf: string | null; provider: string | null; quoteTime: number | null
-  selected: boolean; report?: CandidateReport; analysisError?: string; running: boolean; busy: boolean; configured: boolean; cardRef?: Ref<HTMLElement>
+  selected: boolean; rank: number; report?: CandidateReport; analysisError?: string; running: boolean; busy: boolean; configured: boolean; cardRef?: Ref<HTMLElement>
   onSelect: () => void; onAnalyze: () => void; onPreview: () => void
 }) {
   const [copied, setCopied] = useState(false)
@@ -29,7 +29,7 @@ export function StockCandidateCard({ item, assetType, asOf, provider, quoteTime,
   const aiLabel = running ? 'AI 分析中' : report?.complete ? 'AI 已分析' : report?.error ? '分析未完成' : '待 AI 分析'
   return <article ref={cardRef} className={`flex min-w-0 flex-col overflow-hidden rounded-lg border text-xs leading-[1.6] transition-colors ${selected ? 'border-accent/60 bg-accent/[0.04]' : 'border-border bg-background/40 hover:border-accent/30'}`}>
     <button aria-label={`查看 ${item.name} 候选详情`} aria-pressed={selected} onClick={onSelect} className="flex w-full items-start justify-between gap-2 border-b border-border/70 p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent">
-      <div className="min-w-0"><div className="flex flex-wrap items-center gap-x-2 gap-y-1"><span className="font-mono text-[11px] font-medium text-accent">{item.symbol}</span><h3 className="text-sm font-semibold text-foreground">{item.name}</h3></div><div className="mt-1 flex flex-wrap gap-1"><span className="rounded bg-accent/10 px-1.5 text-[11px] text-accent">{assetType === 'etf' ? '场内 ETF' : 'A 股'}</span><span className="rounded border border-warning/25 bg-warning/5 px-1.5 text-[11px] text-warning">命中 {item.hit_count} 条策略</span></div></div>
+      <div className="min-w-0"><div className="flex flex-wrap items-center gap-x-2 gap-y-1"><span className="font-mono text-[11px] font-medium text-accent">{item.symbol}</span><h3 className="text-sm font-semibold text-foreground">{item.name}</h3></div><div className="mt-1 flex flex-wrap gap-1"><span className="rounded bg-accent/10 px-1.5 text-[11px] text-accent">{assetType === 'etf' ? '场内 ETF' : 'A 股'}</span><span className="rounded border border-border px-1.5 text-[11px] text-secondary">排名 #{rank}</span><span className="rounded border border-warning/25 bg-warning/5 px-1.5 text-[11px] text-warning">命中 {item.hit_count} 条策略</span></div></div>
       <div className="shrink-0 text-right"><div className="font-mono text-base font-semibold text-foreground">{numberText(metrics.close)}</div><div className={`font-mono text-xs ${metrics.change_pct == null ? 'text-muted' : metrics.change_pct >= 0 ? 'text-bull' : 'text-bear'}`}>{formatPct(metrics.change_pct)}</div><div className="mt-0.5 text-[10px] text-muted">{candidatePriceLabel(item)}</div></div>
     </button>
     <div className="flex-1 space-y-2.5 p-3">

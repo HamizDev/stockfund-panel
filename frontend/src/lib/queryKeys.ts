@@ -110,6 +110,8 @@ export const QK = {
   monitorRuleOptions:   ['monitor-rule-options'] as const,
   lots:                 ['lots'] as const,
   lotsKline:            (symbols: string) => ['lots-kline', symbols] as const,
+  holdingsDailyReview: (scope: 'lots' | 'fund', holdingSignature: string) =>
+    ['holdings-daily-review', scope, holdingSignature] as const,
 
   // 模拟盘 (多账户: 键按账户隔离; paperAll 作账户无关失效前缀)
   paperAll:             ['paper'] as const,

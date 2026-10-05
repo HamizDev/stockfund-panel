@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { Activity, ArrowUpRight, Clock3, Database, Loader2, Sparkles } from 'lucide-react'
+import { Activity, ArrowUpRight, Clock3, Database, Loader2, Search, Sparkles } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import { api } from '@/lib/api'
 import { fundApi, type AiFundType, type FundProfile, type FundRankItem } from './client'
 import { FundCandidateCard } from './FundCandidateCard'
 import { FundResearchPanel, rememberFundResearch } from './FundResearchPanel'
+import { DEFAULT_CANDIDATE_PREVIEW_LIMIT, previewCandidates } from '../candidatePreview'
+import { fundRankingBasis, mergeFundRankingCandidates, rankFundCandidates } from './candidateRanking'
 
 const FUND_TYPES: Array<{ value: AiFundType; label: string }> = [
   { value: 'all', label: '全部类型' },
@@ -27,6 +29,7 @@ const HORIZONS = [
 const RESULT_STORAGE_KEY = 'stockfund.ai-fund-screener.result.v1'
 const MAX_SAVED_FUND_ANALYSES = 24
 const MAX_SAVED_FUND_ANALYSIS_CHARS = 30_000
+const FUND_RANKING_LOOKUP_LIMIT = 50
 
 function isAiFundType(value: string): value is AiFundType {
   return FUND_TYPES.some((option) => option.value === value)
@@ -46,9 +49,11 @@ type SavedResult = {
   candidates: FundRankItem[]
   selectedCode: string | null
   report: string
+  aiComparedCandidateCount?: number
   retrievedAt: number | null
   resultHorizon: string
   resultFundType?: AiFundType
+  resultShare?: string
   fundAnalyses?: Record<string, PersistedFundAnalysis>
 }
 
@@ -85,6 +90,7 @@ function loadSavedResult(): SavedResult | null {
         typeof value.fundType !== 'string' || typeof value.horizon !== 'string' ||
         typeof value.share !== 'string' || typeof value.resultHorizon !== 'string' ||
         (value.resultFundType !== undefined && !isAiFundType(value.resultFundType)) ||
+        (value.aiComparedCandidateCount !== undefined && (!Number.isInteger(value.aiComparedCandidateCount) || value.aiComparedCandidateCount < 0)) ||
         (value.unavailableTypes !== undefined && (!Array.isArray(value.unavailableTypes) ||
           !value.unavailableTypes.every((item) => typeof item === 'string' && isAiFundCategory(item)))) ||
         (value.selectedCode !== null && typeof value.selectedCode !== 'string') ||
@@ -174,22 +180,75 @@ export function AiFundScreenerPage() {
     (saved?.unavailableTypes ?? []).filter(isAiFundCategory),
   )
   const [selectedCode, setSelectedCode] = useState<string | null>(saved?.selectedCode ?? null)
+  const [candidateSearch, setCandidateSearch] = useState('')
   const [report, setReport] = useState(saved?.report ?? '')
+  const [aiComparedCandidateCount, setAiComparedCandidateCount] = useState(saved?.aiComparedCandidateCount ?? saved?.candidates.length ?? 0)
   const [error, setError] = useState('')
   const [retrievedAt, setRetrievedAt] = useState<number | null>(saved?.retrievedAt ?? null)
   const [resultHorizon, setResultHorizon] = useState(saved?.resultHorizon ?? '1y')
   const [resultFundType, setResultFundType] = useState<AiFundType>(() =>
     saved?.resultFundType ?? (saved && isAiFundType(saved.fundType) ? saved.fundType : 'all'),
   )
+  const [resultShare, setResultShare] = useState(saved?.resultShare ?? saved?.share ?? 'all')
   const [researchProgress, setResearchProgress] = useState<{ completed: number; total: number; code?: string } | null>(null)
   const [detailTab, setDetailTab] = useState<DetailTab>('compare')
   const [fundAnalysisByCode, setFundAnalysisByCode] = useState<Record<string, FundAiAnalysis>>(() => saved?.fundAnalyses ?? {})
+  const [visibleCandidateLimit, setVisibleCandidateLimit] = useState(DEFAULT_CANDIDATE_PREVIEW_LIMIT)
+  const [rankingGeneration, setRankingGeneration] = useState(0)
   const controllerRef = useRef<AbortController | null>(null)
   const analysisControllerRef = useRef<{ code: string; controller: AbortController } | null>(null)
   const candidateListRef = useRef<HTMLElement | null>(null)
   const selectedCandidateRef = useRef<HTMLElement | null>(null)
   const detailPanelRef = useRef<HTMLElement | null>(null)
   const model = useQuery({ queryKey: ['ai-fund-model-status'], queryFn: api.strategyAiStatus, staleTime: 60_000 })
+  const searchActive = candidateSearch.trim().length > 0
+  const extraRankingQuery = useQuery({
+    queryKey: ['ai-fund-screener-expanded-rankings', resultFundType, resultHorizon, resultShare, rankingGeneration],
+    enabled: candidates.length > 0 && (searchActive || visibleCandidateLimit > DEFAULT_CANDIDATE_PREVIEW_LIMIT),
+    staleTime: 5 * 60_000,
+    queryFn: async ({ signal }) => {
+      const types: AiFundCategory[] = resultFundType === 'all'
+        ? FUND_TYPES.filter(option => option.value !== 'all').map(option => option.value as AiFundCategory)
+        : [resultFundType]
+      const rankings = await Promise.all(types.map(async (type) => {
+        const response = await fundApi.screener(type, {
+          share: resultShare,
+          sortBy: resultHorizon,
+          limit: FUND_RANKING_LOOKUP_LIMIT,
+          signal,
+        })
+        return (response.items ?? []).map((item, index): FundRankItem => ({
+          ...item, nav: item.nav ?? null, nav_date: item.nav_date ?? null,
+          purchase_fee_text: item.purchase_fee_text ?? null,
+          fund_type: type, ranking_rank: index + 1,
+        }))
+      }))
+      return rankings.flat()
+    },
+  })
+  useEffect(() => {
+    const additional = extraRankingQuery.data
+    if (!additional?.length) return
+    setCandidates(current => mergeFundRankingCandidates(current, additional, resultFundType))
+  }, [extraRankingQuery.data, resultFundType])
+  const rankedCandidates = useMemo(() => rankFundCandidates(candidates, resultFundType), [candidates, resultFundType])
+  const matchingCandidates = useMemo(() => {
+    const term = candidateSearch.trim().toLocaleLowerCase()
+    return rankedCandidates.filter(({ item, category }) => !term || [item.code, item.name, category ?? '', item.share_class]
+      .some((value) => value.toLocaleLowerCase().includes(term)))
+  }, [candidateSearch, rankedCandidates])
+  const visibleCandidates = useMemo(
+    () => previewCandidates(matchingCandidates, {
+      expanded: visibleCandidateLimit >= matchingCandidates.length,
+      searchActive,
+      limit: visibleCandidateLimit,
+    }),
+    [matchingCandidates, visibleCandidateLimit, searchActive],
+  )
+  const hasAdditionalRankingCandidates = (extraRankingQuery.data ?? []).some(
+    (item) => !candidates.some((candidate) => candidate.code === item.code),
+  )
+  const resultHorizonLabel = HORIZONS.find((period) => period.value === resultHorizon)?.label ?? resultHorizon
 
   useEffect(() => () => {
     controllerRef.current?.abort()
@@ -198,15 +257,15 @@ export function AiFundScreenerPage() {
   useEffect(() => {
     if (phase !== 'done' || !candidates.length) return
     const result: SavedResult = {
-      fundType, horizon, share, unavailableTypes, candidates, selectedCode, report, retrievedAt,
-      resultHorizon, resultFundType, fundAnalyses: saveableFundAnalyses(fundAnalysisByCode),
+      fundType, horizon, share, unavailableTypes, candidates, selectedCode, report, aiComparedCandidateCount, retrievedAt,
+      resultHorizon, resultFundType, resultShare, fundAnalyses: saveableFundAnalyses(fundAnalysisByCode),
     }
     try {
       window.sessionStorage.setItem(RESULT_STORAGE_KEY, JSON.stringify(result))
     } catch {
       // Storage may be disabled; the page remains usable without persistence.
     }
-  }, [phase, fundType, horizon, share, unavailableTypes, candidates, selectedCode, report, retrievedAt, resultHorizon, resultFundType, fundAnalysisByCode])
+  }, [phase, fundType, horizon, share, unavailableTypes, candidates, selectedCode, report, aiComparedCandidateCount, retrievedAt, resultHorizon, resultFundType, resultShare, fundAnalysisByCode])
   const selected = useMemo(
     () => candidates.find((candidate) => candidate.code === selectedCode) ?? candidates[0] ?? null,
     [candidates, selectedCode],
@@ -360,31 +419,80 @@ export function AiFundScreenerPage() {
   }
 
   async function run() {
+    const previousResult = {
+      candidates,
+      unavailableTypes,
+      selectedCode,
+      report,
+      aiComparedCandidateCount,
+      retrievedAt,
+      resultHorizon,
+      resultFundType,
+      resultShare,
+      candidateSearch,
+      visibleCandidateLimit,
+      detailTab,
+    }
+    const keepPreviousResult = (message: string) => {
+      setError(message)
+      setResearchProgress(null)
+      if (!previousResult.candidates.length) {
+        setPhase('error')
+        return
+      }
+      setCandidates(previousResult.candidates)
+      setUnavailableTypes(previousResult.unavailableTypes)
+      setSelectedCode(previousResult.selectedCode)
+      setReport(previousResult.report)
+      setAiComparedCandidateCount(previousResult.aiComparedCandidateCount)
+      setRetrievedAt(previousResult.retrievedAt)
+      setResultHorizon(previousResult.resultHorizon)
+      setResultFundType(previousResult.resultFundType)
+      setResultShare(previousResult.resultShare)
+      setCandidateSearch(previousResult.candidateSearch)
+      setVisibleCandidateLimit(previousResult.visibleCandidateLimit)
+      setDetailTab(previousResult.detailTab)
+      setPhase('done')
+    }
     controllerRef.current?.abort()
-    analysisControllerRef.current?.controller.abort()
+    const activeAnalysis = analysisControllerRef.current
+    activeAnalysis?.controller.abort()
+    if (activeAnalysis) {
+      setFundAnalysisByCode((current) => {
+        const analysis = current[activeAnalysis.code]
+        return analysis?.status === 'loading'
+          ? { ...current, [activeAnalysis.code]: { ...analysis, status: 'cancelled', error: '重新生成候选时停止接收' } }
+          : current
+      })
+    }
     analysisControllerRef.current = null
-    setFundAnalysisByCode({})
     setDetailTab('compare')
     const controller = new AbortController()
     controllerRef.current = controller
     setCandidates([])
+    setRankingGeneration((current) => current + 1)
+    setCandidateSearch('')
+    setVisibleCandidateLimit(DEFAULT_CANDIDATE_PREVIEW_LIMIT)
     setUnavailableTypes([])
     setSelectedCode(null)
     setReport('')
+    setAiComparedCandidateCount(0)
     setError('')
     setRetrievedAt(null)
     setResultHorizon(horizon)
     setResultFundType(fundType)
+    setResultShare(share)
     setResearchProgress(null)
     setPhase('loading')
     let sawDone = false
     let reportText = ''
     let candidateCount = 0
     try {
-      for await (const event of fundApi.aiPickStream({ fund_type: fundType, horizon, share }, controller.signal)) {
+      for await (const event of fundApi.aiPickStream({ fund_type: fundType, horizon, share, limit: DEFAULT_CANDIDATE_PREVIEW_LIMIT }, controller.signal)) {
         if (event.type === 'meta') {
           const items = event.candidates ?? []
           candidateCount = items.length
+          setAiComparedCandidateCount(items.length)
           setCandidates(items)
           setUnavailableTypes(event.unavailable_types ?? [])
           setSelectedCode(items[0]?.code ?? null)
@@ -409,8 +517,7 @@ export function AiFundScreenerPage() {
           reportText += content
           setReport((current) => current + content)
         } else if (event.type === 'error') {
-          setError(event.message || 'AI 选基暂不可用')
-          setPhase('error')
+          keepPreviousResult(event.message || 'AI 选基暂不可用')
           return
         } else if (event.type === 'done') {
           sawDone = true
@@ -419,18 +526,15 @@ export function AiFundScreenerPage() {
       }
       if (controller.signal.aborted) return
       if (!sawDone) {
-        setError('AI 选基数据流结束但未收到完成标记，结果不完整；请重试。')
-        setPhase('error')
+        keepPreviousResult('AI 选基数据流结束但未收到完成标记，结果不完整；请重试。')
       } else if (!reportText.trim()) {
-        setError(candidateCount ? 'AI 选基已结束，但没有返回整体分析内容；请重试。' : '本次没有可分析的候选或整体说明；请调整条件后重试。')
-        setPhase('error')
+        keepPreviousResult(candidateCount ? 'AI 选基已结束，但没有返回整体分析内容；请重试。' : '本次没有可分析的候选或整体说明；请调整条件后重试。')
       } else {
         setPhase('done')
       }
     } catch (cause) {
       if (controller.signal.aborted) return
-      setError(cause instanceof Error ? cause.message : 'AI 选基请求失败')
-      setPhase('error')
+      keepPreviousResult(cause instanceof Error ? cause.message : 'AI 选基请求失败')
     }
   }
 
@@ -443,6 +547,7 @@ export function AiFundScreenerPage() {
         <span><span className="font-medium text-foreground">研究候选</span> · 公开排名与模型辅助比较 · 数据缺口按来源标示 · 不构成交易指令</span>
         {fundType === 'all' && <span className="text-muted">全部含股票、混合、指数、债券榜单，按类别抽取。</span>}
         {model.data && !model.data.configured && <span className="text-warning">尚未配置 AI 模型，前往 <Link className="text-accent underline" to="/settings?tab=ai">AI 设置</Link>连接。</span>}
+        {!!candidates.length && <span className="basis-full">{fundRankingBasis(resultFundType, resultHorizonLabel)} 本次整体 AI 对比使用 {aiComparedCandidateCount} 只候选；搜索扩展出的榜单项不会自动触发 AI，需按需点击单只分析。</span>}
       </div>
 
       <section className="rounded-xl border border-border bg-surface p-3">
@@ -462,20 +567,29 @@ export function AiFundScreenerPage() {
           ? `正在读取基金研究资料：${researchProgress.completed}/${researchProgress.total}${researchProgress.code ? ` · ${researchProgress.code}` : ''}`
           : '基金资料已读取，正在生成 AI 对比说明…'}
       </div>}
-      {error && <div role="alert" className="rounded-xl border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div>}
+      {error && <div role="alert" className="rounded-xl border border-danger/30 bg-danger/10 p-4 text-sm text-danger"><div>{error}</div>{candidates.length > 0 && <div className="mt-1 text-xs">上次成功结果仍显示：{resultFundType} · {resultHorizonLabel} · {resultShare} 份额 · {retrievedAt ? new Date(retrievedAt).toLocaleString() : '时间未知'}。候选、单只分析和整体报告均属于这组条件。</div>}</div>}
       {!!unavailableTypes.length && <div role="status" className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">以下类型榜单暂不可用，本次只展示已返回的类别：{unavailableTypes.join('、')}。</div>}
 
       {!!candidates.length && <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_336px]">
         <section ref={candidateListRef} className="min-w-0 rounded-xl border border-border bg-surface">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
-            <div className="text-sm font-semibold">历史榜单候选 <span className="text-xs font-normal text-muted">{candidates.length} 只</span></div>
+          <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
+            <div className="text-sm font-semibold">历史榜单候选 <span className="text-xs font-normal text-muted">显示 {visibleCandidates.length} / 匹配 {matchingCandidates.length} · 已加载 {candidates.length} 只</span></div>
+            <label className="ml-auto flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-secondary"><Search className="h-3.5 w-3.5" /><input aria-label="搜索基金候选" value={candidateSearch} onChange={event => setCandidateSearch(event.target.value)} placeholder="代码 / 名称 / 类型" className="w-28 bg-transparent text-foreground outline-none placeholder:text-muted md:w-40" /></label>
             <div className="flex items-center gap-1 text-[11px] text-muted"><Database className="h-3.5 w-3.5" />东方财富公开基金排名</div>
           </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 px-4 py-2 text-[11px] text-muted">
+            <span>{fundRankingBasis(resultFundType, resultHorizonLabel)}</span>
+            {searchActive && <span className="text-accent">搜索会读取并查找每类最多 50 只符合筛选的公开候选</span>}
+          </div>
           <div className="grid gap-2.5 p-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr))]">
-            {candidates.map((item) => <FundCandidateCard
+            {visibleCandidates.map(({ item, rank, category, rankSource }) => <FundCandidateCard
               key={item.code}
               item={item}
               selected={selected?.code === item.code}
+              rank={rank}
+              rankLabel={rankSource === 'filtered-ranking'
+                ? `${category ? `${category}筛选候选` : resultFundType === 'all' ? '未分类筛选候选' : `${resultFundType}筛选候选`} #${rank}`
+                : `${category ? `${category}类别候选` : resultFundType === 'all' ? '未分类候选' : `${resultFundType}类别候选`} #${rank}`}
               resultFundType={resultFundType}
               horizon={resultHorizon}
               analysisStatus={fundAnalysisByCode[item.code]?.status}
@@ -491,6 +605,19 @@ export function AiFundScreenerPage() {
               onViewAnalysis={openCandidateAnalysis}
             />)}
           </div>
+          {!visibleCandidates.length && <div className="p-8 text-center text-sm text-muted">没有符合当前搜索的基金候选</div>}
+          {extraRankingQuery.isError && <div role="alert" className="border-t border-border px-4 py-2 text-center text-xs text-warning">额外公开榜单暂不可用；仍可查看和搜索已加载的候选。</div>}
+          {extraRankingQuery.isFetching && <div role="status" className="border-t border-border px-4 py-2 text-center text-xs text-muted">正在读取公开排名，以查找前 10 名以外的候选…</div>}
+          {!searchActive && <div className="flex flex-wrap justify-center gap-2 border-t border-border px-4 py-2">
+            {visibleCandidateLimit < matchingCandidates.length && <button type="button" onClick={() => setVisibleCandidateLimit(value => Math.min(value + DEFAULT_CANDIDATE_PREVIEW_LIMIT, matchingCandidates.length))} className="min-h-9 rounded-md px-3 text-xs text-accent hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+              再显示 10 只（当前 {visibleCandidates.length}/{matchingCandidates.length}）
+            </button>}
+            {visibleCandidateLimit > DEFAULT_CANDIDATE_PREVIEW_LIMIT && <button type="button" onClick={() => setVisibleCandidateLimit(DEFAULT_CANDIDATE_PREVIEW_LIMIT)} className="min-h-9 rounded-md px-3 text-xs text-secondary hover:bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">收起至前 10 只</button>}
+            {visibleCandidateLimit >= matchingCandidates.length && candidates.length <= DEFAULT_CANDIDATE_PREVIEW_LIMIT && !extraRankingQuery.isFetching && (!extraRankingQuery.isSuccess || hasAdditionalRankingCandidates) && <button type="button" onClick={() => extraRankingQuery.isError ? void extraRankingQuery.refetch() : setVisibleCandidateLimit(DEFAULT_CANDIDATE_PREVIEW_LIMIT + 1)} className="min-h-9 rounded-md px-3 text-xs text-accent hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+              {extraRankingQuery.isError ? '重试加载榜单' : extraRankingQuery.data ? '显示更多公开榜单候选' : '加载更多公开榜单候选'}
+            </button>}
+          </div>}
+          {extraRankingQuery.isSuccess && candidates.length <= DEFAULT_CANDIDATE_PREVIEW_LIMIT && !hasAdditionalRankingCandidates && <div role="status" className="border-t border-border px-4 py-2 text-center text-xs text-muted">公开榜单没有返回更多可用候选。</div>}
         </section>
 
         <aside ref={detailPanelRef} aria-label="基金详细分析" className="min-w-0 rounded-xl border border-border bg-surface p-4 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:overflow-y-auto">

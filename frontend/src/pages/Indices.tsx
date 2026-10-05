@@ -59,6 +59,7 @@ const PINNED_INDEXES = [
   { symbol: '399001.SZ', name: '深证成指' },
   { symbol: '399006.SZ', name: '创业板指' },
   { symbol: '000680.SH', name: '科创综指' },
+  { symbol: '000688.SH', name: '科创50' },
 ]
 
 export function Indices() {
@@ -74,7 +75,7 @@ export function Indices() {
   const caps = useCapabilities()
   const hasMinuteCap = !!caps.data?.capabilities?.['kline.minute.batch']
 
-  // 指数标的固定核心四只 (产品契约, 不再提供全指数搜索/浏览)
+  // 指数标的固定核心五只 (产品契约, 不再提供全指数搜索/浏览)
   const topRows: IndexInstrument[] = PINNED_INDEXES.map(p => ({
     symbol: p.symbol, name: p.name, asset_type: 'index' as const,
   }))

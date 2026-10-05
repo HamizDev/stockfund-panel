@@ -38,4 +38,17 @@ describe('fund API errors', () => {
     expect(events.map((event) => event.type)).toEqual(['meta', 'delta', 'done'])
     expect(events[1].content).toBe('分析')
   })
+
+  it('requests ten AI fund candidates by default without breaking streamed events', async () => {
+    let requestBody: Record<string, unknown> | undefined
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return new Response('{"type":"meta","candidates":[]}\n{"type":"done"}\n', { status: 200 })
+    }))
+
+    const events = []
+    for await (const event of fundApi.aiPickStream({ fund_type: 'all', horizon: '1y', share: 'all' })) events.push(event)
+    expect(requestBody).toMatchObject({ fund_type: 'all', horizon: '1y', share: 'all', limit: 10 })
+    expect(events.map(event => event.type)).toEqual(['meta', 'done'])
+  })
 })

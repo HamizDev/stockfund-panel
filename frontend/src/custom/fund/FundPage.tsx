@@ -17,6 +17,7 @@ import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import { PageHeader } from '@/components/PageHeader'
 import { FundScreener } from './FundScreener'
 import { FundResearchPanel } from './FundResearchPanel'
+import { HoldingsDailyReview, holdingsReviewSignature } from '@/components/HoldingsDailyReview'
 import { cn } from '@/lib/cn'
 import {
   fundApi,
@@ -83,12 +84,19 @@ function useWatchlist() {
 function usePortfolio() {
   const [items, setItems] = useState<FundPortfolioItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [loaded, setLoaded] = useState(false)
+  const [error, setError] = useState('')
+  const loadedRef = useRef(false)
   const refresh = useCallback(async () => {
+    if (!loadedRef.current) setLoading(true)
     try {
       const r = await fundApi.portfolio()
       setItems(r.items)
-    } catch {
-      /* 忽略, 持仓为空时不展示错误 */
+      setError('')
+      loadedRef.current = true
+      setLoaded(true)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '基金持仓读取失败')
     } finally {
       setLoading(false)
     }
@@ -96,7 +104,7 @@ function usePortfolio() {
   useEffect(() => {
     refresh()
   }, [refresh])
-  return { items, loading, refresh, setItems }
+  return { items, loading, loaded, error, refresh, setItems }
 }
 
 function NavChart({ nav }: { nav: FundNavPoint[] }) {
@@ -783,6 +791,7 @@ export function FundPage() {
   )
 
   const inWatch = useMemo(() => new Set(items.map((w) => w.thscode)), [items])
+  const reviewSignature = useMemo(() => holdingsReviewSignature(portfolio.items), [portfolio.items])
   const etfItems = items.filter((w) => isTradable(w.kind_label))
   const otcItems = items.filter((w) => !isTradable(w.kind_label))
   const [tab, setTab] = useState<'watch' | 'screener'>('watch')
@@ -913,12 +922,22 @@ export function FundPage() {
       {/* 持仓 */}
       <PortfolioSection
         items={portfolio.items}
+        loading={portfolio.loading}
+        error={portfolio.error}
         onOpen={(it) => openFund({ thscode: it.thscode, ticker: null, name: it.name ?? it.thscode, asset_type: 'fund-otc', kind_label: '场外基金' })}
         onRemove={async (thscode) => {
           await fundApi.removePosition(thscode)
           portfolio.refresh()
         }}
       />
+      {portfolio.loaded && (
+        <HoldingsDailyReview
+          scope="fund"
+          holdingSignature={reviewSignature}
+          loaded
+          holdingsRefreshError={portfolio.error}
+        />
+      )}
 
       <p className="text-xs leading-5 text-muted">
         场外基金净值优先读取扶摇，未配置或暂不可用时使用公开净值来源；页面标注具体数据来源、单位净值口径和更新日期。ETF 行情和穿透估值依赖扶摇对应接口。
@@ -932,10 +951,14 @@ export function FundPage() {
 /** 我的持仓: 显示持仓金额、持有收益, 支持删除。添加从基金详情页的"加入持仓"进入。 */
 function PortfolioSection({
   items,
+  loading,
+  error,
   onOpen,
   onRemove,
 }: {
   items: FundPortfolioItem[]
+  loading: boolean
+  error: string
   onOpen: (i: FundPortfolioItem) => void
   onRemove: (thscode: string) => void
 }) {
@@ -945,7 +968,11 @@ function PortfolioSection({
   return (
     <Card>
       <SectionTitle icon={BarChart3} title="我的持仓" />
-      {items.length === 0 ? (
+      {loading ? (
+        <div className="text-[11px] text-muted">正在读取基金持仓…</div>
+      ) : error ? (
+        <div className="text-[11px] text-danger" role="alert">基金持仓读取失败：{error}</div>
+      ) : items.length === 0 ? (
         <div className="text-[11px] text-muted">
           还没有持仓。在基金详情页点"加入持仓"并填写金额即可跟踪。
         </div>

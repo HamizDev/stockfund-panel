@@ -212,6 +212,8 @@ export function fundCandidateDataGap(research?: FundResearch): string {
 interface FundCandidateCardProps {
   item: FundRankItem
   selected: boolean
+  rank?: number
+  rankLabel?: string
   resultFundType: AiFundType
   horizon: string
   analysisStatus?: FundAnalysisStatus
@@ -230,6 +232,8 @@ interface FundCandidateCardProps {
 export function FundCandidateCard({
   item,
   selected,
+  rank,
+  rankLabel,
   resultFundType,
   horizon,
   analysisStatus,
@@ -314,6 +318,7 @@ export function FundCandidateCard({
           <div className="truncate text-sm font-semibold leading-[18px] text-foreground">{item.name || '基金名称未提供'}</div>
           <div className="mt-0.5 font-mono text-[11px] leading-[18px] text-muted">{copyCode}</div>
           <div className="mt-1 flex flex-wrap gap-1">
+            {rank != null && <span className="rounded border border-accent/25 bg-accent/10 px-1.5 py-0.5 text-[11px] leading-4 text-accent">{rankLabel || `榜单顺序 #${rank}`}</span>}
             {item.share_class && <span className="rounded border border-accent/20 bg-accent/10 px-1.5 py-0.5 text-[11px] leading-4 text-accent">{item.share_class} 类</span>}
             {category && <span className="rounded border border-border/70 bg-elevated/60 px-1.5 py-0.5 text-[11px] leading-4 text-secondary">{category}</span>}
           </div>

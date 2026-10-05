@@ -1074,6 +1074,34 @@ export interface Lot {
   created_at?: string
 }
 
+export type HoldingsDailyReviewScope = 'lots' | 'fund'
+
+export interface HoldingsDailyReviewReport {
+  report_date: string
+  generated_at_ms: number
+  model: string
+  content: string
+  observations: Array<{
+    symbol: string
+    name?: string
+    asset_type: string
+    data_date: string | null
+    warning?: string
+  }>
+  warnings: string[]
+  error?: string
+}
+
+export interface HoldingsDailyReviewState {
+  status: 'not_generated' | 'running' | 'complete' | 'failed' | 'empty' | 'unconfigured'
+  /** 服务端北京时间日期；前端不依据浏览器本地时区计算当日报告状态。 */
+  today: string
+  holdings_count: number
+  holdings_changed: boolean
+  model_changed: boolean
+  report: HoldingsDailyReviewReport | null
+}
+
 // ===== Paper (虚拟账户/模拟盘) =====
 /** 多账户: 追加 ?account= 查询参数 (缺省账户由后端 default 兜底)。 */
 function accUrl(base: string, account?: string): string {
@@ -3788,6 +3816,19 @@ export const api = {
   // ===== Lots (批次登记, 页面名"持仓提醒"; 保存/删除自动同步监控规则) =====
   lotsList: () =>
     request<{ lots: Lot[] }>('/api/lots'),
+
+  /** 每日登记持仓 AI 研究：GET 读取状态，POST 快速排队，不修改持仓或交易。 */
+  holdingsDailyReview: (scope: HoldingsDailyReviewScope) =>
+    request<HoldingsDailyReviewState>(
+      scope === 'lots' ? '/api/lots/review' : '/api/custom/fund/portfolio/review',
+      { quiet: true },
+    ),
+
+  startHoldingsDailyReview: (scope: HoldingsDailyReviewScope, force = false) =>
+    request<HoldingsDailyReviewState>(
+      scope === 'lots' ? '/api/lots/review' : '/api/custom/fund/portfolio/review',
+      { method: 'POST', body: JSON.stringify({ force }), quiet: true },
+    ),
 
   lotSave: (lot: Lot) =>
     request<{ ok: boolean; lot: Lot }>('/api/lots', {

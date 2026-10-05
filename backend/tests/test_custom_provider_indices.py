@@ -76,15 +76,20 @@ def _service_with_provider(
 
 
 def test_custom_provider_fetch_appends_index_records(monkeypatch):
-    provider = _FakeProvider([_stock_rec()], [_index_rec("000001.SH"), _index_rec("399001.SZ")])
+    provider = _FakeProvider([_stock_rec()], [
+        _index_rec("000001.SH"),
+        _index_rec("399001.SZ"),
+        _index_rec("000688.SH"),
+    ])
     service, captured, replacements = _service_with_provider(monkeypatch, provider)
     service._fetch_full_market_quotes()
 
     assert len(captured) == 1
     symbols = [r["symbol"] for r in captured[0]]
     assert "600519.SH" in symbols and "000001.SH" in symbols and "399001.SZ" in symbols
+    assert "000688.SH" in symbols
     assert replacements == [True]
-    # 请求清单 = 核心四只 (无指数监控规则时)
+    # 请求清单 = 核心五只 (无指数监控规则时)
     assert provider.index_calls == [sorted(set(CORE_INDEX_SYMBOLS) | BENCHMARK_INDEX_SYMBOLS)]
 
 

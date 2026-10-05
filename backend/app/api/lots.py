@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from app.strategy import lots as lots_domain
 from app.strategy import monitor_rules
+from app.services import holdings_review
 
 router = APIRouter(prefix="/api/lots", tags=["lots"])
 
@@ -99,6 +100,21 @@ def sync_lot(request: Request, lot: dict) -> None:
 @router.get("")
 def list_lots(request: Request):
     return {"lots": lots_domain.load_all(_data_dir(request))}
+
+
+@router.get("/review")
+def holding_review_status(request: Request):
+    data_dir = _data_dir(request)
+    return holdings_review.status(data_dir, "lots", lots_domain.load_all(data_dir))
+
+
+@router.post("/review")
+async def holding_review_start(req: holdings_review.ReviewIn, request: Request):
+    data_dir = _data_dir(request)
+    return await holdings_review.start(
+        data_dir, "lots", lots_domain.load_all(data_dir),
+        lambda rows: holdings_review.collect_lots(request.app.state.repo, rows), force=req.force,
+    )
 
 
 @router.post("")

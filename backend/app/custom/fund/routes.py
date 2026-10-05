@@ -11,11 +11,12 @@ import time
 from collections.abc import AsyncIterable, AsyncIterator
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 
 from app.custom.fund import service as svc
 from app.custom.fund.client import FundError, FundNotConfiguredError, FuyaoFundClient
+from app.services import holdings_review
 
 logger = logging.getLogger(__name__)
 
@@ -85,18 +86,15 @@ class AiPickIn(BaseModel):
     fund_type: Literal["all", "股票型", "混合型", "指数型", "债券型"] = "all"
     horizon: Literal["1m", "3m", "6m", "1y", "2y", "3y"] = "1y"
     share: Literal["all", "A", "C"] = "all"
+    limit: int = Field(default=10, ge=1, le=16)
 
 
 _AI_PICK_TYPES = ("股票型", "混合型", "指数型", "债券型")
-_AI_PICK_LIMIT = 16
-_AI_PICK_PER_TYPE_LIMIT = 4
-
-
 _AI_PICK_PROMPT = """你是公募基金研究助手。
 仅根据提供的历史收益榜单和 research 公开资料, 从候选中挑选最多 5 只适合继续核对的研究候选, 并说明依据、数据限制和条件式研究计划。研究计划用于观察和核对, 不是个性化投资建议或下单指令。
 
 严格要求:
-- fund_type=all 仅表示股票型、混合型、指数型、债券型四类榜单; 每类最多提供 4 只候选, fund_type 字段标明其榜单类别。
+- fund_type=all 仅表示股票型、混合型、指数型、债券型四类榜单; 按榜单位次轮流取样, 总数以实际候选为准, fund_type 字段标明其榜单类别。
   不得声称覆盖所有基金类别。不同类别的风险和业绩比较基准可能不同, 不得仅按历史收益给出跨类别的全局优劣结论;
   应先说明类别差异, 仅在口径相同或可比时比较收益, 缺少风险或基准信息时明确说明。
 - 只能引用候选清单内的数值, 包括 research 中实际可用的费率、回撤、持仓和日期。
@@ -298,11 +296,11 @@ def build_router() -> APIRouter:
             raise HTTPException(status_code=502, detail="基金历史收益榜单暂不可用")
 
         field = f"growth_{req.horizon}"
-        per_type_limit = _AI_PICK_PER_TYPE_LIMIT if req.fund_type == "all" else _AI_PICK_LIMIT
         candidates = []
         seen_codes = set()
+        eligible = {}
         for fund_type in rank_types:
-            selected_for_type = 0
+            eligible[fund_type] = []
             for row in rankings.get(fund_type, []):
                 code = str(row.get("code") or "").strip()
                 if (
@@ -312,10 +310,19 @@ def build_router() -> APIRouter:
                     or (req.share != "all" and row.get("share_class") != req.share)
                 ):
                     continue
-                seen_codes.add(code)
-                candidates.append({**row, "fund_type": fund_type})
-                selected_for_type += 1
-                if selected_for_type >= per_type_limit or len(candidates) >= _AI_PICK_LIMIT:
+                eligible[fund_type].append({**row, "code": code, "fund_type": fund_type})
+        # Round-robin preserves category coverage without pretending that bond
+        # and equity historical returns form a comparable global top ranking.
+        while len(candidates) < req.limit and any(eligible.values()):
+            for fund_type in rank_types:
+                rows = eligible[fund_type]
+                while rows and rows[0]["code"] in seen_codes:
+                    rows.pop(0)
+                if rows:
+                    row = rows.pop(0)
+                    seen_codes.add(row["code"])
+                    candidates.append(row)
+                if len(candidates) >= req.limit:
                     break
         if not candidates:
             raise HTTPException(status_code=422, detail="当前筛选条件下没有可核对收益数据的基金")
@@ -449,6 +456,54 @@ def build_router() -> APIRouter:
             )
         svc.save_portfolio(items)
         return {"items": items}
+
+    @router.get("/portfolio/review")
+    def portfolio_review_status(request: Request):
+        return holdings_review.status(request.app.state.repo.store.data_dir, "fund", svc.load_portfolio())
+
+    @router.post("/portfolio/review")
+    async def portfolio_review_start(req: holdings_review.ReviewIn, request: Request):
+        from concurrent.futures import ThreadPoolExecutor
+
+        def collect_one(holding):
+            symbol = str(holding.get("thscode") or "").strip().upper()
+            item = {"symbol": symbol, "name": holding.get("name") or symbol,
+                    "asset_type": "fund" if symbol.endswith(".OF") else "etf",
+                    "data_date": None, "registered_holding": holding,
+                    "registration_values_as_of": None, "warning": "登记金额和收益未经实时核验，不代表今日盈亏。"}
+            try:
+                source = nav(symbol, range="year", nav_type="unit")
+                rows = sorted(source["nav"], key=lambda row: str(row.get("nav_date") or ""))
+                from app.market_time import cn_today
+                import math
+
+                rows = [row for row in rows if row.get("nav_date")
+                        and str(row["nav_date"]) <= cn_today().isoformat()
+                        and isinstance(row.get("unit_nav"), (int, float))
+                        and not isinstance(row["unit_nav"], bool)
+                        and math.isfinite(row["unit_nav"]) and row["unit_nav"] > 0]
+                item.update(nav=rows[-20:], nav_source=source.get("source"),
+                            data_date=rows[-1]["nav_date"] if rows else None)
+            except HTTPException:
+                item["warning"] += " 净值暂不可用，无法形成当前操作判断。"
+            try:
+                item["profile"] = profile(symbol)["profile"]
+            except HTTPException:
+                item["profile"] = None
+            if symbol.endswith(".OF"):
+                try:
+                    item["research"] = svc.research_model_context(research(symbol, "1y"))
+                except HTTPException:
+                    item["research"] = None
+            return item
+
+        def collect(rows):
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                return list(pool.map(collect_one, rows))
+
+        return await holdings_review.start(
+            request.app.state.repo.store.data_dir, "fund", svc.load_portfolio(), collect, force=req.force,
+        )
 
     @router.delete("/portfolio/{thscode}")
     def portfolio_del(thscode: str) -> dict:

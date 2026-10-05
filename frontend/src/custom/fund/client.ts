@@ -185,6 +185,8 @@ export interface FundRankItem {
   nav_date: string | null
   purchase_fee_text: string | null
   research?: FundResearch
+  /** Position in the filtered public screener response; this is not a global fund rank. Older saved rows may omit it. */
+  ranking_rank?: number
   growth_1w: number | null
   growth_1m: number | null
   growth_3m: number | null
@@ -377,15 +379,15 @@ export const fundApi = {
   },
   /** AI 对基金榜单候选进行研究排序，不自动执行交易。 */
   async *aiPickStream(
-    options: { fund_type: AiFundType; horizon: string; share: string },
+    options: { fund_type: AiFundType; horizon: string; share: string; limit?: number },
     signal?: AbortSignal,
   ): AsyncGenerator<AiPickEvent> {
-    yield* streamFundEvents<AiPickEvent>('/screener/ai', options, signal)
+    yield* streamFundEvents<AiPickEvent>('/screener/ai', { ...options, limit: options.limit ?? 10 }, signal)
   },
   /** 基金筛选与智能推荐 */
   screener(
     fundType: string = '股票型',
-    opts: { share?: string; sortBy?: string; limit?: number; recommend?: boolean } = {},
+    opts: { share?: string; sortBy?: string; limit?: number; recommend?: boolean; signal?: AbortSignal } = {},
   ): Promise<{
     fund_type: string
     mode: 'manual' | 'recommend'
@@ -415,6 +417,9 @@ export const fundApi = {
     items?: Array<{
       code: string
       name: string
+      nav?: number | null
+      nav_date?: string | null
+      purchase_fee_text?: string | null
       growth_1w: number | null
       growth_1m: number | null
       growth_3m: number | null
@@ -432,7 +437,7 @@ export const fundApi = {
       limit: String(opts.limit ?? 50),
       recommend: String(!!opts.recommend),
     })
-    return req(`/screener?${p}`)
+    return req(`/screener?${p}`, { signal: opts.signal })
   },
 }
 

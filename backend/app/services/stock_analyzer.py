@@ -77,7 +77,8 @@ def _clean_rows(df: pl.DataFrame, keep_cols: list[str]) -> list[dict]:
     return rows
 
 
-def _load_financials(data_dir: Path, symbol: str) -> dict[str, list[dict]]:
+def _load_financials(data_dir: Path, symbol: str, *,
+                     frames: dict[str, pl.DataFrame] | None = None) -> dict[str, list[dict]]:
     """读取该标的核心财务指标 + 利润表(只取最有信息量的两张表)。
 
     财务面只需要关键指标(ROE / 增速 / 毛利率 等),不需要把 4 张表全塞进上下文
@@ -85,7 +86,9 @@ def _load_financials(data_dir: Path, symbol: str) -> dict[str, list[dict]]:
     """
     out: dict[str, list[dict]] = {}
     for table in ("metrics", "income"):
-        df = get_financial_df(data_dir, table)
+        # A multi-holding report can reuse two snapshots instead of reading
+        # entire financial tables again for each registered stock.
+        df = frames.get(table, pl.DataFrame()) if frames is not None else get_financial_df(data_dir, table)
         if df.is_empty():
             out[table] = []
             continue

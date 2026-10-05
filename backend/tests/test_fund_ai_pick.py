@@ -117,10 +117,10 @@ def test_ai_pick_all_merges_unique_funds_with_balanced_source_types(monkeypatch)
 
     assert response.status_code == 200
     candidates = json.loads(response.text.splitlines()[0])["candidates"]
-    assert len(candidates) == routes._AI_PICK_LIMIT
+    assert len(candidates) == 10
     assert len({row["code"] for row in candidates}) == len(candidates)
     assert {kind: sum(row["fund_type"] == kind for row in candidates) for kind in routes._AI_PICK_TYPES} == {
-        kind: routes._AI_PICK_PER_TYPE_LIMIT for kind in routes._AI_PICK_TYPES
+        "股票型": 3, "混合型": 3, "指数型": 2, "债券型": 2,
     }
     shared = next(row for row in candidates if row["code"] == "100000")
     assert shared["fund_type"] == "股票型"
@@ -219,6 +219,33 @@ def test_ai_pick_sends_only_matching_candidates_to_model(monkeypatch):
     assert [row["code"] for row in events[0]["candidates"]] == ["011370"]
     assert "011371" not in seen[1]["content"]
     assert events[-1]["type"] == "done"
+
+
+@pytest.mark.parametrize("limit", [10, 16])
+def test_single_category_preserves_source_order_and_only_enriches_requested_limit(monkeypatch, limit):
+    from app.services import ai_provider
+
+    rows = [_rank_row(str(120000 + i)) for i in range(30)]
+    enriched = []
+    monkeypatch.setattr(service, "akshare_rank", lambda *_args, **_kwargs: rows)
+    monkeypatch.setattr(service, "fund_research", lambda code, *_args, **_kwargs:
+        enriched.append(code) or {"fees": {"status": "unavailable"},
+                                "risk": {"status": "unavailable"},
+                                "holdings": {"status": "unavailable"}})
+    monkeypatch.setattr(ai_provider, "stream_ai_text", _fake_ai_stream)
+    response = _ai_client().post("/api/custom/fund/screener/ai", json={
+        "fund_type": "混合型", "limit": limit,
+    })
+    assert response.status_code == 200
+    candidates = json.loads(response.text.splitlines()[0])["candidates"]
+    assert [row["code"] for row in candidates] == [row["code"] for row in rows[:limit]]
+    assert len(enriched) == limit
+
+
+@pytest.mark.parametrize("limit", [0, 17])
+def test_candidate_limit_rejects_out_of_range_before_fetching(monkeypatch, limit):
+    monkeypatch.setattr(service, "akshare_rank", lambda *_args, **_kwargs: pytest.fail("Invalid limit must not fetch"))
+    assert _ai_client().post("/api/custom/fund/screener/ai", json={"limit": limit}).status_code == 422
 
 
 def test_ai_pick_stream_keeps_heartbeat_as_separate_json_line(monkeypatch):
