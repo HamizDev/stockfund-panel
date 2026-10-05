@@ -8,9 +8,11 @@ from app.api.strategy import (
     StrategyCodeSaveRequest,
     StrategyCodeValidateRequest,
     _prepare_strategy_code,
+    _research_draft_code_matches,
     _save_strategy_code,
     _set_meta_bool_field,
     publish_ai_strategy,
+    validate_strategy_code,
 )
 from app.strategy.engine import StrategyEngine
 
@@ -181,6 +183,112 @@ def test_create_ai_strategy_still_rejects_existing_id(tmp_path):
         _save_strategy_code(req, request)
 
     assert path.read_text(encoding="utf-8") == saved_code
+
+
+def test_validate_recognizes_iterator_rewritten_draft_identity_without_writing(tmp_path):
+    from app.strategy.ai_generator import AIStrategyGenerator
+    from app.strategy.ai_iterator import AIStrategyIterator
+
+    request = _request(tmp_path)
+    raw_code = _code("ai_model_suggestion")
+    actual_id = "ai_iterator_assigned"
+    AIStrategyIterator._save_draft(
+        request.app.state.strategy_engine, str(tmp_path), actual_id,
+        raw_code, AIStrategyGenerator._extract_meta(raw_code),
+    )
+    path = tmp_path / "strategies/ai" / f"{actual_id}.py"
+    before = path.read_bytes()
+
+    result = validate_strategy_code(StrategyCodeValidateRequest(
+        code=raw_code, strategy_id=actual_id,
+    ), request)
+
+    assert result["valid"] is True
+    assert result.get("matches_existing_research_draft") is True
+    assert result["meta"]["id"] == actual_id
+    assert result["meta"]["research_only"] is True
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("change", ["logic", "signal", "metadata", "bool_as_int", "key_order", "published", "custom", "missing"])
+def test_validate_does_not_bind_unrelated_existing_strategy(tmp_path, change):
+    request = _request(tmp_path)
+    actual_id = "custom_existing" if change == "custom" else "ai_existing_draft"
+    original = _code(actual_id)
+    if change == "bool_as_int":
+        original = original.replace('"tags": ["测试"],', '"tags": ["测试"],\n    "enabled": True,')
+    if change != "missing":
+        _save_strategy_code(StrategyCodeSaveRequest(
+            code=original, strategy_id=actual_id, mode="create",
+            target_source="custom" if change == "custom" else "ai",
+        ), request)
+    if change == "published":
+        publish_ai_strategy(actual_id, request)
+    submitted = _code("ai_model_suggestion")
+    if change == "logic":
+        submitted = submitted.replace("pl.lit(True)", "pl.lit(False)")
+    elif change == "signal":
+        submitted = submitted.replace("STOP_LOSS = -0.05", "STOP_LOSS = -0.10")
+    elif change == "metadata":
+        submitted = submitted.replace('"params": []', '"params": [{"id": "period", "default": 5}]')
+    elif change == "bool_as_int":
+        submitted = submitted.replace('"tags": ["测试"],', '"tags": ["测试"],\n    "enabled": 1,')
+    elif change == "key_order":
+        submitted = submitted.replace('"params": [],\n    "scoring": {},', '"scoring": {},\n    "params": [],')
+    result = validate_strategy_code(StrategyCodeValidateRequest(
+        code=submitted, strategy_id=actual_id,
+    ), request)
+    assert result.get("matches_existing_research_draft") is False
+
+
+@pytest.mark.parametrize("mode", ["create", "update"])
+def test_save_rejects_duplicate_research_only_keys_without_writing(tmp_path, mode):
+    request = _request(tmp_path)
+    sid = "ai_duplicate_flag"
+    path = tmp_path / "strategies/ai" / f"{sid}.py"
+    if mode == "update":
+        _save_strategy_code(StrategyCodeSaveRequest(
+            code=_code(sid), strategy_id=sid, mode="create", target_source="ai",
+        ), request)
+    before = path.read_bytes() if path.exists() else None
+    submitted = _code(sid).replace('"params": [],', '"params": [],\n    "research_only": True,\n    "research_only": False,')
+    with pytest.raises(ValueError, match="唯一字符串键"):
+        _save_strategy_code(StrategyCodeSaveRequest(
+            code=submitted, strategy_id=sid, mode=mode, target_source="ai",
+        ), request)
+    assert (path.read_bytes() if path.exists() else None) == before
+
+
+@pytest.mark.parametrize("flag", ["True", "False"])
+def test_draft_comparison_checks_other_assignments_on_meta_line(tmp_path, flag):
+    from app.strategy.ai_generator import AIStrategyGenerator
+
+    sid = "ai_same_line"
+    code = _code(sid)
+    start = code.index("META =")
+    end = code.index("\n\nENTRY_SIGNALS")
+    meta = {**AIStrategyGenerator._extract_meta(code), "research_only": True}
+    original = code[:start] + f"META = {meta!r}; FLAG = True" + code[end:]
+    path = tmp_path / "same_line.py"
+    path.write_text(original, encoding="utf-8")
+    existing = SimpleNamespace(source="ai", meta=meta, file_path=path)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        strategy_engine=SimpleNamespace(get=lambda _: existing),
+    )))
+    submitted = original.replace("; FLAG = True", f"; FLAG = {flag}")
+    assert _research_draft_code_matches(request, sid, submitted) is (flag == "True")
+
+
+@pytest.mark.parametrize("literal", ["0", "None", "False"])
+def test_meta_bool_setter_replaces_inline_value_without_duplicate_keys(literal):
+    import ast
+
+    code = f"META = {{'name': '中文名称', 'research_only': {literal}}}; FLAG = True\n"
+    changed = _set_meta_bool_field(code, "research_only", True)
+    meta_node = ast.parse(changed).body[0].value
+    assert len(meta_node.keys) == 2
+    assert ast.literal_eval(meta_node)["research_only"] is True
+    assert "; FLAG = True" in changed
 
 
 def test_save_strategy_code_rejects_undefined_custom_signal(tmp_path):

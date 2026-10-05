@@ -72,8 +72,8 @@ function parseRules(code: string): string {
 }
 
 function parseMetaField(code: string, field: string): string {
-  const m = code.match(new RegExp('"' + field + '"\\s*:\\s*"([^"]+)"'))
-  return m ? m[1] : ''
+  const m = code.match(new RegExp("(['\"])" + field + "\\1\\s*:\\s*(['\"])((?:\\\\.|[^\\\\\\r\\n])*?)\\2"))
+  return m ? m[3] : ''
 }
 
 // 回测 stats 均为比率 (0.15 = 15%), 按 key 语义格式化为可读文本
@@ -431,19 +431,31 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
 
   // 保存
   const handleSave = async () => {
-    const draftCode = code
+    let draftCode = code
     if (!draftCode) return
     setSaving(true); setError('')
     try {
       const codeId = parseMetaField(draftCode, 'id')
       // 旧 localStorage 没有迭代字段。只在后端确认同 ID 仍为 AI 研究草稿时恢复更新路径。
       let savedDraftId = iterateDraftId
-      const candidateId = savedDraftId || (mode === 'create' && source === 'ai' && strategyId === codeId ? strategyId : '')
+      const candidateId = savedDraftId || (mode === 'create' && source === 'ai' ? strategyId : '')
       if (candidateId) {
-        if (candidateId !== codeId) throw new Error('草稿 ID 与代码不一致，请恢复原 ID 后保存')
         const listed = await api.strategyList(undefined, 'all', true)
         const existing = listed.strategies.find(item => item.id === candidateId)
         if (existing?.source === 'ai' && existing.research_only === true) {
+          if (candidateId !== codeId) {
+            // 迭代返回模型原始代码，但落盘 META.id 已换成后端分配的 ID。
+            // 只恢复后端确认交易逻辑与元数据一致的草稿，不能覆盖同名的其他代码。
+            const checked = await api.strategyValidateCode({ code: draftCode, strategy_id: candidateId })
+            const matches = 'matches_existing_research_draft' in checked && checked.matches_existing_research_draft === true
+            if (!checked.valid || !matches || checked.meta?.id !== candidateId || checked.meta?.research_only !== true) {
+              throw new Error('草稿 ID 与代码不一致，且未能核实为同一份已保存草稿；请从策略池打开原草稿')
+            }
+            draftCode = checked.code
+            setCode(draftCode)
+            // 该代码已由服务器只读确认落盘，无需再次写入原草稿。
+            iterateSavedCodeRef.current = draftCode
+          }
           savedDraftId = candidateId
           setIterateDraftId(candidateId)
         } else if (savedDraftId) {

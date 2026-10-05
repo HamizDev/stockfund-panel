@@ -616,22 +616,24 @@ def _set_meta_bool_field(code: str, field: str, value: bool) -> str:
     if found is None:
         raise ValueError("找不到 META 字典")
     meta_node = found[1]
+    values = [value_node for key, value_node in zip(meta_node.keys, meta_node.values)
+              if isinstance(key, ast.Constant) and key.value == field]
+    if len(values) > 1:
+        raise ValueError("META 必须使用唯一字符串键")
+    value_repr = "True" if value else "False"
+    if values:
+        value_node = values[0]
+        encoded_lines = code.encode("utf-8").splitlines(keepends=True)
+        start_offset = sum(map(len, encoded_lines[:value_node.lineno - 1])) + value_node.col_offset
+        end_offset = sum(map(len, encoded_lines[:value_node.end_lineno - 1])) + value_node.end_col_offset
+        encoded = code.encode("utf-8")
+        return (encoded[:start_offset] + value_repr.encode("ascii") + encoded[end_offset:]).decode("utf-8")
     lines = code.splitlines(keepends=True)
     start = meta_node.lineno - 1
     end = meta_node.end_lineno or meta_node.lineno
     block = "".join(lines[start:end])
 
-    value_repr = "True" if value else "False"
-    key_pattern = re.compile(
-        rf"(?m)^(\s*[\"']{re.escape(field)}[\"']\s*:\s*)(?:True|False|[\"'][^\"'\n]*[\"'])"
-    )
-    next_block, count = key_pattern.subn(
-        lambda m: f"{m.group(1)}{value_repr}",
-        block,
-        count=1,
-    )
-    if not count:
-        next_block = _insert_meta_field(block, field, value_repr)
+    next_block = _insert_meta_field(block, field, value_repr)
     lines[start:end] = next_block.splitlines(keepends=True)
     return "".join(lines)
 
@@ -705,6 +707,11 @@ def _target_dir(data_dir: Path, source: str) -> Path:
 def _prepare_strategy_code(req: StrategyCodeValidateRequest | StrategyCodeSaveRequest) -> dict:
     sid = _validate_strategy_id(req.strategy_id) if req.strategy_id else ""
     code = req.code
+    found = find_meta_assignment(code)
+    if found is not None:
+        keys = [key.value for key in found[1].keys if isinstance(key, ast.Constant) and isinstance(key.value, str)]
+        if len(keys) != len(found[1].keys) or len(keys) != len(set(keys)):
+            raise ValueError("META 必须使用唯一字符串键")
     if sid:
         current_meta = AIStrategyGenerator._extract_meta(code)
         needs_normalize = (
@@ -801,6 +808,8 @@ def _save_strategy_code(req: StrategyCodeSaveRequest, request: Request, *, legac
             raise ValueError("策略加载到了非预期文件，请检查是否存在重复 strategy_id")
         if loaded.source != expected_source:
             raise ValueError(f"策略来源异常: 期望 {expected_source}, 实际 {loaded.source}")
+        if expected_source == "ai" and loaded.meta.get("research_only") is not research_only:
+            raise ValueError("策略草稿状态与保存前约定不一致")
         # 自定义信号存在性校验: REQUIRED_FEATURES 里 csg_ 列必须已有定义,
         # 否则运行必报缺列错。早失败并恢复文件, 提示用户先创建信号。
         missing = _missing_custom_signals(data_dir, loaded.required_features)
@@ -994,13 +1003,64 @@ async def ai_iterate(req: AIIterateRequest, request: Request):
     return result
 
 
+def _research_draft_code_matches(request: Request, strategy_id: str, code: str) -> bool:
+    """Recognize an iterator's META identity rewrite without executing or writing code."""
+    if not strategy_id:
+        return False
+    try:
+        existing = _get_engine(request).get(strategy_id)
+        if existing.source != "ai" or existing.meta.get("research_only") is not True:
+            return False
+        if not existing.file_path or not existing.file_path.is_file():
+            return False
+        saved = existing.file_path.read_text(encoding="utf-8")
+        saved_meta = AIStrategyGenerator._extract_meta(saved)
+        if saved_meta.get("id") != strategy_id or saved_meta.get("research_only") is not True:
+            return False
+
+        if AIStrategyGenerator._extract_meta(code).get("id") != strategy_id:
+            return False
+
+        def signature(text: str) -> tuple[list[tuple[str, str]], str]:
+            found = find_meta_assignment(text)
+            if found is None:
+                raise ValueError("找不到 META 字典")
+            metadata = []
+            seen_keys = set()
+            for key, value in zip(found[1].keys, found[1].values):
+                if not isinstance(key, ast.Constant) or not isinstance(key.value, str) or key.value in seen_keys:
+                    raise ValueError("META 必须使用唯一字符串键")
+                seen_keys.add(key.value)
+                if key.value not in {"id", "research_only"}:
+                    metadata.append((key.value, ast.dump(value, include_attributes=False)))
+            tree = ast.parse(text)
+            # Compare literal metadata separately so formatting/quotes do not matter.
+            # Every other statement, signal and parameter must still match the saved draft.
+            for node in tree.body:
+                if (isinstance(node, (ast.Assign, ast.AnnAssign))
+                        and isinstance(node.value, ast.Dict)
+                        and (node.value.lineno, node.value.col_offset) == (found[1].lineno, found[1].col_offset)):
+                    node.value = ast.Constant(value=None)
+                    break
+            return metadata, ast.dump(tree, include_attributes=False)
+
+        return signature(code) == signature(saved)
+    except (HTTPException, ValueError, SyntaxError, OSError):
+        return False
+
+
 @router.post("/code/validate")
 def validate_strategy_code(req: StrategyCodeValidateRequest, request: Request):
     try:
         prepared = _prepare_strategy_code(req)
-        return {"valid": True, "error": None, **prepared}
+        matches_draft = _research_draft_code_matches(request, req.strategy_id, prepared["code"])
+        if matches_draft:
+            prepared["code"] = _set_meta_bool_field(prepared["code"], "research_only", True)
+            prepared["meta"] = AIStrategyGenerator._extract_meta(prepared["code"])
+        return {"valid": True, "error": None, **prepared, "matches_existing_research_draft": matches_draft}
     except Exception as e:
-        return {"valid": False, "error": str(e), "code": req.code, "meta": {}}
+        return {"valid": False, "error": str(e), "code": req.code, "meta": {},
+                "matches_existing_research_draft": False}
 
 
 @router.post("/code/save")

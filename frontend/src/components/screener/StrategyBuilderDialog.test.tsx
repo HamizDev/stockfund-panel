@@ -10,6 +10,7 @@ const apiMocks = vi.hoisted(() => ({
   strategyAiIterate: vi.fn(),
   strategyList: vi.fn(),
   strategySaveCodeV2: vi.fn(),
+  strategyValidateCode: vi.fn(),
 }))
 
 vi.mock('@/lib/api', () => ({
@@ -160,6 +161,7 @@ function configureApiMocks() {
   apiMocks.strategyAiStatus.mockResolvedValue({ configured: true, has_key: true, has_model: true })
   apiMocks.strategyAiIterate.mockResolvedValue(ITERATE_RESULT)
   apiMocks.strategyList.mockResolvedValue({ strategies: [] })
+  apiMocks.strategyValidateCode.mockResolvedValue({ valid: true, matches_existing_research_draft: false })
   apiMocks.strategySaveCodeV2.mockImplementation(async (payload: any) => ({
     ok: true,
     strategy_id: payload.strategy_id,
@@ -267,6 +269,32 @@ it('safely recovers an old-format AI research draft and forces an update when it
 })
 
 it.each([
+  { quote: 'double', known: false }, { quote: 'single', known: false },
+  { quote: 'double', known: true }, { quote: 'single', known: true },
+])('recovers an iterator-assigned ID with $quote quotes (known iteration: $known) only after a server match', async ({ quote, known }) => {
+  const rawCode = quote === 'single' ? strategyCode(OTHER_ID).replace(/"/g, "'") : strategyCode(OTHER_ID)
+  const normalizedCode = strategyCode(DRAFT_ID)
+  const onSavedId = vi.fn()
+  storage.strategyDraft.set(legacyDraft(DRAFT_ID, {
+    code: rawCode,
+    ...(known ? { iterateDraftId: DRAFT_ID, iterateRounds: [ROUND], iterateSavedCode: rawCode } : {}),
+  }))
+  apiMocks.strategyList.mockResolvedValue({ strategies: [listedResearchDraft(DRAFT_ID)] })
+  apiMocks.strategyValidateCode.mockResolvedValue({
+    valid: true, code: normalizedCode, meta: { id: DRAFT_ID, research_only: true },
+    matches_existing_research_draft: true,
+  })
+  await renderDialog({ open: true, onSavedId })
+  await clickButton('保存策略')
+  await settle()
+  expect(apiMocks.strategyValidateCode).toHaveBeenCalledWith({
+    code: rawCode, strategy_id: DRAFT_ID,
+  })
+  expect(apiMocks.strategySaveCodeV2).not.toHaveBeenCalled()
+  expect(onSavedId).toHaveBeenCalledWith(DRAFT_ID, true)
+})
+
+it.each([
   {
     name: 'published AI strategy',
     id: DRAFT_ID,
@@ -286,7 +314,7 @@ it.each([
     id: DRAFT_ID,
     codeId: OTHER_ID,
     listing: listedResearchDraft(DRAFT_ID),
-    checksListing: false,
+    checksListing: true,
   },
 ])('does not auto-update a legacy draft when it is $name', async ({ id, codeId, listing, checksListing }) => {
   const draft = legacyDraft(id, { code: strategyCode(codeId) })
@@ -299,6 +327,11 @@ it.each([
 
   if (checksListing) expect(apiMocks.strategyList).toHaveBeenCalledWith(undefined, 'all', true)
   else expect(apiMocks.strategyList).not.toHaveBeenCalled()
+  if (codeId !== id) {
+    expect(apiMocks.strategySaveCodeV2).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('草稿 ID 与代码不一致')
+    return
+  }
   expect(apiMocks.strategySaveCodeV2).toHaveBeenCalledTimes(1)
   expect(apiMocks.strategySaveCodeV2.mock.calls[0][0]).toMatchObject({
     strategy_id: DRAFT_ID,
@@ -313,7 +346,7 @@ it('refuses to write a known iteration if its code ID mismatches or the draft wa
       codeId: OTHER_ID,
       listed: listedResearchDraft(DRAFT_ID),
       expectedError: '草稿 ID 与代码不一致',
-      shouldCheckList: false,
+      shouldCheckList: true,
     },
     {
       codeId: DRAFT_ID,
