@@ -1,17 +1,7 @@
-<!-- stockfund-panel 品牌 logo — App 图标 / 头像徽章版 (直角方底)
-     品牌紫渐变方底 + 纯白全直角标记; 平台圆角由 OS/宿主自行裁切 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="stockfund-panel">
-  <defs>
-    <linearGradient id="tsp-badge" x1="4" y1="4" x2="60" y2="60" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#8B5CF6"/>
-      <stop offset="1" stop-color="#6D28D9"/>
-    </linearGradient>
-  </defs>
-  <rect x="2" y="2" width="60" height="60" fill="url(#tsp-badge)"/>
-  <path d="M23.5 15.5 H18.5 V48.5 H23.5"
-        stroke="#FFFFFF" stroke-width="4" stroke-linejoin="miter" stroke-linecap="butt"/>
-  <path d="M40.5 15.5 H45.5 V48.5 H40.5"
-        stroke="#FFFFFF" stroke-width="4" stroke-linejoin="miter" stroke-linecap="butt"/>
-  <line x1="32" y1="19.5" x2="32" y2="44.5" stroke="#FFFFFF" stroke-width="3" stroke-linecap="butt" stroke-opacity="0.6"/>
-  <rect x="27.5" y="23" width="9" height="14" fill="#FFFFFF"/>
+  <rect width="64" height="64" rx="14" fill="#18181B"/>
+  <g fill="#A78BFA">
+    <path d="M47 10H27C15.954 10 7 18.954 7 30V34H19V30C19 25.582 22.582 22 27 22H41L47 10Z"/>
+    <path d="M17 54H37C48.046 54 57 45.046 57 34V30H45V34C45 38.418 41.418 42 37 42H23L17 54Z"/>
+  </g>
 </svg>
