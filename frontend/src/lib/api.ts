@@ -127,6 +127,46 @@ async function doRequest<T>(
   return res.json() as Promise<T>
 }
 
+export interface NewsClassification {
+  category: string
+  label: string
+  score: number
+  matched: string[]
+}
+export interface NewsItem {
+  id: string
+  title: string
+  summary: string
+  published_at: string
+  origins: { source: string; label: string; url: string | null; published_at: string }[]
+  classifications: { serenity: NewsClassification; wojianshan: NewsClassification }
+  sentiment: { direction: 'positive' | 'negative' | 'mixed' | 'neutral'; matched: string[] }
+  associations: { symbol: string; name: string; asset_type: 'stock' | 'etf'; basis: string; direct: boolean }[]
+}
+export interface NewsFeedResponse {
+  items: NewsItem[]
+  sources: {
+    source: string; label: string; status: 'ok' | 'empty' | 'unavailable' | 'stale'
+    fetched_at: string | null; reason: string | null; count: number
+  }[]
+  fetched_at: string | null
+  today: string
+  related_symbols: string[]
+  association_status: string
+  summary: { today_count: number; total_count: number; themes: { label: string; count: number }[] }
+}
+export interface NewsAnalysis {
+  id: string
+  article_id: string
+  status: 'running' | 'complete' | 'failed' | 'unconfigured' | 'busy'
+  content: string | null
+  error: string | null
+  model: string | null
+  reasoning_effort: string | null
+  generated_at: string | null
+  cache_hit?: boolean
+}
+
 // ===== Capabilities =====
 export interface CapabilityLimits {
   rpm: number | null
@@ -2245,6 +2285,12 @@ export interface SectorRotationUniverseItem {
 // ===== API surface =====
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
+
+  newsFeed: (refresh = false) => request<NewsFeedResponse>(`/api/custom/news/feed${refresh ? '?refresh=true' : ''}`, { quiet: true }),
+  newsAnalyze: (article_id: string) => request<NewsAnalysis>('/api/custom/news/analyze', {
+    method: 'POST', body: JSON.stringify({ article_id }), quiet: true,
+  }),
+  newsAnalysis: (id: string) => request<NewsAnalysis>(`/api/custom/news/analysis/${encodeURIComponent(id)}`, { quiet: true }),
 
   // ===== Auth (访问认证) =====
   authStatus: () =>

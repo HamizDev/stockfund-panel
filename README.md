@@ -12,6 +12,7 @@
 | AI 选股 | 股票与 ETF 分区默认显示 Top 10，按策略命中数、成交额排序；可展开或搜索更多，配置模型后进行逐标的分析 |
 | AI 选基 | 默认显示 10 个历史榜单候选；全部类型按股票、混合、指数、债券四类轮流取样，分开标注类别候选序号；可搜索更多，再由已配置模型辅助比较并显示数据缺口 |
 | 持仓日报 | 股票/ETF 持仓提醒与基金持仓分别分析；北京时间当天首次打开自动生成，同日复用，失败仅手动重试；输出带数据日期的条件式操作研究，不下单 |
+| 市场快讯 | 财联社 + 东财7×24 免费公开快讯；分类筛选、股票/ETF 直接关联、逐条 AI 解读与当日样本研判，详见[使用说明](docs/market-news.md) |
 | 模拟盘 | 手动虚拟账户与每个策略独立的虚拟账户；策略信号可自动生成**模拟**订单，统计收益、胜率和净值 |
 | 数字资产模拟 | Bitget USDT 本位 BTC/ETH/SOL 公开行情驱动的纸面策略；新策略和 AI 草案支持 1h/4h、1–20 倍杠杆，并提供 K 线图；旧币安账本只读且不再持续标记，详见[运行口径](docs/automatic-paper.md) |
 | 数据源 | TickFlow、扶摇及可选的插件或自定义数据源；各来源的权限和覆盖范围不同 |
@@ -89,6 +90,7 @@ Copy-Item .env.example .env
 | [扶摇](https://fuyao.aicubes.cn/docs/quickstart/) | 登录扶摇后，在 API Key 管理页创建 Key | 基金及部分增强行情接口需要 Key；未配置时相关请求可能显示 503 |
 | AkShare | 见 [AkShare 项目](https://github.com/akfamily/akshare) | `bin/akshare-proxy.py` 是可选的本地基金数据辅助服务，需自行安装 `akshare`；目前仅支持与后端在同一主机运行。默认 Docker Compose 无法连接宿主机代理；基金榜单和单位净值有东方财富直接回退，其他资料仍取决于可用来源 |
 | 东方财富 / 天天基金公开档案 | [免费基金研究数据](docs/fund-public-data.md) | 无需 Key：费率条件、披露股票持仓、相关报告公告、区间观测回撤和单位净值；不保证实时、完整或持续可用 |
+| 财联社电报 / 东方财富7×24 | [市场快讯](docs/market-news.md) | 无需 Key：最新公开快讯，分别显示来源状态、原文与发布时间；有界缓存，不保证历史完整性 |
 | `stock-sdk` 插件 | 见 `backend/app/plugins/stocksdk/` | 可选插件，不随 Docker 默认构建安装；使用前核对数据来源条款 |
 | 市场资金流、概念与行业 | [shy313.com](https://shy313.com/) 的公开接口 | 对应页面和预设数据会请求 `shy313.com/api/plugins/market_flow/exports`；接口失败时相关内容可能为空 |
 | Bitget 公开行情 | [Bitget 官方合约文档](https://www.bitget.com/docs/catalog/classic-contract-market/classic-contract-market) | 当前数字资产纸面策略仅使用 Bitget USDT 本位公开行情，无需 Key；固定来源，不跨交易所回退，也不连接账户或下单，详见[运行口径](docs/automatic-paper.md) |
