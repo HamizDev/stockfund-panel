@@ -25,7 +25,7 @@ OPENAI_COMPAT_PROVIDER = "openai_compat"
 OPENAI_PROVIDER = "openai"
 CODEX_CLI_PROVIDER = "codex_cli"
 CODEX_DEFAULT_COMMAND = "codex"
-CODEX_SUPPORTED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+CODEX_SUPPORTED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 OPENAI_DEFAULT_REASONING_EFFORT = "high"
 
 _CODEX_ENV_ALLOWLIST = (
@@ -302,6 +302,8 @@ async def generate_ai_text(
     temperature: float | None = 0.3,
     max_tokens: int | None = 3000,
     timeout: float = 180.0,
+    codex_model: str | None = None,
+    codex_reasoning_effort: str | None = None,
 ) -> str:
     """Return a complete AI response from the currently configured provider.
 
@@ -312,6 +314,19 @@ async def generate_ai_text(
     """
     max_tokens = _resolve_max_tokens(max_tokens)
     _check_input_budget(messages, max_tokens=max_tokens)
+    if codex_model is not None or codex_reasoning_effort is not None:
+        # Task routing is explicit and local to this call. Never mutate the
+        # saved model or the user's Codex home to classify a news item.
+        if not is_codex_cli_provider():
+            raise ValueError("任务专用模型需要先选择 Codex CLI")
+        if codex_model not in {"gpt-6-luna", "gpt-6.1-sol"}:
+            raise ValueError("不支持的任务模型")
+        if codex_reasoning_effort not in {"high", "xhigh", "max"}:
+            raise ValueError("不支持的任务推理档")
+        return await _run_codex_cli(
+            messages, max_tokens=max_tokens, timeout=max(timeout, 600.0),
+            task_model=codex_model, task_effort=codex_reasoning_effort,
+        )
     if is_codex_cli_provider():
         return await _run_codex_cli(messages, max_tokens=max_tokens, timeout=max(timeout, 600.0))
     return await _run_openai_once(
@@ -848,6 +863,8 @@ async def _run_codex_cli(
     *,
     max_tokens: int | None,
     timeout: float,
+    task_model: str | None = None,
+    task_effort: str | None = None,
 ) -> str:
     prompt = _codex_prompt(messages, max_tokens=max_tokens)
     run_path = Path(tempfile.mkdtemp(prefix="tickflow-codex-run-"))
@@ -857,7 +874,10 @@ async def _run_codex_cli(
         codex_home_path.mkdir()
         workspace_path.mkdir()
         output_path = codex_home_path / "last-message.txt"
-        _prepare_codex_home(codex_home_path)
+        if task_model is None:
+            _prepare_codex_home(codex_home_path)
+        else:
+            _prepare_codex_home(codex_home_path, task_model=task_model, task_effort=task_effort)
 
         # 不传 --ephemeral: 老版本 codex(如 0.58)无此参数, 传了直接报
         # unexpected argument; 会话隔离已由一次性临时 CODEX_HOME 保证(跑完即删)。
@@ -872,7 +892,7 @@ async def _run_codex_cli(
             "--output-last-message",
             str(output_path),
         ]
-        model = current_ai_model().strip()
+        model = task_model if task_model is not None else current_ai_model().strip()
         if model:
             args.extend(["--model", model])
         args.extend(["--cd", str(workspace_path), "-"])
@@ -1086,20 +1106,25 @@ def _resolve_windows_desktop_codex() -> str | None:
     return str(newest)
 
 
-def _prepare_codex_home(target: Path) -> None:
+def _prepare_codex_home(target: Path, *, task_model: str | None = None, task_effort: str | None = None) -> None:
     """Create an isolated CODEX_HOME that reuses auth but not fragile config."""
     source = _codex_home()
     auth_file = source / "auth.json"
     if auth_file.exists():
         shutil.copy2(auth_file, target / "auth.json")
-    _write_compatible_codex_config(target / "config.toml")
+    if task_model is None:
+        _write_compatible_codex_config(target / "config.toml")
+    else:
+        _write_compatible_codex_config(target / "config.toml", task_model=task_model, task_effort=task_effort)
 
 
 def _codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 
 
-def _write_compatible_codex_config(path: Path) -> None:
+def _write_compatible_codex_config(
+    path: Path, *, task_model: str | None = None, task_effort: str | None = None,
+) -> None:
     config = _read_codex_config()
     lines: list[str] = []
     active_provider = _active_codex_provider(config)
@@ -1111,11 +1136,13 @@ def _write_compatible_codex_config(path: Path) -> None:
     if isinstance(openai_base_url, str) and openai_base_url:
         lines.append(_toml_string("openai_base_url", openai_base_url))
 
-    model = current_ai_model() or normalize_codex_model(str(config.get("model") or ""))
+    model = task_model if task_model is not None else (
+        current_ai_model() or normalize_codex_model(str(config.get("model") or ""))
+    )
     if model:
         lines.append(_toml_string("model", model))
 
-    effort = current_codex_reasoning_effort() or normalize_codex_reasoning_effort(
+    effort = task_effort if task_effort is not None else current_codex_reasoning_effort() or normalize_codex_reasoning_effort(
         str(config.get("model_reasoning_effort") or "")
     )
     if effort:

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { Modal } from '@/components/Modal'
 import { X, Sparkles, Save, Loader2, ChevronLeft, ChevronRight, AlertTriangle, Settings2, FileText, Copy, Check, Terminal } from 'lucide-react'
 import { api, friendlyStreamError } from '@/lib/api'
-import type { AiIterateRound } from '@/lib/api'
+import type { AiIterateRound, StrategyReviewResult } from '@/lib/api'
 import { storage, type DefaultStrategyBasicFilter } from '@/lib/storage'
 import { cn } from '@/lib/cn'
 import { ALL_BOARDS } from './StrategySettingsDialog'
@@ -230,23 +230,65 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [aiStatus, setAiStatus] = useState<{ configured: boolean } | null>(null)
+  const [aiStatus, setAiStatus] = useState<{ configured: boolean; provider?: string } | null>(null)
   const [checkedAi, setCheckedAi] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [iterateEnabled, setIterateEnabled] = useState(false)
   const [iterateRounds, setIterateRounds] = useState<AiIterateRound[]>([])
   const [iterateDraftId, setIterateDraftId] = useState('')
+  const [reviewEffort, setReviewEffort] = useState<'xhigh' | 'max'>('xhigh')
+  const [reviewState, setReviewState] = useState<{
+    result: StrategyReviewResult
+    code: string
+    strategyId: string
+  } | null>(null)
+  const [reviewLoading, setReviewLoading] = useState(false)
   const suppressPersistRef = useRef(false)
   const restoredModeRef = useRef<string | null>(null)
+  const reviewRequestIdRef = useRef(0)
+  const currentCodeRef = useRef(code)
+  const currentStrategyIdRef = useRef(strategyId)
+  const openRef = useRef(open)
+  currentCodeRef.current = code
+  currentStrategyIdRef.current = strategyId
+  openRef.current = open
   // 迭代落盘的代码基准 (检测用户在编辑器是否改过, 见 handleSave)
   const iterateSavedCodeRef = useRef('')
 
+  const invalidateReview = useCallback(() => {
+    reviewRequestIdRef.current += 1
+    setReviewState(null)
+    setReviewLoading(false)
+  }, [])
+
+  const setReviewedCode = useCallback((nextCode: string) => {
+    if (currentCodeRef.current !== nextCode) invalidateReview()
+    currentCodeRef.current = nextCode
+    setCode(nextCode)
+  }, [invalidateReview])
+
+  const setReviewedStrategyId = useCallback((nextStrategyId: string) => {
+    if (currentStrategyIdRef.current !== nextStrategyId) invalidateReview()
+    currentStrategyIdRef.current = nextStrategyId
+    setStrategyId(nextStrategyId)
+  }, [invalidateReview])
+
   const resetDraftState = useCallback(() => {
+    invalidateReview()
     setStep(1); setTab('ai'); setName(''); setDescription(''); setDirection('long')
-    setExecutionBackend('polars_expr'); setRules(''); setCode(''); setInstruction('')
-    setPreviewTab('params'); setStrategyId(''); setSource('ai'); setValidated(false); setError('')
+    setExecutionBackend('polars_expr'); setRules(''); setReviewedCode(''); setInstruction('')
+    setPreviewTab('params'); setReviewedStrategyId(''); setSource('ai'); setValidated(false); setError('')
     setIterateEnabled(false); setIterateRounds([]); setIterateDraftId('')
+    setReviewEffort('xhigh')
     iterateSavedCodeRef.current = ''
+  }, [invalidateReview, setReviewedCode, setReviewedStrategyId])
+
+  useEffect(() => {
+    invalidateReview()
+  }, [open, invalidateReview])
+
+  useEffect(() => () => {
+    reviewRequestIdRef.current += 1
   }, [])
 
   // 打开时恢复草稿
@@ -272,7 +314,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
         d.executionBackend
         ?? (String(d.code ?? '').includes('matrix_native') ? 'matrix_native' : 'polars_expr'),
       )
-      setRules(d.rules ?? ''); setCode(d.code ?? ''); setStrategyId(d.strategyId ?? '')
+      setRules(d.rules ?? ''); setReviewedCode(d.code ?? ''); setReviewedStrategyId(d.strategyId ?? '')
       setSource(restoredSource)
       setTab(mode === 'modify' || restoredSource === 'custom' ? 'custom' : 'ai')
       setIterateEnabled(d.iterateEnabled ?? false)
@@ -284,7 +326,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
     }
     suppressPersistRef.current = false
     setLoaded(true)
-  }, [open, mode, draftStore, existingStrategyIds, resetDraftState])
+  }, [open, mode, draftStore, existingStrategyIds, resetDraftState, setReviewedCode, setReviewedStrategyId])
 
   // 打开时检查 AI 状态
   useEffect(() => {
@@ -312,6 +354,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
   }
 
   const handleClose = () => {
+    invalidateReview()
     if (!suppressPersistRef.current && (name || rules || code)) persist()
     onClose()
   }
@@ -325,7 +368,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
   const selectExecutionBackend = (backend: 'polars_expr' | 'matrix_native') => {
     setExecutionBackend(backend)
     if (tab === 'custom' && (!code || code === CUSTOM_TEMPLATE || code === MATRIX_TEMPLATE)) {
-      setCode(backend === 'matrix_native' ? MATRIX_TEMPLATE : CUSTOM_TEMPLATE)
+      setReviewedCode(backend === 'matrix_native' ? MATRIX_TEMPLATE : CUSTOM_TEMPLATE)
     }
   }
 
@@ -333,7 +376,8 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
   const handleGenerate = async () => {
     if (!name.trim() || !rules.trim()) return
     if (!aiStatus?.configured) { setError('AI 未配置，请在设置页面配置 API Key'); return }
-    setLoading(true); setError(''); setCode(''); setValidated(false); setIterateRounds([]); setIterateDraftId('')
+    invalidateReview()
+    setLoading(true); setError(''); setReviewedCode(''); setValidated(false); setIterateRounds([]); setIterateDraftId('')
     try {
       if (iterateEnabled) {
         // AI 迭代: 生成 → 回测 → 诊断 → 修改 闭环, 草稿已由后端落盘
@@ -341,9 +385,9 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
           name: name.trim(), description: description.trim(), direction,
           execution_backend: executionBackend, rules: rules.trim(), max_rounds: 4,
         })
-        setCode(result.final_code)
+        setReviewedCode(result.final_code)
         iterateSavedCodeRef.current = result.final_code
-        setStrategyId(result.draft_strategy_id); setSource('ai')
+        setReviewedStrategyId(result.draft_strategy_id); setSource('ai')
         setIterateDraftId(result.draft_strategy_id); setIterateRounds(result.rounds ?? [])
         setStep(2); setValidated(true)
         const genDesc = parseMetaField(result.final_code, 'description')
@@ -358,11 +402,13 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
         if (genRules) setRules(genRules)
       } else {
         const id = resolveStrategyId('ai')
-        setStrategyId(id); setSource('ai'); setPreviewTab('code')
+        setReviewedStrategyId(id); setSource('ai'); setPreviewTab('code')
         let finalResult: any = null
+        let streamedCode = ''
         for await (const evt of api.strategyBuildStream(1, { name: name.trim(), description: description.trim(), direction, execution_backend: executionBackend, rules: rules.trim(), strategy_id: id, basic_filter: defaultBF })) {
           if (evt.type === 'delta') {
-            setCode(prev => prev + evt.content)
+            streamedCode += evt.content
+            setReviewedCode(streamedCode)
           } else if (evt.type === 'error') {
             throw new Error(evt.message)
           } else if (evt.type === 'result') {
@@ -371,7 +417,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
         }
         if (!finalResult) throw new Error('AI 未返回策略结果')
         if (!finalResult.valid) { setError(finalResult.error ?? '生成失败'); return }
-        setCode(finalResult.code); setStep(2); setValidated(true)
+        setReviewedCode(finalResult.code); setStep(2); setValidated(true)
         const genDesc = parseMetaField(finalResult.code, 'description')
         const genRules = parseRules(finalResult.code)
         if (genDesc) setDescription(genDesc)
@@ -393,7 +439,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
       for await (const evt of api.strategyBuildStream(2, { current_code: code, instruction: instruction.trim(), strategy_id: strategyId })) {
         if (evt.type === 'delta') {
           draft += evt.content
-          setCode(draft)
+          setReviewedCode(draft)
         } else if (evt.type === 'error') {
           throw new Error(evt.message)
         } else if (evt.type === 'result') {
@@ -402,7 +448,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
       }
       if (!finalResult) throw new Error('AI 未返回策略结果')
       if (!finalResult.valid) { setError(finalResult.error ?? '修改失败'); return }
-      setCode(finalResult.code); setInstruction(''); setValidated(true)
+      setReviewedCode(finalResult.code); setInstruction(''); setValidated(true)
       const genDesc = parseMetaField(finalResult.code, 'description')
       const updatedRules = parseRules(finalResult.code)
       if (genDesc) setDescription(genDesc)
@@ -411,16 +457,48 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
     finally { setLoading(false) }
   }
 
+  const handleReview = async () => {
+    if (!code.trim() || reviewLoading) return
+    if (!aiStatus?.configured) {
+      setError('AI 未配置，请先在设置页面配置 AI 提供方')
+      return
+    }
+    if (aiStatus.provider !== 'codex_cli') {
+      setError('AI 最终复核固定使用 GPT-6.1 Sol，仅 Codex CLI 提供方可用；请在 AI 设置中切换。')
+      return
+    }
+
+    const reviewedCode = code
+    const reviewedStrategyId = strategyId
+    const requestId = ++reviewRequestIdRef.current
+    setReviewState(null)
+    setReviewLoading(true)
+    setError('')
+    try {
+      const result = await api.strategyReview({ code: reviewedCode, reasoning_effort: reviewEffort })
+      if (requestId !== reviewRequestIdRef.current
+        || !openRef.current
+        || currentCodeRef.current !== reviewedCode
+        || currentStrategyIdRef.current !== reviewedStrategyId) return
+      setReviewState({ result, code: reviewedCode, strategyId: reviewedStrategyId })
+    } catch (e: any) {
+      if (requestId !== reviewRequestIdRef.current || !openRef.current) return
+      setError(friendlyStreamError(String(e?.message ?? '')) || 'AI 最终复核失败')
+    } finally {
+      if (requestId === reviewRequestIdRef.current && openRef.current) setReviewLoading(false)
+    }
+  }
+
   const handleValidateCode = async () => {
     const draftCode = code
     if (!draftCode.trim()) return
     setLoading(true); setError('')
     try {
       const id = strategyId || resolveStrategyId(tab === 'custom' ? 'custom' : 'ai')
-      setStrategyId(id)
+      setReviewedStrategyId(id)
       const res = await api.strategyValidateCode({ code: draftCode, strategy_id: id, name: name.trim(), description: description.trim() })
       if (!res.valid) { setValidated(false); setError(res.error ?? '代码校验失败'); return }
-      setCode(res.code); setValidated(true)
+      setReviewedCode(res.code); setValidated(true)
       const genDesc = parseMetaField(res.code, 'description')
       const genRules = parseRules(res.code)
       if (genDesc) setDescription(genDesc)
@@ -452,7 +530,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
               throw new Error('草稿 ID 与代码不一致，且未能核实为同一份已保存草稿；请从策略池打开原草稿')
             }
             draftCode = checked.code
-            setCode(draftCode)
+            setReviewedCode(draftCode)
             // 该代码已由服务器只读确认落盘，无需再次写入原草稿。
             iterateSavedCodeRef.current = draftCode
           }
@@ -489,7 +567,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
       }
       const target = mode === 'modify' ? source : (tab === 'custom' ? 'custom' : 'ai')
       const id = resolveStrategyId(target)
-      setStrategyId(id); setSource(target)
+      setReviewedStrategyId(id); setSource(target)
       const savedResult = await api.strategySaveCodeV2({
         strategy_id: id,
         code: draftCode,
@@ -520,6 +598,9 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
   const holdMatch = code.match(/MAX_HOLD_DAYS\s*=\s*(-?[0-9.]+|None)/)
   const codeHoldDays = holdMatch ? (holdMatch[1] === 'None' ? null : parseInt(holdMatch[1])) : null
   const hasParams = params.length > 0 || entrySignals.length > 0 || exitSignals.length > 0 || Object.keys(scoring).length > 0
+  const reviewResult = reviewState?.code === code && reviewState.strategyId === strategyId
+    ? reviewState.result
+    : null
 
   return (
     <Modal
@@ -533,10 +614,10 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
           <div className="grid grid-cols-[1fr_auto_1fr] items-center px-5 py-2.5 border-b border-border/50">
             {/* 左侧：Tab 切换 */}
             <div className="flex rounded-lg bg-elevated p-0.5 w-fit">
-              <button onClick={() => { setTab('ai'); if (mode === 'create') setSource('ai') }} className={cn('px-3 py-1 rounded-md text-xs font-medium transition-all cursor-pointer', tab === 'ai' ? 'bg-amber-400/15 text-amber-400' : 'text-muted hover:text-foreground')}>
+              <button onClick={() => { if (tab !== 'ai') invalidateReview(); setTab('ai'); if (mode === 'create') setSource('ai') }} className={cn('px-3 py-1 rounded-md text-xs font-medium transition-all cursor-pointer', tab === 'ai' ? 'bg-amber-400/15 text-amber-400' : 'text-muted hover:text-foreground')}>
                 <Sparkles className="h-3 w-3 inline mr-1" />AI 生成
               </button>
-              <button onClick={() => { setTab('custom'); if (mode === 'create') { setSource('custom'); if (!code) setCode(executionBackend === 'matrix_native' ? MATRIX_TEMPLATE : CUSTOM_TEMPLATE) } }} className={cn('px-3 py-1 rounded-md text-xs font-medium transition-all cursor-pointer', tab === 'custom' ? 'bg-accent/15 text-accent' : 'text-muted hover:text-foreground')}>
+              <button onClick={() => { if (tab !== 'custom') invalidateReview(); setTab('custom'); if (mode === 'create') { setSource('custom'); if (!code) setReviewedCode(executionBackend === 'matrix_native' ? MATRIX_TEMPLATE : CUSTOM_TEMPLATE) } }} className={cn('px-3 py-1 rounded-md text-xs font-medium transition-all cursor-pointer', tab === 'custom' ? 'bg-accent/15 text-accent' : 'text-muted hover:text-foreground')}>
                 <FileText className="h-3 w-3 inline mr-1" />自定义编写
               </button>
             </div>
@@ -775,6 +856,36 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                   </button>
                 </div>
                 <p className="text-[10px] text-muted/40">修改指令可调整参数、信号、评分等任意内容。确认无误后点击「保存策略」。</p>
+
+                <div className="rounded-xl border border-border/30 bg-surface/30 p-3 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="text-xs font-medium text-secondary">AI 最终复核</div>
+                      <div className="mt-0.5 text-[10px] text-muted/50">固定模型 GPT-6.1 Sol；当前复核基于代码，实际收益等仍需回测验证。复核不会修改、保存或发布策略。</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <label htmlFor="strategy-review-effort" className="text-[10px] text-muted">推理档</label>
+                      <select id="strategy-review-effort" aria-label="最终复核推理档" value={reviewEffort}
+                        onChange={e => setReviewEffort(e.target.value as 'xhigh' | 'max')} disabled={reviewLoading}
+                        className="h-8 rounded-lg border border-border/40 bg-base px-2 text-[11px] text-foreground disabled:opacity-50">
+                        <option value="xhigh">xhigh</option>
+                        <option value="max">max</option>
+                      </select>
+                      <button type="button" onClick={handleReview} disabled={reviewLoading || !code.trim()}
+                        className="h-8 px-3 rounded-lg border border-amber-400/30 bg-amber-400/10 text-amber-400 text-[11px] font-medium flex items-center gap-1.5 hover:bg-amber-400/15 disabled:opacity-40">
+                        {reviewLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                        {reviewLoading ? '复核中...' : reviewResult ? '重新复核' : '开始复核'}
+                      </button>
+                    </div>
+                  </div>
+                  {reviewLoading && <div className="text-[10px] text-muted/50" role="status">复核进行中，可以关闭弹窗。</div>}
+                  {reviewResult && (
+                    <div className="rounded-lg border border-border/30 bg-base/60 p-3 space-y-1.5" aria-live="polite">
+                      <div className="text-[10px] text-muted/50">{reviewResult.model} · {reviewResult.reasoning_effort}</div>
+                      <div className="max-h-64 overflow-y-auto text-[11px] text-secondary whitespace-pre-wrap">{reviewResult.content}</div>
+                    </div>
+                  )}
+                </div>
               </>
             )}
             </>
@@ -807,7 +918,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                   </div>
                   <textarea
                     value={code}
-                    onChange={e => { setCode(e.target.value); setValidated(false) }}
+                    onChange={e => { setReviewedCode(e.target.value); setValidated(false) }}
                     spellCheck={false}
                     className="w-full h-[420px] rounded-xl border border-border/40 bg-base p-4 text-[11px] leading-relaxed font-mono text-foreground/80 resize-none focus:outline-none focus:ring-2 focus:ring-accent/30"
                   />
@@ -816,7 +927,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                   </div>
                   {error && <div className="text-[11px] text-danger bg-danger/10 border border-danger/20 rounded-lg px-3 py-2">{error}</div>}
                   <div className="flex items-center justify-end gap-2">
-                    <button onClick={() => { setCode(executionBackend === 'matrix_native' ? MATRIX_TEMPLATE : CUSTOM_TEMPLATE); setStrategyId(''); setSource('custom'); setValidated(false) }}
+                    <button onClick={() => { setReviewedCode(executionBackend === 'matrix_native' ? MATRIX_TEMPLATE : CUSTOM_TEMPLATE); setReviewedStrategyId(''); setSource('custom'); setValidated(false) }}
                       className="h-8 px-3 rounded-lg border border-border text-xs text-secondary hover:text-foreground">
                       使用模板
                     </button>
@@ -848,7 +959,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
               )}
               {step === 2 && (
                 <>
-                  <button onClick={() => setStep(1)} className="h-7 px-3 rounded-lg border border-border text-xs text-secondary hover:text-foreground flex items-center gap-1">
+                  <button onClick={() => { invalidateReview(); setStep(1) }} className="h-7 px-3 rounded-lg border border-border text-xs text-secondary hover:text-foreground flex items-center gap-1">
                     <ChevronLeft className="h-3 w-3" />上一步
                   </button>
                   <button onClick={handleSave} disabled={saving || loading}

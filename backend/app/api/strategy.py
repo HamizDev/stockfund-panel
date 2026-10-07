@@ -259,6 +259,11 @@ class AIGenerateRequest(BaseModel):
     prompt: str
 
 
+class StrategyReviewRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=80_000)
+    reasoning_effort: Literal["xhigh", "max"] = "xhigh"
+
+
 class AIIterateRequest(BaseModel):
     """AI 迭代请求 — 与 BuildRequest step1 同构, 复用 build_step1 拼 prompt"""
     name: str = ""
@@ -966,6 +971,20 @@ async def build_strategy_stream(req: BuildRequest, request: Request):
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
+
+
+@router.post("/ai/review")
+async def review_strategy(req: StrategyReviewRequest, request: Request):
+    from app.strategy.ai_reviewer import StrategyReviewer
+
+    reviewer = getattr(request.app.state, "strategy_reviewer", None)
+    if reviewer is None:
+        reviewer = StrategyReviewer()
+        request.app.state.strategy_reviewer = reviewer
+    try:
+        return await reviewer.review(req.code, req.reasoning_effort)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
 @router.post("/ai/generate")

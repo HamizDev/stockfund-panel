@@ -1,5 +1,6 @@
 # ruff: noqa: RUF001 -- localized Chinese UI and prompt punctuation.
 """Thin authenticated endpoints for news and explicit AI research jobs."""
+from typing import Literal
 from weakref import WeakSet
 
 from fastapi import APIRouter, HTTPException, Request
@@ -15,6 +16,10 @@ class AnalyzeIn(BaseModel):
     article_id: str = Field(min_length=1, max_length=32, pattern=r"^(daily|[a-f0-9]{24})$")
 
 
+class DirectionsIn(BaseModel):
+    effort: Literal["high", "max"] = "high"
+
+
 def service(request: Request) -> NewsService:
     existing = getattr(request.app.state, "news_service", None)
     if existing is None:
@@ -27,14 +32,17 @@ def service(request: Request) -> NewsService:
 def stop_services(data_dir) -> None:
     for news in list(_instances):
         if news.data_dir.resolve() == data_dir.resolve():
-            for task in [news.refresh_task, *news.tasks.values()]:
+            for task in [news.refresh_task, news.direction_task, *news.tasks.values()]:
                 if task is not None and not task.done():
                     task.get_loop().call_soon_threadsafe(task.cancel)
 
 
 async def current_feed(request: Request, refresh: bool = False) -> dict:
     news = service(request)
-    await news.refresh(refresh)
+    if news.feeds and not refresh:
+        news.refresh_in_background()
+    else:
+        await news.refresh(refresh)
     instruments, related, status = await run_in_threadpool(collect_context, request.app.state.repo)
     return await run_in_threadpool(news.feed, instruments, related, status)
 
@@ -62,5 +70,19 @@ def build_router() -> APIRouter:
         if report is None:
             raise HTTPException(404, "该解读不存在或未完成，请重新点击解读")
         return report
+
+    @router.post("/directions")
+    async def directions(request: Request, body: DirectionsIn):
+        snapshot = await current_feed(request)
+        return await service(request).classify_directions(snapshot, body.effort)
+
+    @router.get("/directions/{job_id}")
+    async def direction_job(request: Request, job_id: str):
+        if len(job_id) != 32 or any(char not in "0123456789abcdef" for char in job_id):
+            raise HTTPException(400, "无效的方向任务标识")
+        state = service(request).direction_status(job_id)
+        if state is None:
+            raise HTTPException(404, "方向任务已结束或服务已重启；已有判断仍在快讯缓存中")
+        return state
 
     return router

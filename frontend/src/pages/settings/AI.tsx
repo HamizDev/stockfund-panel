@@ -32,12 +32,14 @@ const SAVED_CODEX_OPTION_VALUE = '__saved_codex_config__'
 const CODEX_REASONING_LABELS: Record<string, string> = {
   high: '高',
   xhigh: '极高',
+  max: '最大',
 }
 
 type CodexModelOption = { label: string; value: string; model: string; effort: string; hint: string }
 
 const CODEX_MODEL_OPTIONS: CodexModelOption[] = [
   { label: 'GPT-6.1 Sol · 极高（推荐）', value: 'gpt-6.1-sol:xhigh', model: 'gpt-6.1-sol', effort: 'xhigh', hint: '默认使用 GPT-6.1 Sol 与极高推理档' },
+  { label: 'GPT-6.1 Sol · 最大', value: 'gpt-6.1-sol:max', model: 'gpt-6.1-sol', effort: 'max', hint: '适合复杂任务专项复核，会增加耗时与用量' },
   { label: 'GPT-6 Sol · 极高', value: 'gpt-6-sol:xhigh', model: 'gpt-6-sol', effort: 'xhigh', hint: '保留显式选择 GPT-6 Sol 与极高推理档' },
   { label: 'GPT-5.6 Sol · 极高', value: 'gpt-5.6-sol:xhigh', model: 'gpt-5.6-sol', effort: 'xhigh', hint: '兼容此前保存的模型选择' },
   { label: 'GPT-5.6 Terra · 极高', value: 'gpt-5.6-terra:xhigh', model: 'gpt-5.6-terra', effort: 'xhigh', hint: '平衡智能、速度与使用成本' },

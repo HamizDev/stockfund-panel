@@ -8,6 +8,8 @@ import { storage } from '@/lib/storage'
 const apiMocks = vi.hoisted(() => ({
   strategyAiStatus: vi.fn(),
   strategyAiIterate: vi.fn(),
+  strategyBuildStream: vi.fn(),
+  strategyReview: vi.fn(),
   strategyList: vi.fn(),
   strategySaveCodeV2: vi.fn(),
   strategyValidateCode: vi.fn(),
@@ -51,11 +53,19 @@ function strategyCode(id: string) {
 }
 
 const ITERATED_CODE = strategyCode(DRAFT_ID)
+const MODIFIED_CODE = ITERATED_CODE.replace('return df', 'return df  # AI 修改')
 const ITERATE_RESULT = {
   draft_strategy_id: DRAFT_ID,
   rounds: [ROUND],
   final_code: ITERATED_CODE,
   final_meta: { id: DRAFT_ID, name: '测试策略' },
+}
+const REVIEW_RESULT = {
+  content: '复核结论：代码结构完整。',
+  model: 'gpt-6.1-sol' as const,
+  reasoning_effort: 'xhigh' as const,
+  code_hash: 'sha256:fixture',
+  generated_at: '2026-10-07T00:00:00Z',
 }
 
 type DialogProps = {
@@ -106,6 +116,15 @@ function setFieldValue(element: HTMLInputElement | HTMLTextAreaElement, value: s
   })
 }
 
+function setSelectValue(element: HTMLSelectElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set
+  if (!setter) throw new Error('Missing native select value setter')
+  act(() => {
+    setter.call(element, value)
+    element.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+}
+
 function findButton(text: string): HTMLButtonElement {
   const button = [...container.querySelectorAll('button')]
     .find(candidate => candidate.textContent?.includes(text))
@@ -128,6 +147,19 @@ async function fillIterationForm() {
   setFieldValue(name, '测试策略')
   setFieldValue(rules, '收盘价站上短期均线')
   await clickButton('AI 迭代（自动回测诊断优化）')
+}
+
+async function showIterationPreview() {
+  await renderDialog({ open: true })
+  await fillIterationForm()
+  await clickButton('AI 迭代生成')
+}
+
+async function modifyPreviewCode() {
+  const instruction = container.querySelector('input[placeholder^="调整策略逻辑"]') as HTMLInputElement | null
+  if (!instruction) throw new Error('AI modify field was not rendered')
+  setFieldValue(instruction, '增加一个确认条件')
+  await clickButton('AI 修改')
 }
 
 async function unmount() {
@@ -158,8 +190,12 @@ function listedResearchDraft(id: string) {
 
 function configureApiMocks() {
   vi.clearAllMocks()
-  apiMocks.strategyAiStatus.mockResolvedValue({ configured: true, has_key: true, has_model: true })
+  apiMocks.strategyAiStatus.mockResolvedValue({ configured: true, has_key: true, has_model: true, provider: 'codex_cli' })
   apiMocks.strategyAiIterate.mockResolvedValue(ITERATE_RESULT)
+  apiMocks.strategyBuildStream.mockImplementation(async function* () {
+    yield { type: 'result', valid: true, code: MODIFIED_CODE }
+  })
+  apiMocks.strategyReview.mockResolvedValue(REVIEW_RESULT)
   apiMocks.strategyList.mockResolvedValue({ strategies: [] })
   apiMocks.strategyValidateCode.mockResolvedValue({ valid: true, matches_existing_research_draft: false })
   apiMocks.strategySaveCodeV2.mockImplementation(async (payload: any) => ({
@@ -245,6 +281,105 @@ it('persists an iteration that finishes while the same dialog instance is hidden
   expect(apiMocks.strategyList).toHaveBeenCalledWith(undefined, 'all', true)
   expect(apiMocks.strategySaveCodeV2).not.toHaveBeenCalled()
   expect(onSavedId).toHaveBeenCalledWith(DRAFT_ID, true)
+})
+
+it('runs final review only on click, defaults to xhigh, and displays the returned report without saving', async () => {
+  await showIterationPreview()
+
+  expect(apiMocks.strategyReview).not.toHaveBeenCalled()
+  const effort = container.querySelector('select[aria-label="最终复核推理档"]') as HTMLSelectElement | null
+  if (!effort) throw new Error('Review reasoning selector was not rendered')
+  expect(effort.value).toBe('xhigh')
+
+  await clickButton('开始复核')
+
+  expect(apiMocks.strategyReview).toHaveBeenCalledTimes(1)
+  expect(apiMocks.strategyReview).toHaveBeenCalledWith({ code: ITERATED_CODE, reasoning_effort: 'xhigh' })
+  expect(container.textContent).toContain('当前复核基于代码，实际收益等仍需回测验证')
+  expect(container.textContent).toContain(REVIEW_RESULT.content)
+  expect(container.textContent).toContain('gpt-6.1-sol · xhigh')
+  expect(apiMocks.strategySaveCodeV2).not.toHaveBeenCalled()
+})
+
+it('passes max when selected for final review', async () => {
+  await showIterationPreview()
+  const effort = container.querySelector('select[aria-label="最终复核推理档"]') as HTMLSelectElement | null
+  if (!effort) throw new Error('Review reasoning selector was not rendered')
+  setSelectValue(effort, 'max')
+
+  await clickButton('开始复核')
+
+  expect(apiMocks.strategyReview).toHaveBeenCalledWith({ code: ITERATED_CODE, reasoning_effort: 'max' })
+})
+
+it('clears a completed review when AI modification changes the current code', async () => {
+  await showIterationPreview()
+  await clickButton('开始复核')
+  expect(container.textContent).toContain(REVIEW_RESULT.content)
+
+  await modifyPreviewCode()
+
+  expect(container.textContent).not.toContain(REVIEW_RESULT.content)
+})
+
+it('ignores an in-flight review after code changes and after closing and reopening the dialog', async () => {
+  let resolveReview!: (value: typeof REVIEW_RESULT) => void
+  const pendingReview = new Promise<typeof REVIEW_RESULT>(resolve => { resolveReview = resolve })
+  apiMocks.strategyReview.mockReturnValue(pendingReview)
+  await showIterationPreview()
+  await clickButton('开始复核')
+
+  await modifyPreviewCode()
+  expect(container.textContent).not.toContain(REVIEW_RESULT.content)
+
+  const closeButton = container.querySelector('button[aria-label="关闭"]') as HTMLButtonElement | null
+  if (!closeButton) throw new Error('Close button was not rendered')
+  await act(async () => { closeButton.click() })
+  await renderDialog({ open: false })
+  await renderDialog({ open: true })
+
+  await act(async () => {
+    resolveReview(REVIEW_RESULT)
+    await pendingReview
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+  })
+  expect(container.textContent).not.toContain(REVIEW_RESULT.content)
+})
+
+it('clears a completed review when the dialog is closed and reopened', async () => {
+  await showIterationPreview()
+  await clickButton('开始复核')
+  expect(container.textContent).toContain(REVIEW_RESULT.content)
+
+  const closeButton = container.querySelector('button[aria-label="关闭"]') as HTMLButtonElement | null
+  if (!closeButton) throw new Error('Close button was not rendered')
+  await act(async () => { closeButton.click() })
+  await renderDialog({ open: false })
+  await renderDialog({ open: true })
+
+  expect(container.textContent).not.toContain(REVIEW_RESULT.content)
+})
+
+it('shows a clear provider error for a non-Codex provider', async () => {
+  apiMocks.strategyAiStatus.mockResolvedValue({ configured: true, has_key: true, has_model: true, provider: 'openai_compat' })
+  await showIterationPreview()
+
+  await clickButton('开始复核')
+  expect(container.textContent).toContain('仅 Codex CLI 提供方可用')
+  expect(apiMocks.strategyReview).not.toHaveBeenCalled()
+})
+
+it('allows retry after a failed final review request', async () => {
+  await showIterationPreview()
+  apiMocks.strategyReview.mockRejectedValueOnce(new Error('HTTP 400: review unavailable'))
+
+  await clickButton('开始复核')
+  expect(container.textContent).toContain('HTTP 400: review unavailable')
+  expect(apiMocks.strategyReview).toHaveBeenCalledTimes(1)
+
+  await clickButton('开始复核')
+  expect(apiMocks.strategyReview).toHaveBeenCalledTimes(2)
+  expect(container.textContent).toContain(REVIEW_RESULT.content)
 })
 
 it('safely recovers an old-format AI research draft and forces an update when its saved-code baseline is absent', async () => {

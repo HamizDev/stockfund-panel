@@ -141,6 +141,16 @@ export interface NewsItem {
   origins: { source: string; label: string; url: string | null; published_at: string }[]
   classifications: { serenity: NewsClassification; wojianshan: NewsClassification }
   sentiment: { direction: 'positive' | 'negative' | 'mixed' | 'neutral'; matched: string[] }
+  ai_direction?: {
+    status: 'complete'
+    direction: 'positive' | 'negative' | 'neutral' | 'mixed' | 'uncertain'
+    reason: string
+    evidence: string[]
+    scope: 'market' | 'industry' | 'company' | 'unclear'
+    model: string
+    reasoning_effort: 'high' | 'max'
+    generated_at: string
+  }
   associations: { symbol: string; name: string; asset_type: 'stock' | 'etf'; basis: string; direct: boolean }[]
 }
 export interface NewsFeedResponse {
@@ -150,6 +160,7 @@ export interface NewsFeedResponse {
     fetched_at: string | null; reason: string | null; count: number
   }[]
   fetched_at: string | null
+  refreshing?: boolean
   today: string
   related_symbols: string[]
   association_status: string
@@ -164,6 +175,26 @@ export interface NewsAnalysis {
   model: string | null
   reasoning_effort: string | null
   generated_at: string | null
+  cache_hit?: boolean
+}
+
+export interface NewsDirectionJob {
+  id: string
+  status: 'running' | 'complete' | 'failed' | 'partial' | 'busy' | 'unconfigured' | 'unsupported' | 'empty'
+  total: number
+  completed: number
+  error: string | null
+  model: 'gpt-6-luna'
+  reasoning_effort: 'high' | 'max'
+  cache_hit: boolean
+}
+
+export interface StrategyReviewResult {
+  content: string
+  model: 'gpt-6.1-sol'
+  reasoning_effort: 'xhigh' | 'max'
+  code_hash: string
+  generated_at: string
   cache_hit?: boolean
 }
 
@@ -2287,6 +2318,13 @@ export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
 
   newsFeed: (refresh = false) => request<NewsFeedResponse>(`/api/custom/news/feed${refresh ? '?refresh=true' : ''}`, { quiet: true }),
+  newsDirections: (effort: 'high' | 'max') => request<NewsDirectionJob>('/api/custom/news/directions', {
+    method: 'POST', body: JSON.stringify({ effort }),
+  }),
+  newsDirectionJob: (id: string) => request<NewsDirectionJob>(`/api/custom/news/directions/${id}`, { quiet: true }),
+  strategyReview: (payload: { code: string; reasoning_effort: 'xhigh' | 'max' }) => request<StrategyReviewResult>('/api/strategies/ai/review', {
+    method: 'POST', body: JSON.stringify(payload), timeoutMs: 660_000,
+  }),
   newsAnalyze: (article_id: string) => request<NewsAnalysis>('/api/custom/news/analyze', {
     method: 'POST', body: JSON.stringify({ article_id }), quiet: true,
   }),

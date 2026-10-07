@@ -74,7 +74,7 @@ def _summary_key(text: str) -> str:
     return _canonical(re.sub(r"财联社\d{1,2}月\d{1,2}日电[，,:：\s]*", "", text))
 
 
-def normalize_news(records: list[NewsRecord]) -> list[dict]:
+def normalize_news(records: list[NewsRecord], *, limit: int = 240) -> list[dict]:
     grouped: dict[str, list[dict]] = {}
     for record in records:
         # Avoid fuzzy merging of different updates. The same headline on another
@@ -105,7 +105,7 @@ def normalize_news(records: list[NewsRecord]) -> list[dict]:
             item["id"] = hashlib.sha256(evidence_id.encode()).hexdigest()[:24]
             item.update(classify(item["title"] + " " + item["summary"]))
             items.append(item)
-    return sorted(items, key=lambda row: (row["published_at"], row["id"]), reverse=True)[:240]
+    return sorted(items, key=lambda row: (row["published_at"], row["id"]), reverse=True)[:limit]
 
 
 def associate(text: str, instruments: list[dict]) -> list[dict]:
