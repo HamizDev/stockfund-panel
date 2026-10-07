@@ -1,4 +1,4 @@
-"""指数 API (核心四只固定清单, 浏览/搜索全量指数已下线; 仅保留详情读数与同步)。"""
+"""指数 API (核心五只固定清单, 浏览/搜索全量指数已下线; 仅保留详情读数与同步)。"""
 from __future__ import annotations
 
 import logging
@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.indicators.pipeline import compute_enriched
 from app.market_time import cn_today
-from app.services import index_sync, kline_sync, preferences, trading_day
+from app.services import index_minute, index_sync, kline_sync, trading_day
 from app.tickflow.capabilities import Cap
 
 logger = logging.getLogger(__name__)
@@ -81,14 +81,13 @@ def get_index_minute(
     symbol: str = Query(..., description="指数代码, 如 000001.SH"),
     trade_date: date | None = Query(None, alias="date", description="交易日期, 休市时默认最近本地指数交易日"),
 ):
-    """实时读取指数分钟 K。不写入股票分钟 parquet。
+    """按需读取腾讯指数分时点位, 不写入任何分钟 parquet。
 
-    历史深度由当前分钟源决定, 显式日期不会因空数据而替换。
+    近五个交易日覆盖以来源实际返回为准, 显式日期不会因空数据而替换。
     未指定日期且确认休市时使用最近本地指数日 K 的日期。
     结果带 10s 进程内缓存, 不同指数、日期和分钟源分别缓存。
     """
     repo = request.app.state.repo
-    capset = request.app.state.capabilities
     info = _index_info(repo, symbol)
     today = cn_today()
     day = trade_date or today
@@ -104,15 +103,21 @@ def get_index_minute(
             "date": str(day),
             "rows": [],
             "source": "future",
+            "provider": index_minute.PROVIDER,
+            "data_kind": "price_points",
+            "history_days": index_minute.HISTORY_DAYS,
         }
-    cache_key = (symbol, day.isoformat(), preferences.get_minute_data_provider())
+    cache_key = (symbol, day.isoformat(), index_minute.PROVIDER)
     now = time.monotonic()
     with _index_minute_cache_lock:
         hit = _index_minute_cache.get(cache_key)
     if hit is not None and now - hit[0] < _INDEX_MINUTE_CACHE_TTL:
         df = hit[1]
     else:
-        df = kline_sync.fetch_minute_single(symbol, day, asset_type="index", capset=capset)
+        try:
+            df = index_minute.fetch_index_minute(symbol, day)
+        except index_minute.IndexMinuteUnavailableError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
         with _index_minute_cache_lock:
             _index_minute_cache[cache_key] = (time.monotonic(), df)
             while len(_index_minute_cache) > _INDEX_MINUTE_CACHE_MAX:
@@ -125,6 +130,9 @@ def get_index_minute(
         "date": str(day),
         "rows": df.to_dicts(),
         "source": "live" if not df.is_empty() else "none",
+        "provider": index_minute.PROVIDER,
+        "data_kind": "price_points",
+        "history_days": index_minute.HISTORY_DAYS,
     }
 
 

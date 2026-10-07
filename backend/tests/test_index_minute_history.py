@@ -12,9 +12,10 @@ from fastapi.testclient import TestClient
 
 from app.api import indices
 from app.market_time import CN_TZ
+from app.services import kline_sync
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
-_fetch_minute_single = indices.kline_sync.fetch_minute_single
+_fetch_index_minute = indices.index_minute.fetch_index_minute
 
 
 @pytest.fixture
@@ -22,7 +23,7 @@ def context(monkeypatch):
     indices._index_minute_cache.clear()
     monkeypatch.setattr(indices, "cn_today", lambda: date(2026, 9, 13))
     monkeypatch.setattr(indices.trading_day, "is_trading_day", lambda: False)
-    monkeypatch.setattr(indices.preferences, "get_minute_data_provider", lambda: "custom_a")
+    monkeypatch.setattr(kline_sync.preferences, "get_minute_data_provider", lambda: "eltdx_gateway")
     repo = MagicMock()
     repo.get_index_instruments.return_value = pl.DataFrame({
         "symbol": ["000001.SH"], "name": ["上证指数"],
@@ -31,7 +32,7 @@ def context(monkeypatch):
     fetch = MagicMock(return_value=pl.DataFrame({
         "datetime": [datetime(2026, 9, 11, 9, 35)], "close": [3000.0],
     }))
-    monkeypatch.setattr(indices.kline_sync, "fetch_minute_single", fetch)
+    monkeypatch.setattr(indices.index_minute, "fetch_index_minute", fetch)
     state = SimpleNamespace(repo=repo, capabilities=MagicMock())
     request = SimpleNamespace(app=SimpleNamespace(state=state))
     yield request, fetch
@@ -43,7 +44,7 @@ def test_historical_date_uses_index_minute_route(context):
     day = date(2026, 9, 11)
     result = indices.get_index_minute(request, symbol="000001.SH", trade_date=day)
     fetch.assert_called_once_with(
-        "000001.SH", day, asset_type="index", capset=request.app.state.capabilities,
+        "000001.SH", day,
     )
     assert result["date"] == "2026-09-11"
     assert result["source"] == "live"
@@ -97,7 +98,7 @@ def test_future_date_does_not_fetch(context):
     assert result["rows"] == []
 
 
-def test_cache_ttl_and_provider_switch(context, monkeypatch):
+def test_cache_ttl_independent_of_stock_provider_switch(context, monkeypatch):
     request, fetch = context
     clock = [100.0]
     monkeypatch.setattr(indices.time, "monotonic", lambda: clock[0])
@@ -108,9 +109,9 @@ def test_cache_ttl_and_provider_switch(context, monkeypatch):
     clock[0] += 11
     indices.get_index_minute(request, symbol="000001.SH", trade_date=day)
     assert fetch.call_count == 2
-    monkeypatch.setattr(indices.preferences, "get_minute_data_provider", lambda: "custom_b")
+    monkeypatch.setattr(kline_sync.preferences, "get_minute_data_provider", lambda: "zzshare")
     indices.get_index_minute(request, symbol="000001.SH", trade_date=day)
-    assert fetch.call_count == 3
+    assert fetch.call_count == 2
 
 
 def test_cache_separates_dates_and_symbols_and_stays_bounded(context, monkeypatch):
@@ -124,9 +125,10 @@ def test_cache_separates_dates_and_symbols_and_stays_bounded(context, monkeypatc
 
 def test_failed_fetch_is_not_cached(context):
     request, fetch = context
-    fetch.side_effect = [RuntimeError("upstream unavailable"), pl.DataFrame()]
-    with pytest.raises(RuntimeError, match="upstream unavailable"):
+    fetch.side_effect = [indices.index_minute.IndexMinuteUnavailableError("upstream unavailable"), pl.DataFrame()]
+    with pytest.raises(indices.HTTPException) as error:
         indices.get_index_minute(request, symbol="000001.SH", trade_date=date(2026, 9, 11))
+    assert error.value.status_code == 502
     result = indices.get_index_minute(request, symbol="000001.SH", trade_date=date(2026, 9, 11))
     assert result["source"] == "none"
     assert fetch.call_count == 2
@@ -168,30 +170,30 @@ def test_http_date_alias_and_default(context):
 
 
 @pytest.mark.parametrize("native_allowed", [False, True])
-def test_history_preserves_native_permissions_and_requested_window(context, monkeypatch, native_allowed):
+def test_free_index_source_ignores_stock_provider_and_native_permissions(context, monkeypatch, native_allowed):
     request, _ = context
     request.app.state.capabilities = CapabilitySet(
         {Cap.KLINE_MINUTE_BY_SYMBOL: CapabilityLimits()} if native_allowed else {},
     )
-    monkeypatch.setattr(indices.kline_sync, "fetch_minute_single", _fetch_minute_single)
-    custom = MagicMock(return_value=(None, True))
-    monkeypatch.setattr(indices.kline_sync, "_try_custom_minute", custom)
+    monkeypatch.setattr(indices.index_minute, "fetch_index_minute", _fetch_index_minute)
+    provider = MagicMock()
+    provider.get_minute.return_value = pl.DataFrame()
+    resolve = MagicMock(return_value=(provider, False, None))
+    monkeypatch.setattr(kline_sync, "_resolve_minute_provider", resolve)
     client = MagicMock()
     client.klines.batch.return_value = []
     get_client = MagicMock(return_value=client)
-    monkeypatch.setattr(indices.kline_sync, "get_client", get_client)
+    monkeypatch.setattr(kline_sync, "get_client", get_client)
     day = date(2026, 9, 11)
     first = indices.get_index_minute(request, symbol="000001.SH", trade_date=day)
     assert first["rows"] == []
     assert indices.get_index_minute(request, symbol="000001.SH", trade_date=day) == first
-    custom.assert_called_once()
-    assert custom.call_args.kwargs["asset_type"] == "index"
-    if not native_allowed:
-        get_client.assert_not_called()
-        return
-    client.klines.batch.assert_called_once()
-    args, kwargs = client.klines.batch.call_args
-    assert args == (["000001.SH"],)
-    assert kwargs["period"] == "1m"
-    assert kwargs["start_time"] == int(datetime(2026, 9, 11, 9, 25, tzinfo=CN_TZ).timestamp() * 1000)
-    assert kwargs["end_time"] == int(datetime(2026, 9, 11, 15, 5, tzinfo=CN_TZ).timestamp() * 1000)
+    resolve.assert_called_once_with("txquote", asset_type="index")
+    get_client.assert_not_called()
+    provider.get_minute.assert_called_once()
+    args, kwargs = provider.get_minute.call_args
+    assert args[0] == ["000001.SH"]
+    assert kwargs["freq"] == "1m"
+    assert kwargs["asset_type"] == "index"
+    assert args[1] == datetime(2026, 9, 11, 9, 25, tzinfo=CN_TZ)
+    assert args[2] == datetime(2026, 9, 11, 15, 5, tzinfo=CN_TZ)

@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Loader2, Lock, RefreshCw } from 'lucide-react'
-import { api, type IndexInstrument, type KlineRow, type MinuteKlineRow } from '@/lib/api'
+import { Activity, Loader2, RefreshCw } from 'lucide-react'
+import { api, type IndexInstrument, type IndexMinuteRow, type KlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
-import { useCapabilities } from '@/lib/useSharedQueries'
 import { EChartsCandlestick, type OHLC } from '@/components/EChartsCandlestick'
 import { EChartsIntraday } from '@/components/EChartsIntraday'
 
@@ -71,10 +70,6 @@ export function Indices() {
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
 
-  // 分时数据依赖分钟K批量数据 (kline.minute.batch)
-  const caps = useCapabilities()
-  const hasMinuteCap = !!caps.data?.capabilities?.['kline.minute.batch']
-
   // 指数标的固定核心五只 (产品契约, 不再提供全指数搜索/浏览)
   const topRows: IndexInstrument[] = PINNED_INDEXES.map(p => ({
     symbol: p.symbol, name: p.name, asset_type: 'index' as const,
@@ -106,8 +101,9 @@ export function Indices() {
 
   const minute = useQuery({
     queryKey: QK.indexMinute(selectedSymbol, selectedDate ?? ''),
-    queryFn: () => api.indexMinute(selectedSymbol, selectedDate ?? undefined),
-    enabled: !!selectedSymbol && !!selectedDate && hasMinuteCap,
+    queryFn: () => api.indexMinute(selectedSymbol, selectedDate!),
+    enabled: !!selectedSymbol && !!selectedDate,
+    retry: false,
   })
 
   const syncDaily = useMutation({
@@ -129,15 +125,11 @@ export function Indices() {
 
   const chartRows = useMemo(() => toOHLC(daily.data?.rows ?? []), [daily.data?.rows])
   const selectedInfo = topRows.find(r => r.symbol === selectedSymbol) || daily.data?.index_info
-  const minuteRows: MinuteKlineRow[] = minute.data?.symbol === selectedSymbol
+  const minuteRows: IndexMinuteRow[] = minute.data?.symbol === selectedSymbol
     && minute.data?.date === selectedDate && daily.data?.symbol === selectedSymbol
     ? minute.data.rows : []
   const selectedIdx = selectedDate ? chartRows.findIndex(r => r.date === selectedDate) : -1
-  const prevClose = selectedIdx > 0
-    ? chartRows[selectedIdx - 1].close
-    : chartRows.length >= 2
-      ? chartRows[chartRows.length - 2].close
-      : undefined
+  const prevClose = selectedIdx > 0 ? chartRows[selectedIdx - 1].close : undefined
 
   useEffect(() => {
     setSelectedDate(null)
@@ -174,7 +166,7 @@ export function Indices() {
 
   return (
     <div className="h-full overflow-auto bg-base p-4">
-      <div className="mb-4 flex items-center justify-between gap-3">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-lg font-semibold text-foreground">指数</h1>
           <p className="mt-1 text-xs text-muted">
@@ -193,7 +185,7 @@ export function Indices() {
         </div>
       </div>
 
-      <div className="grid grid-cols-[15rem_1fr] gap-4">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[15rem_minmax(0,1fr)]">
         <aside className="rounded-card border border-border bg-surface p-3">
           <div className="mb-2 px-1 text-[11px] uppercase tracking-wider text-muted">核心指数</div>
           <div className="space-y-1">
@@ -202,7 +194,7 @@ export function Indices() {
         </aside>
 
         <main className="min-w-0 rounded-card border border-border bg-surface p-3">
-          <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="mb-3 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <Activity className="h-4 w-4 text-accent" />
@@ -217,7 +209,7 @@ export function Indices() {
                 实时缓存 {quotes.data?.count ?? 0} 只指数 · 日K来源 {daily.data?.source ?? '--'}
               </div>
             </div>
-            <div className="flex items-center gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
               <input
                 type="date"
                 value={range.start}
@@ -242,8 +234,8 @@ export function Indices() {
             </div>
           )}
           {chartRows.length > 0 && (
-            <div className="flex items-start gap-3">
-              <div className="min-w-0 flex-1">
+            <div className="grid min-w-0 grid-cols-1 gap-4 2xl:grid-cols-2">
+              <div className="min-w-0">
                 <EChartsCandlestick
                   data={chartRows}
                   height={620}
@@ -260,34 +252,49 @@ export function Indices() {
                   activeIndicators={['vol', 'macd']}
                 />
               </div>
-              <div className="min-w-0 flex-1 border-l border-border pl-3" style={{ height: 620 }}>
-                {!hasMinuteCap ? (
-                  <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-                    <Lock className="h-5 w-5 text-muted" />
-                    <div className="text-xs text-secondary">指数分时数据不可用</div>
-                    <div className="text-[10px] text-muted">分钟K(批量)数据不可用</div>
+              <div className="min-w-0 border-t border-border pt-3 2xl:border-l 2xl:border-t-0 2xl:pl-3 2xl:pt-0" style={{ minHeight: 620 }}>
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[10px] text-muted">
+                  <span>
+                    日期 {minute.data?.date === selectedDate ? minute.data.date : selectedDate ?? '--'}
+                    {' · '}{minute.data?.data_kind === 'price_points' ? '价格点位' : '分时'}
+                  </span>
+                  <span>
+                    来源 {minute.data?.provider === 'txquote' ? '腾讯免费分时' : minute.data?.provider ?? minute.data?.source ?? '--'}
+                    {' · '}{minute.data?.history_days != null
+                      ? `近${minute.data.history_days}个交易日，以来源实际覆盖为准`
+                      : '历史范围 --'}
+                  </span>
+                </div>
+                {minute.isPending && <div className="flex h-[580px] items-center justify-center text-xs text-muted">指数分时加载中…</div>}
+                {minute.isError && (
+                  <div role="alert" className="flex min-h-[120px] flex-col items-center justify-center gap-2 text-center">
+                    <div className="text-xs text-danger">{selectedDate ?? '所选日期'} 指数分时加载失败</div>
+                    <button
+                      onClick={() => { void minute.refetch() }}
+                      disabled={minute.isFetching}
+                      className="rounded-btn border border-border px-2.5 py-1 text-xs text-secondary hover:bg-elevated disabled:opacity-50"
+                    >
+                      {minute.isFetching ? '重试中…' : '重试'}
+                    </button>
                   </div>
-                ) : (
-                  <>
-                    {minute.isLoading && <div className="py-2 text-xs text-muted">分时加载中…</div>}
-                    {!minute.isLoading && minuteRows.length === 0 && (
-                      <div className="flex h-full items-center justify-center text-xs text-muted">
-                        暂无分时数据
-                      </div>
-                    )}
-                    {minuteRows.length > 0 && (
-                      <EChartsIntraday
-                        key={`${selectedSymbol}:${selectedDate}`}
-                        data={minuteRows}
-                        height={620}
-                        prevClose={prevClose}
-                        date={selectedDate ?? undefined}
-                        showLimitLines={false}
-                        showAvgLine={false}
-                        onPriceHover={setLinkedPrice}
-                      />
-                    )}
-                  </>
+                )}
+                {!minute.isPending && !minute.isError && minuteRows.length === 0 && (
+                  <div className="flex min-h-[120px] items-center justify-center text-xs text-muted">
+                    {selectedDate ?? '所选日期'} 暂无指数分时数据
+                  </div>
+                )}
+                {minuteRows.length > 0 && (
+                  <EChartsIntraday
+                    key={`${selectedSymbol}:${selectedDate}`}
+                    data={minuteRows}
+                    height={620}
+                    prevClose={prevClose}
+                    date={selectedDate ?? undefined}
+                    showLimitLines={false}
+                    showAvgLine={false}
+                    pricePointsOnly={true}
+                    onPriceHover={setLinkedPrice}
+                  />
                 )}
               </div>
             </div>

@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
-import type { MinuteKlineRow, PriceLimitInfo } from '@/lib/api'
+import type { IndexMinuteRow, MinuteKlineRow, PriceLimitInfo } from '@/lib/api'
 import { computeIntradayAverage, formatMinuteTime, FULL_DAY_TIMES, summarizeMinutes, type DailySummary } from '@/lib/intraday-chart'
 import { useChartTheme, type ChartTheme } from '@/lib/theme'
 
 type YMode = 'adaptive' | 'limit'
+type IntradayRow = MinuteKlineRow | IndexMinuteRow
 
 // 序列颜色 (双主题通用); 画布轴/网格/十字线等主题相关色走 ChartTheme
 const THEME = {
@@ -17,7 +18,7 @@ const THEME = {
 }
 
 interface Props {
-  data: MinuteKlineRow[]
+  data: IntradayRow[]
   height?: number
   prevClose?: number
   date?: string
@@ -29,6 +30,8 @@ interface Props {
   priceLines?: { value: number; label?: string; color?: string }[]
   showLimitLines?: boolean
   showAvgLine?: boolean
+  /** Index minute responses are price points and have no OHLC or volume semantics. */
+  pricePointsOnly?: boolean
 }
 
 function fmtAmt(v: number | null | undefined): string {
@@ -64,7 +67,20 @@ function getLimitPrices(prevClose: number, priceLimit?: PriceLimitInfo): {
   return { limitUp, limitDown, upPct, downPct }
 }
 
-function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: (number | null)[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = []): EChartsOption {
+function buildOption(
+  data: IntradayRow[],
+  prevClose: number | undefined,
+  avgPrices: (number | null)[],
+  lineColor: string,
+  areaColor: string,
+  yMode: YMode,
+  ct: ChartTheme,
+  priceLimit?: PriceLimitInfo,
+  showLimitLines = true,
+  showAvgLine = true,
+  priceLines: Props['priceLines'] = [],
+  pricePointsOnly = false,
+): EChartsOption {
   // 无涨跌幅标的 (注册制新股上市初期窗口, 后端 no_limit 标记): 不存在可信
   // 涨跌停带, 自适应/涨跌停两类模式都退化为纯数据对称范围, 也不画涨跌停虚线
   const limitLinesActive = showLimitLines && !priceLimit?.no_limit
@@ -83,22 +99,26 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
   for (let i = 0; i < data.length; i++) {
     const timeKey = formatMinuteTime(data[i].datetime)
     const idx = timeIndexMap.get(timeKey)
-    if (idx !== undefined) {
-      closes[idx] = data[i].close
-      highs[idx] = data[i].high
-      lows[idx] = data[i].low
+    if (idx === undefined) continue
+
+    closes[idx] = data[i].close
+    if (!pricePointsOnly) {
+      if (isValidPrice(data[i].high)) highs[idx] = data[i].high
+      if (isValidPrice(data[i].low)) lows[idx] = data[i].low
       avgData[idx] = avgPrices[i]
-      volumes[idx] = {
-        value: data[i].volume,
-        itemStyle: {
-          color: prevRef == null
-            ? volNeutral
-            : data[i].close > prevRef
-              ? THEME.volUp
-              : data[i].close < prevRef
-                ? THEME.volDown
-                : volNeutral,
-        },
+      if (typeof data[i].volume === 'number' && Number.isFinite(data[i].volume)) {
+        volumes[idx] = {
+          value: data[i].volume,
+          itemStyle: {
+            color: prevRef == null
+              ? volNeutral
+              : data[i].close > prevRef
+                ? THEME.volUp
+                : data[i].close < prevRef
+                  ? THEME.volDown
+                  : volNeutral,
+          },
+        }
       }
       prevRef = data[i].close
     }
@@ -148,7 +168,9 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
   let yMax: number | undefined
   let maxDiff = 0
   if (isValidPrice(prevClose) && data.length > 0) {
-    const priceArrays = showAvgLine ? [closes, highs, lows, avgData] : [closes, highs, lows]
+    const priceArrays = pricePointsOnly
+      ? [closes]
+      : showAvgLine ? [closes, highs, lows, avgData] : [closes, highs, lows]
     for (const arr of priceArrays) {
       for (const v of arr) {
         if (!isValidPrice(v)) continue
@@ -245,10 +267,12 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
     axisPointer: {
       link: [{ xAxisIndex: 'all' }],
     },
-    grid: [
-      { left: 60, right: 55, top: 24, bottom: '34%' },
-      { left: 60, right: 55, top: '69%', bottom: 20 },
-    ],
+    grid: pricePointsOnly
+      ? [{ left: 60, right: 55, top: 24, bottom: 24 }]
+      : [
+          { left: 60, right: 55, top: 24, bottom: '34%' },
+          { left: 60, right: 55, top: '69%', bottom: 20 },
+        ],
     xAxis: [
       {
         type: 'category',
@@ -281,12 +305,12 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         },
         axisTick: { show: false },
         splitLine: {
-          show: true,
+          show: !pricePointsOnly,
           lineStyle: { color: ct.grid },
         },
       },
-      {
-        type: 'category',
+      ...(!pricePointsOnly ? [{
+        type: 'category' as const,
         gridIndex: 1,
         data: FULL_DAY_TIMES,
         boundaryGap: false,
@@ -294,7 +318,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         axisLabel: { show: false },
         axisTick: { show: false },
         splitLine: { show: false },
-      },
+      }] : []),
     ],
     yAxis: [
       {
@@ -326,7 +350,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
           formatter: (v: number) => v.toFixed(2),
         },
       },
-      {
+      ...(!pricePointsOnly ? [{
         scale: true,
         gridIndex: 1,
         splitNumber: 2,
@@ -334,7 +358,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         axisTick: { show: false },
         splitLine: { show: false },
         axisLabel: { show: false },
-      },
+      }] : []),
       ...(isValidPrice(prevClose) && yMin != null && yMax != null ? [{
         type: 'value' as const,
         position: 'right' as const,
@@ -382,7 +406,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         connectNulls: true,
         markLine: markLineData.length > 0 ? { symbol: 'none', data: markLineData, animation: false, silent: true } : undefined,
       },
-      ...(showAvgLine ? [{
+      ...(!pricePointsOnly && showAvgLine ? [{
         name: '均价',
         type: 'line' as const,
         data: avgData,
@@ -392,14 +416,14 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         lineStyle: { width: 1, color: THEME.avgLine },
         connectNulls: true,
       }] : []),
-      {
+      ...(!pricePointsOnly ? [{
         name: '成交量',
-        type: 'bar',
+        type: 'bar' as const,
         data: volumes,
         xAxisIndex: 1,
         yAxisIndex: 1,
         cursor: 'crosshair',
-      },
+      }] : []),
     ],
   }
 }
@@ -417,6 +441,7 @@ export function EChartsIntraday({
   priceLines,
   showLimitLines = true,
   showAvgLine = true,
+  pricePointsOnly = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
@@ -437,8 +462,14 @@ export function EChartsIntraday({
   const [infoIdx, setInfoIdx] = useState(-1)
   const [yMode, setYMode] = useState<YMode>('adaptive')
   const ct = useChartTheme()
-  const avgPrices = useMemo(() => computeIntradayAverage(data), [data])
-  const summary = useMemo(() => summarizeMinutes(data), [data])
+  const avgPrices = useMemo(
+    () => pricePointsOnly ? data.map(() => null) : computeIntradayAverage(data as MinuteKlineRow[]),
+    [data, pricePointsOnly],
+  )
+  const summary = useMemo(
+    () => pricePointsOnly ? null : summarizeMinutes(data as MinuteKlineRow[]),
+    [data, pricePointsOnly],
+  )
 
   // 分时线颜色：基于最新价 vs 昨收
   const lastClose = data.length > 0 ? data[data.length - 1].close : null
@@ -529,12 +560,12 @@ export function EChartsIntraday({
       }
       fullDayToDataIdx.current = mapping
 
-      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines), true)
+      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, pricePointsOnly), true)
     } else {
       fullDayToDataIdx.current = new Map()
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines])
+  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, pricePointsOnly])
 
   useEffect(() => {
     return () => {
@@ -553,19 +584,22 @@ export function EChartsIntraday({
   }, [])
 
   const hovered = infoIdx >= 0 && infoIdx < data.length ? data[infoIdx] : null
-  const d = hovered ?? summary
-  const daily = dailySummary?.date === date ? dailySummary : undefined
-  const ohlc = hovered ?? daily ?? summary
+  const point = hovered ?? data[data.length - 1] ?? null
+  const d = pricePointsOnly ? null : (hovered as MinuteKlineRow | null) ?? summary
+  const daily = !pricePointsOnly && dailySummary?.date === date ? dailySummary : undefined
+  const ohlc = pricePointsOnly ? null : (hovered as MinuteKlineRow | null) ?? daily ?? summary
   const avg = d != null ? avgPrices[hovered ? infoIdx : data.length - 1] : null
   const chg = d && prevClose != null ? d.close - prevClose : null
+  const pointChg = point && prevClose != null ? point.close - prevClose : null
   const isUp = chg != null ? chg > 0 : true
   const isFlat = chg != null ? chg === 0 : false
   const priceClr = isFlat ? '#A1A1AA' : isUp ? '#C74040' : '#2D9B65'
+  const pointPriceClr = pointChg === 0 ? '#A1A1AA' : pointChg != null && pointChg < 0 ? '#2D9B65' : '#C74040'
 
   return (
     <div className="w-full">
       {/* 按钮行: 切换式按钮组, 居右 */}
-      {showLimitLines && <div className="flex items-center justify-end px-1 pb-0.5">
+      {showLimitLines && !pricePointsOnly && <div className="flex items-center justify-end px-1 pb-0.5">
         <div className="inline-flex items-center rounded bg-elevated overflow-hidden">
           <button
             onClick={() => setYMode('adaptive')}
@@ -590,46 +624,54 @@ export function EChartsIntraday({
           </button>
         </div>
       </div>}
-      <div style={{ backgroundColor: ct.infoBarBg }}>
-        {/* 第一行: 日期 + OHLC */}
-        <div className="flex items-center gap-x-2 px-2 font-mono text-[11px] select-none flex-wrap" style={{ minHeight: 20 }}>
-          {!d && <span className="text-muted">—</span>}
-          {ohlc && (
-            <>
-              {date && <span className="text-muted">{date}</span>}
-              <span className="text-muted">{hovered ? `${formatMinuteTime(hovered.datetime)} 分钟` : daily ? '日K（前复权）' : '分时汇总'}</span>
-              <span className="text-muted">开</span>
-              <span style={{ color: priceClr }}>{ohlc.open != null ? ohlc.open.toFixed(2) : '—'}</span>
-              <span className="text-muted">高</span>
-              <span style={{ color: priceClr }}>{ohlc.high.toFixed(2)}</span>
-              <span className="text-muted">低</span>
-              <span style={{ color: priceClr }}>{ohlc.low.toFixed(2)}</span>
-              <span className="text-muted">收</span>
-              <span style={{ color: priceClr }} className="font-semibold">{ohlc.close.toFixed(2)}</span>
-            </>
-          )}
+      {pricePointsOnly ? (
+        <div className="flex flex-wrap items-center gap-x-2 px-2 font-mono text-[11px] select-none" style={{ minHeight: 20, backgroundColor: ct.infoBarBg }}>
+          {date && <span className="text-muted">{date}</span>}
+          <span className="text-muted">{hovered ? `${formatMinuteTime(hovered.datetime)} 指数点位` : '最新指数点位'}</span>
+          <span className="font-semibold" style={{ color: pointPriceClr }}>{point ? point.close.toFixed(2) : '—'}</span>
         </div>
-        {/* 第二行: 价格+均价+量+额 */}
-        <div className="flex flex-wrap items-center gap-x-2 px-2 font-mono text-[11px] select-none" style={{ minHeight: 20 }}>
-          {d && (
-            <>
-              <span className="flex items-center gap-x-1">
-                <span style={{ display: 'inline-block', width: 14, height: 2, background: priceClr }} />
-                <span style={{ color: priceClr }}>{d.close.toFixed(2)}</span>
-              </span>
-              {showAvgLine && <span className="flex items-center gap-x-1">
-                <span style={{ display: 'inline-block', width: 14, height: 2, background: THEME.avgLine }} />
-                <span style={{ color: THEME.avgLine }}>{avg != null ? avg.toFixed(2) : '—'}</span>
-              </span>}
-              <span className="text-muted">{hovered ? '量' : '累计量'}</span>
-              <span className="text-secondary">{d.volume.toFixed(0)}</span>
-              <span className="text-muted">{hovered ? '额' : '累计额'}</span>
-              <span className="text-secondary">{fmtAmt(d.amount)}</span>
-            </>
-          )}
+      ) : (
+        <div style={{ backgroundColor: ct.infoBarBg }}>
+          {/* 第一行: 日期 + OHLC */}
+          <div className="flex items-center gap-x-2 px-2 font-mono text-[11px] select-none flex-wrap" style={{ minHeight: 20 }}>
+            {!d && <span className="text-muted">—</span>}
+            {ohlc && (
+              <>
+                {date && <span className="text-muted">{date}</span>}
+                <span className="text-muted">{hovered ? `${formatMinuteTime(hovered.datetime)} 分钟` : daily ? '日K（前复权）' : '分时汇总'}</span>
+                <span className="text-muted">开</span>
+                <span style={{ color: priceClr }}>{ohlc.open != null ? ohlc.open.toFixed(2) : '—'}</span>
+                <span className="text-muted">高</span>
+                <span style={{ color: priceClr }}>{ohlc.high.toFixed(2)}</span>
+                <span className="text-muted">低</span>
+                <span style={{ color: priceClr }}>{ohlc.low.toFixed(2)}</span>
+                <span className="text-muted">收</span>
+                <span style={{ color: priceClr }} className="font-semibold">{ohlc.close.toFixed(2)}</span>
+              </>
+            )}
+          </div>
+          {/* 第二行: 价格+均价+量+额 */}
+          <div className="flex flex-wrap items-center gap-x-2 px-2 font-mono text-[11px] select-none" style={{ minHeight: 20 }}>
+            {d && (
+              <>
+                <span className="flex items-center gap-x-1">
+                  <span style={{ display: 'inline-block', width: 14, height: 2, background: priceClr }} />
+                  <span style={{ color: priceClr }}>{d.close.toFixed(2)}</span>
+                </span>
+                {showAvgLine && <span className="flex items-center gap-x-1">
+                  <span style={{ display: 'inline-block', width: 14, height: 2, background: THEME.avgLine }} />
+                  <span style={{ color: THEME.avgLine }}>{avg != null ? avg.toFixed(2) : '—'}</span>
+                </span>}
+                <span className="text-muted">{hovered ? '量' : '累计量'}</span>
+                <span className="text-secondary">{d.volume.toFixed(0)}</span>
+                <span className="text-muted">{hovered ? '额' : '累计额'}</span>
+                <span className="text-secondary">{fmtAmt(d.amount)}</span>
+              </>
+            )}
+          </div>
         </div>
-      </div>
-      <div ref={containerRef} className="w-full" style={{ height: height - 42, cursor: 'crosshair' }} />
+      )}
+      <div ref={containerRef} className="w-full" style={{ height: height - (pricePointsOnly ? 22 : 42), cursor: 'crosshair' }} />
     </div>
   )
 }

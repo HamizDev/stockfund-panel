@@ -286,6 +286,17 @@ export interface MinuteKlineRow {
   amount: number | null
 }
 
+/** 指数分时只提供价格点位; 成交量、成交额和 OHLC 字段不适用。 */
+export interface IndexMinuteRow {
+  datetime: string
+  open: null
+  high: null
+  low: null
+  close: number
+  volume: null
+  amount: null
+}
+
 export interface MinuteKlineSession {
   date: string
   prev_close: number | null
@@ -2701,8 +2712,11 @@ export const api = {
       symbol: string
       name?: string
       date: string | null
-      rows: MinuteKlineRow[]
+      rows: IndexMinuteRow[]
       source?: string
+      provider?: string
+      data_kind?: 'price_points' | string
+      history_days?: number
     }>(
       `/api/index/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}`,
     ),

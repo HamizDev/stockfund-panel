@@ -169,7 +169,7 @@ def test_provider_minute_empty_symbols():
 
     out = p.get_minute([], None, None)
     assert isinstance(out, pl.DataFrame) and out.is_empty()
-    out = p.get_minute(["000001.SZ"], None, None, asset_type="index")
+    out = p.get_minute(["510300.SH"], None, None, asset_type="etf")
     assert out.is_empty()
 
 

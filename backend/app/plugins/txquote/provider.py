@@ -13,11 +13,13 @@
 未声明其他数据集 → provider_has_dataset 为 False, 自动回退 tickflow/fuyao。
 
 单位与口径 (CONTRIBUTING §3.1, 不可凭字段名推断):
-  - 腾讯 q=/分时/5日分时 volume 已是手, 直接透传 (金额=价x量x100 反推验证);
+  - 腾讯股票 q=/分时/5日分时 volume 已是手, 直接透传 (金额=价x量x100 反推验证);
     新浪 K 线 volume 为股 → floor(/100) 转手。
   - amount 均为元, 直接透传。
   - datetime 为北京时间墙钟 (naive), 与分钟K契约一致。
   - 缺字段/解析失败的行跳过, 不伪造数据; 网络失败软返回空, 不阻断上游。
+  - 指数 1m 仅提供点位 close, OHLC/量额未知字段为 null;
+    指数网络/格式错误显式报错, 不与成功但无该日期的数据混淆。
 """
 
 from __future__ import annotations
@@ -84,7 +86,7 @@ class TxQuoteProvider:
 
     name = "txquote"
     builtin = True
-    minute_asset_types = ("stock",)
+    minute_asset_types = ("stock", "index")
     # 1m 近 5 交易日 (腾讯 day/query); 5m+ 约 20 交易日。声明浅历史, 分时档位自动收窄。
     minute_history_days = 5
 
@@ -133,13 +135,15 @@ class TxQuoteProvider:
 
         freq 映射: "1m" 用腾讯近 5 日 1 分钟K (day/query, 按请求窗口过滤);
         "5m"/"15m"/"30m"/"60m" 用新浪 K 线; 其他 freq 抛 ValueError 明示。
-        网络/解析失败软返回空 DataFrame (上游会回退 TickFlow)。
+        股票网络/解析失败沿用软返回空; 指数错误抛出, 由专用服务转换为不可用。
         """
-        if not symbols or asset_type != "stock":
+        if not symbols or asset_type not in self.minute_asset_types:
             return pl.DataFrame()
         freq = (freq or "1m").strip().lower()
+        if asset_type == "index" and freq != "1m":
+            raise ValueError("腾讯指数分时仅支持 1m 点位")
         if freq == "1m":
-            frames = self._minute_1m(symbols, start_time, end_time, on_chunk_done)
+            frames = self._minute_1m(symbols, start_time, end_time, on_chunk_done, asset_type)
         elif freq in _FREQ_TO_SINA_SCALE:
             frames = self._minute_sina(
                 symbols, start_time, end_time, _FREQ_TO_SINA_SCALE[freq], on_chunk_done
@@ -159,18 +163,25 @@ class TxQuoteProvider:
         start_time: datetime | None,
         end_time: datetime | None,
         on_chunk_done: Callable[[int, int], None] | None,
+        asset_type: str = "stock",
     ) -> list[pl.DataFrame]:
-        """1m: 腾讯近 5 日 1 分钟K → 1m K 线 (open=high=low=close=该分钟价)。
+        """1m: 股票沿用逐分钟价映射; 指数保留点位而不生成 OHLC。
 
         day/query 接口返回最近 5 个交易日的数据; 按数据实际日期与请求窗口
         过滤, 不在窗口内返回空 (不伪造)。volume 已是手, 直接透传。
         """
         from datetime import date
 
+        from app.market_time import CN_TZ, cn_today
+
+        def wallclock(value):
+            return value.astimezone(CN_TZ).replace(tzinfo=None) if value and value.tzinfo else value
+
+        start_time, end_time = wallclock(start_time), wallclock(end_time)
         start_d = start_time.date() if start_time else None
         end_d = end_time.date() if end_time else None
         # 请求窗口完全在未来 → 无数据
-        if start_d is not None and start_d > date.today():
+        if start_d is not None and start_d > cn_today():
             return []
         client = self._get_client()
         frames: list[pl.DataFrame] = []
@@ -180,6 +191,8 @@ class TxQuoteProvider:
             try:
                 days = client.fetch_day_minute(sym)
             except TxQuoteError as e:
+                if asset_type == "index":
+                    raise
                 logger.warning("txquote 1m %s 失败: %s", sym, e)
                 continue
             recs = []
@@ -195,7 +208,32 @@ class TxQuoteProvider:
                     continue
                 for r in rows:
                     parts = r.split()
-                    if len(parts) < 4:
+                    if len(parts) < (2 if asset_type == "index" else 4):
+                        continue
+                    if asset_type == "index":
+                        hhmm, price_s = parts[:2]
+                        price = _to_float(price_s)
+                        if price is None or not math.isfinite(price) or price <= 0:
+                            continue
+                        try:
+                            if len(hhmm) != 4 or not hhmm.isdigit():
+                                continue
+                            stamp = datetime.combine(data_d, datetime.min.time()).replace(
+                                hour=int(hhmm[:2]), minute=int(hhmm[2:]),
+                            )
+                        except ValueError:
+                            continue
+                        if not ("0930" <= hhmm <= "1130" or "1300" <= hhmm <= "1500"):
+                            continue
+                        if (start_time and stamp < start_time) or (end_time and stamp > end_time):
+                            continue
+                        # Tencent supplies index points, not minute OHLC or a
+                        # verified per-minute index volume/amount contract.
+                        recs.append({
+                            "symbol": sym, "datetime": stamp, "close": price,
+                            "open": None, "high": None, "low": None,
+                            "volume": None, "amount": None,
+                        })
                         continue
                     hhmm, price_s, vol_s, amt_s = parts[0], parts[1], parts[2], parts[3]
                     price = _to_float(price_s)
@@ -216,8 +254,19 @@ class TxQuoteProvider:
                             "amount": amt,
                         }
                     )
+                if asset_type == "index" and rows and not any(rec["datetime"].date() == data_d for rec in recs):
+                    # A narrower valid time window may legitimately be empty.
+                    full_day = (
+                        (start_time is None or start_time.time() <= datetime.min.time().replace(hour=9, minute=30))
+                        and (end_time is None or end_time.time() >= datetime.min.time().replace(hour=15))
+                    )
+                    if full_day:
+                        raise TxQuoteError("腾讯指数分时点位格式无效")
             if recs:
-                frames.append(_normalize_minute_frame(recs))
+                frame = _normalize_minute_frame(recs)
+                if asset_type == "index":
+                    frame = frame.unique(subset=["symbol", "datetime"], keep="last").sort("datetime")
+                frames.append(frame)
             if on_chunk_done:
                 on_chunk_done(i + 1, len(symbols))
         return frames
