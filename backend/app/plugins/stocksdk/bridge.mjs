@@ -8,7 +8,7 @@
  *   - stdin: 单行 JSON  { op, symbols?, adjust?, period?, start?, end?, concurrency? }
  *   - stdout: 单行 JSON
  *       daily/adj/minute: { ok:true, op, rows: { [appSymbol]: Row[] } }
- *       realtime/instruments: { ok:true, op, rows: Row[] }
+ *       realtime/realtime_symbols/instruments: { ok:true, op, rows: Row[] }
  *       ping: { ok:true, op:'ping', version }
  *       失败:  { ok:false, error }
  *
@@ -17,6 +17,7 @@
  *   adj          —— 除权因子: 取 hfq 与 none 收盘价, ex_factor = close_hfq / close_none
  *   minute       —— 分钟K(period 默认 5)
  *   realtime     —— 全 A 股实时快照(batch.cn)
+ *   realtime_symbols —— 明确市场后缀的指数/ETF快照(quotes.cn)
  *   instruments  —— 全 A 股标的维表(batch.cn 提取元数据)
  *   ping         —— 探活
  *
@@ -196,25 +197,53 @@ async function opMinute(sdk, job) {
   return out
 }
 
+function realtimeRecord(q, symbol) {
+  return {
+    symbol,
+    name: q.name,
+    last_price: q.price,
+    prev_close: q.prevClose,
+    open: q.open,
+    high: q.high,
+    low: q.low,
+    volume: q.volume,
+    amount: q.amount,
+    change_pct: q.changePercent,
+    timestamp: q.timestamp,
+  }
+}
+
 async function opRealtime(sdk, job) {
   const { concurrency = 8 } = job
   const all = await sdk.batch.cn({ concurrency })
-  const rows = []
-  for (const q of all || []) {
-    if (!q || !q.code) continue
-    rows.push({
-      symbol: toAppSymbol(q.code, q.marketId),
-      name: q.name,
-      last_price: q.price,
-      prev_close: q.prevClose,
-      open: q.open,
-      high: q.high,
-      low: q.low,
-      volume: q.volume,
-      amount: q.amount,
-      change_pct: q.changePercent,
-      timestamp: q.timestamp,
-    })
+  return (all || []).filter(q => q && q.code)
+    .map(q => realtimeRecord(q, toAppSymbol(q.code, q.marketId)))
+}
+
+async function opRealtimeSymbols(sdk, job) {
+  const symbols = [...new Set((job.symbols || [])
+    .filter(s => typeof s === 'string')
+    .map(s => s.trim().toUpperCase())
+    .filter(s => /^\d{6}\.(SH|SZ)$/.test(s)))]
+  if (!symbols.length) return []
+  const sdkSymbols = symbols.map(s => {
+    const [code, suffix] = s.split('.')
+    return `${suffix.toLowerCase()}${code}`
+  })
+  const wanted = new Set(symbols)
+  const quotes = await sdk.quotes.cn(sdkSymbols)
+  if (!Array.isArray(quotes)) {
+    throw new Error('stock-sdk returned an invalid realtime quote list')
+  }
+  const rows = quotes.flatMap(q => {
+    // SDK 返回的明确 marketId 与请求市场共同确定归属，不用 guessSuffix。
+    const suffix = MARKET_ID_TO_SUFFIX[String(q?.marketId)]
+    const symbol = suffix && q?.code ? `${q.code}.${suffix}` : null
+    if (!wanted.has(symbol)) return []
+    return [realtimeRecord(q, symbol)]
+  })
+  if (quotes.length && !rows.length) {
+    throw new Error('stock-sdk returned no identifiable requested realtime quotes')
   }
   return rows
 }
@@ -276,6 +305,9 @@ async function main() {
         break
       case 'realtime':
         rows = await opRealtime(sdk, job)
+        break
+      case 'realtime_symbols':
+        rows = await opRealtimeSymbols(sdk, job)
         break
       case 'instruments':
         rows = await opInstruments(sdk, job)

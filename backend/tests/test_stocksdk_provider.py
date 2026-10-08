@@ -90,6 +90,65 @@ def test_get_realtime_normalizes_units_without_mutating_bridge_rows(monkeypatch)
     assert required <= set(out[0].keys())
 
 
+@pytest.mark.parametrize("method_name", ["get_realtime_indices", "get_realtime_etfs"])
+def test_get_realtime_symbols_normalizes_units_dedupes_and_filters_nonrequested(monkeypatch, method_name):
+    calls = []
+    rows = [
+        {"symbol": "000001.SH", "change_pct": 3.25, "amount": 123.45, "volume": 7,
+         "timestamp": 1787193740123},
+        {"symbol": "000001.SZ", "change_pct": -0.25, "amount": 0.5, "volume": 11,
+         "timestamp": 1787193740456},
+        {"symbol": "600519.SH", "change_pct": 2.0, "amount": 1.0, "volume": 99,
+         "timestamp": 1787193740789},  # 桥接不应回传未请求标的
+    ]
+
+    def fake(job, timeout=None):
+        calls.append((job, timeout))
+        return {"ok": True, "op": "realtime_symbols", "rows": rows}
+
+    monkeypatch.setattr(sp.bridge, "run_job", fake)
+    symbols = [" 000001.sh", "000001.SH", "000001.sz", "000001.SZ", "000001.BJ", "invalid"]
+    out = getattr(StockSDKProvider(), method_name)(symbols)
+
+    assert calls == [({"op": "realtime_symbols", "symbols": ["000001.SH", "000001.SZ"]}, 60)]
+    assert [row["symbol"] for row in out] == ["000001.SH", "000001.SZ"]
+    assert out[0]["change_pct"] == 0.0325
+    assert out[0]["amount"] == 1_234_500
+    assert out[0]["volume"] == 7  # 手数保持不变
+    assert out[0]["timestamp"] == 1787193740123
+    assert out[1]["change_pct"] == -0.0025
+    assert out[1]["amount"] == 5_000
+    assert out[1]["volume"] == 11
+    assert out[1]["timestamp"] == 1787193740456
+    # 标准化必须新建字典, 不污染桥接结果。
+    assert rows[0]["change_pct"] == 3.25
+    assert rows[0]["amount"] == 123.45
+
+
+@pytest.mark.parametrize("method_name", ["get_realtime_indices", "get_realtime_etfs"])
+@pytest.mark.parametrize("symbols", [[], ["000001.BJ"], ["bad", "000001.SHX", "000001"]])
+def test_get_realtime_symbols_invalid_inputs_skip_bridge(monkeypatch, method_name, symbols):
+    def unexpected_bridge_call(*_args, **_kwargs):
+        raise AssertionError("empty or unsupported realtime symbol input must not call bridge")
+
+    monkeypatch.setattr(sp.bridge, "run_job", unexpected_bridge_call)
+    assert getattr(StockSDKProvider(), method_name)(symbols) == []
+
+
+@pytest.mark.parametrize("method_name", ["get_realtime_indices", "get_realtime_etfs"])
+def test_get_realtime_symbols_distinguishes_bridge_failure_from_empty_success(monkeypatch, method_name):
+    p = StockSDKProvider()
+    method = getattr(p, method_name)
+    monkeypatch.setattr(sp.bridge, "run_job", lambda *_args, **_kwargs: {"ok": True, "rows": []})
+    assert method(["000001.SH"]) == []
+
+    def failed_bridge(*_args, **_kwargs):
+        raise sp.bridge.StockSDKBridgeError("node missing")
+
+    monkeypatch.setattr(sp.bridge, "run_job", failed_bridge)
+    assert method(["000001.SH"]) is None
+
+
 def test_get_instruments_flatten_compatible(monkeypatch):
     rows = [{"symbol": "600519.SH", "name": "贵州茅台", "code": "600519", "exchange": "SH",
              "region": "CN", "type": "stock", "total_shares": 1, "float_shares": 1,
@@ -170,6 +229,28 @@ def test_bridge_mjs_resolves_local_sdk_and_maps_realtime_timestamp(tmp_path):
       volume: 16325, amount: 159095, changePercent: 0.5,
       timestamp: 1787193740000
     }] }
+    this.quotes = { cn: async symbols => {
+      const request = symbols.join(',')
+      const quote = (code, marketId, timestamp) => ({
+        code, marketId, name: request, price: 10, prevClose: 9,
+        open: 9.5, high: 10.5, low: 8.5, volume: 123, amount: 45,
+        changePercent: 11.11, timestamp
+      })
+      if (request === 'sh999999') {
+        return [
+          quote('999999', 'unknown', 1787193740500),
+          quote('000001', '1', 1787193740501)
+        ]
+      }
+      if (request === 'sh888888') return []
+      return [
+        quote('000001', '1', 1787193740101),
+        quote('000001', '51', 1787193740102), // 同代码错市场必须过滤
+        quote('399001', '51', 1787193740200),
+        quote('510300', '1', 1787193740300),
+        quote('600000', '1', 1787193740400) // 非请求标的必须过滤
+      ]
+    } }
   }
 }
 """,
@@ -199,6 +280,42 @@ def test_bridge_mjs_resolves_local_sdk_and_maps_realtime_timestamp(tmp_path):
     assert realtime_proc.returncode == 0
     row = json.loads(realtime_proc.stdout)["rows"][0]
     assert row["timestamp"] == 1787193740000
+
+    def run_symbol_job(symbols):
+        return subprocess.run(
+            ["node", str(bridge_path)],
+            input=json.dumps({"op": "realtime_symbols", "symbols": symbols}),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+
+    symbols_proc = run_symbol_job(["000001.SH", "399001.SZ", "510300.SH"])
+    assert symbols_proc.returncode == 0
+    symbols_result = json.loads(symbols_proc.stdout)
+    assert symbols_result["ok"] is True
+    symbols_rows = symbols_result["rows"]
+    assert [row["symbol"] for row in symbols_rows] == ["000001.SH", "399001.SZ", "510300.SH"]
+    assert [row["timestamp"] for row in symbols_rows] == [
+        1787193740101, 1787193740200, 1787193740300,
+    ]
+    # fake SDK 用 name 回显入参, 验证 bridge 把明确后缀转换成 SDK 的市场+代码。
+    assert [row["name"] for row in symbols_rows] == ["sh000001,sz399001,sh510300"] * 3
+
+    unmatched_proc = run_symbol_job(["999999.SH"])
+    assert unmatched_proc.returncode == 0
+    unmatched_result = json.loads(unmatched_proc.stdout)
+    assert unmatched_result["ok"] is False
+    assert unmatched_result["error"]
+
+    empty_proc = run_symbol_job(["888888.SH"])
+    assert empty_proc.returncode == 0
+    assert json.loads(empty_proc.stdout) == {
+        "ok": True,
+        "op": "realtime_symbols",
+        "rows": [],
+    }
 
 
 def test_plugin_discovered_in_loader():

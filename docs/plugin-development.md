@@ -322,6 +322,8 @@ uv run --extra dev python -m ruff check app/plugins/<your_plugin>/ tests/test_<y
   - `bridge.py` — Python↔Node 桥接 + availability 检测
   - `bridge.mjs` — Node 端(并发池、重试、SDK 解析)
   - `provider.py` — Provider 实现(归一化、分批、错误降级)
+  - 全市场股票快照之外，使用 `get_realtime_indices(symbols)` 和 `get_realtime_etfs(symbols)` 补拉沪深指数及自选 ETF/LOF；复用 SDK 的腾讯公开接口，无需新 Key。指数由服务的明确清单指定，ETF/LOF 由维表确认，仅补自选、上限 60 只，不枚举全市场基金。
+  - 指定标的桥接使用 `realtime_symbols` / `sdk.quotes.cn`，保留上游行情时间戳，不以请求时间伪造新鲜度；涨跌幅百分数转小数、成交额万元转元。补拉失败返回 `None`，与成功但无数据的 `[]` 区分；非空响应无法识别请求标的时按失败处理，指数失败时服务保留上一份有效缓存。本地指数日线兜底仍是历史参考价。
 
 ## 路由机制(无需关心, 仅参考)
 

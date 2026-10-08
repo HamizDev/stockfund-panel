@@ -10,6 +10,7 @@ Original implementation by @forrany (PR #57), migrated to plugin architecture.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -260,6 +261,10 @@ class StockSDKProvider:
             logger.warning("stock-sdk realtime 拉取失败: %s", e)
             return []
         rows = result.get("rows") or []
+        return self._normalize_realtime_rows(rows)
+
+    @staticmethod
+    def _normalize_realtime_rows(rows: list[dict]) -> list[dict]:
         normalized: list[dict] = []
         for row in rows:
             item = dict(row)
@@ -272,6 +277,34 @@ class StockSDKProvider:
                 item["amount"] = float(item["amount"]) * 10_000
             normalized.append(item)
         return normalized
+
+    def _get_realtime_symbols(self, symbols: list[str]) -> list[dict] | None:
+        # 市场后缀由调用方的指数/ETF维表确定, 不能按代码前缀猜资产。
+        wanted = list(dict.fromkeys(
+            s.strip().upper() for s in symbols
+            if isinstance(s, str) and re.fullmatch(r"\d{6}\.(SH|SZ)", s.strip().upper())
+        ))
+        if not wanted:
+            return []
+        wanted_set = set(wanted)
+        rows: list[dict] = []
+        for chunk in chunked(wanted, _BATCH):
+            try:
+                result = bridge.run_job({"op": "realtime_symbols", "symbols": chunk}, timeout=60)
+            except bridge.StockSDKBridgeError as e:
+                # None 表示失败; QuoteService 会保留上一份有效指数缓存。
+                logger.warning("stock-sdk 指定标的实时行情拉取失败: %s", e)
+                return None
+            rows.extend(r for r in result.get("rows") or [] if r.get("symbol") in wanted_set)
+        return self._normalize_realtime_rows(rows)
+
+    def get_realtime_indices(self, symbols: list[str]) -> list[dict] | None:
+        """补拉服务指定的指数, 使用 SDK 腾讯快照的原始行情时间戳。"""
+        return self._get_realtime_symbols(symbols)
+
+    def get_realtime_etfs(self, symbols: list[str]) -> list[dict] | None:
+        """补拉服务通过维表确认的自选 ETF/LOF (服务侧上限 60 只)。"""
+        return self._get_realtime_symbols(symbols)
 
     # ---- instruments (标的维表) ----
     def get_instruments(self, asset_type: str = "stock") -> list[dict]:
