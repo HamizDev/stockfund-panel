@@ -58,7 +58,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   const intradayInterval = prefs?.minute_intraday_refresh_interval ?? 6
   // 滑块本地草稿: 拖动时即时反馈, 停顿 2s 后落库 (与行情轮询滑块一致)
   const [intradayIntervalDraft, setIntradayIntervalDraft] = useState(intradayInterval)
-  // 盘中分钟增量 (Expert 专有): 间隔 (秒), 与后端 [3,120] clamp 对齐; 默认 6
+  // 偏好间隔与后端 [3,120] 对齐; 仅修复轮的源另有实际间隔下限。
   const minuteRefreshInterval = prefs?.minute_refresh_interval ?? 6
   const [minuteRefreshIntervalDraft, setMinuteRefreshIntervalDraft] = useState(minuteRefreshInterval)
   // 盘中增量服务状态 (15s 轮询; 无服务时 available=false)
@@ -70,8 +70,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   const refreshPages = prefs?.sse_refresh_pages ?? {}
   const limitLadderMonitor = prefs?.limit_ladder_monitor_enabled ?? false
   const hasDepth = !!caps?.capabilities?.['depth5.batch']
-  // 全量分钟 = intraday.universe 能力 (TickFlow Expert 专有): 标的池单请求拉全市场当日分钟,
-  // 修复轮的 intraday.batch 与其同档, 见后端 minute_refresh 服务
+  // 全量分钟能力由 TickFlow 档位或已选择的自定义 full_minute 源授予。
   const hasFullMinuteCap = !!caps?.capabilities?.['intraday.universe']
   const rs = refreshStatus.data
   // 新建监控规则时默认勾选的推送渠道 (全局默认值数组, 单条规则可独立修改)
@@ -468,8 +467,10 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
           <ToggleRow
             label="全量分钟落盘"
             desc={
-              !hasFullMinuteCap ? '需要全量分钟能力 (TickFlow Expert 或声明该能力的自定义源)'
-              : rs?.repair_only ? `服务运行中 · ${rs?.provider ?? '自定义源'} 无廉价增量端点, 按 ≥60s 全天批量节奏`
+              !hasFullMinuteCap ? '请在数据源设置中选择可提供全量分钟的来源'
+              : !prefs?.minute_refresh_enabled ? '已关闭'
+              : !rs?.in_trading_hours ? '运行中 · 非连续竞价时段暂停'
+              : rs?.repair_only ? `分批采集 · 实际间隔至少 ${rs.interval_seconds ?? 60} 秒, 以覆盖状态为准`
               : rs?.running ? (rs?.in_trading_hours ? '服务运行中' : '运行中 · 非连续竞价时段暂停')
               : '已关闭'
             }
@@ -482,14 +483,16 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
               <div className="min-w-0">
                 <div className="text-sm text-foreground">刷新间隔</div>
                 <div className="text-[11px] text-muted">
-                  交易时段内全市场分钟K增量落盘的间隔; 稳态单请求增量, 冷启动/断档自动全天回补
+                  {rs?.repair_only ? '当前源分批采集当日分钟K；轮次不重叠，覆盖以实际返回为准'
+                    : '交易时段内全市场分钟K增量落盘的间隔；冷启动或断档时回补当日数据'}
                 </div>
               </div>
               <span className="text-[11px] font-mono text-foreground shrink-0 tabular-nums">
-                {minuteRefreshIntervalDraft >= 60 && minuteRefreshIntervalDraft % 60 === 0 ? `${minuteRefreshIntervalDraft / 60}m` : `${minuteRefreshIntervalDraft}s`}
+                {rs?.repair_only ? `${rs.interval_seconds ?? 60}s`
+                  : minuteRefreshIntervalDraft >= 60 && minuteRefreshIntervalDraft % 60 === 0 ? `${minuteRefreshIntervalDraft / 60}m` : `${minuteRefreshIntervalDraft}s`}
               </span>
             </div>
-            <div className="flex items-center gap-3 mt-2">
+            {!rs?.repair_only && <div className="flex items-center gap-3 mt-2">
               <input
                 type="range"
                 min={3}
@@ -503,7 +506,23 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
               <span className="text-[10px] text-muted shrink-0">
                 {minuteRefreshIntervalDraft !== minuteRefreshInterval ? '2秒后保存' : '3s — 120s'}
               </span>
-            </div>
+            </div>}
+            {rs?.repair_only && (
+              <p className="mt-2 text-[11px] text-muted">
+                当前数据源实际间隔至少 {rs.interval_seconds ?? 60} 秒；整轮较慢时按完成时间继续，不补跑。
+              </p>
+            )}
+            {rs?.collection && (
+              <div className="mt-2 text-[11px] text-muted" aria-live="polite">
+                {rs.collection.collecting ? '正在采集' : '最近采集'}：
+                {rs.collection.covered_symbols} / {rs.collection.requested_symbols} 只股票有当日分钟K
+                {' · '}空数据 {rs.collection.empty_symbols} · 失败 {rs.collection.failed_symbols}
+                {' · '}未查询 {rs.collection.unqueried_symbols}
+                {!rs.collection.collecting && !rs.collection.collection_complete && (
+                  <span className="text-warning"> · 覆盖未齐，单只图表继续按需补拉</span>
+                )}
+              </div>
+            )}
             {rs?.available && rs.rounds != null && rs.rounds > 0 && (
               <div className="mt-2 text-[10px] text-muted">
                 已 {rs.rounds} 轮 · 最近 {rs.last_symbols} 标的 / {rs.last_rows} 行 / {rs.last_requests} 请求

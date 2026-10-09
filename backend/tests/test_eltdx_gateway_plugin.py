@@ -347,7 +347,7 @@ def test_availability_checks_locally_without_contacting_gateway(monkeypatch):
     assert isinstance(result[1], str)
 
 
-def test_provider_declares_only_on_demand_minute_dataset():
+def test_provider_declares_on_demand_and_bounded_full_minute_datasets():
     provider = EltdxGatewayProvider()
     plugin_yaml = (
         Path(__file__).resolve().parents[1]
@@ -358,8 +358,8 @@ def test_provider_declares_only_on_demand_minute_dataset():
     )
     manifest = yaml.safe_load(plugin_yaml.read_text(encoding="utf-8"))
 
-    assert set(manifest["datasets"]) == {"minute"}
-    assert set(provider.config.datasets) == {"minute"}
+    assert set(manifest["datasets"]) == {"minute", "full_minute"}
+    assert set(provider.config.datasets) == {"minute", "full_minute"}
     assert provider.name == "eltdx_gateway"
     assert provider.minute_asset_types == ("stock", "etf")
     assert provider.minute_max_symbols_per_request == 1
@@ -534,8 +534,27 @@ def test_settings_trial_returns_observed_dates_and_never_writes(monkeypatch):
     assert result["preview"][0]["amount"] is None
     assert result["amount_available"] is False
     with pytest.raises(ValueError):
-        provider.test_dataset("full_minute")
+        provider.test_dataset("realtime")
     assert len(calls) == 1
+
+
+def test_registered_eltdx_grants_full_minute_when_routed_without_tickflow_tier(monkeypatch):
+    from app.data_providers.custom import loader
+    from app.services import preferences
+    from app.tickflow.capabilities import Cap, CapabilitySet
+    from app.tickflow.policy import _augment_custom_sources
+
+    manifest_path = Path(__file__).resolve().parents[1] / "app/plugins/eltdx_gateway/plugin.yaml"
+    monkeypatch.setattr(loader, "_PROVIDERS", {})
+    monkeypatch.setattr(loader, "_PLUGIN_STATUS", {})
+    loader._register_one_plugin(yaml.safe_load(manifest_path.read_text(encoding="utf-8")))
+    for getter in ["get_daily_data_provider", "get_adj_factor_provider", "get_minute_data_provider",
+                   "get_depth5_data_provider", "get_financial_provider"]:
+        monkeypatch.setattr(preferences, getter, lambda: "tickflow")
+    monkeypatch.setattr(preferences, "get_full_minute_data_provider", lambda: "eltdx_gateway")
+    capset = CapabilitySet({})  # no TickFlow key or tier
+    _augment_custom_sources(capset)
+    assert capset.has(Cap.INTRADAY_UNIVERSE)
 
 
 def test_client_does_not_publish_response_finished_after_deadline(monkeypatch):
@@ -562,7 +581,7 @@ def test_loader_and_settings_trial_use_the_registered_minute_plugin(monkeypatch)
     monkeypatch.setattr(loader, "_PLUGIN_STATUS", {})
     loader._register_one_plugin(manifest)
     assert loader.provider_has_dataset("eltdx_gateway", "minute") is True
-    assert loader.provider_has_dataset("eltdx_gateway", "full_minute") is False
+    assert loader.provider_has_dataset("eltdx_gateway", "full_minute") is True
     assert loader.list_plugins()[0]["available"] is True
     provider = loader.get_provider("eltdx_gateway")
 

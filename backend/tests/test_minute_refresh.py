@@ -14,9 +14,11 @@ monkeypatch 替换; 自定义源侧用内存 fake provider 走真实边界包装
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 import polars as pl
+import pytest
 
 from app.services import minute_refresh, preferences
 from app.services.minute_refresh import MinuteRefreshService, _in_continuous_session
@@ -444,3 +446,82 @@ def test_status_endpoint_without_service():
     resp = client.get("/api/settings/minute-refresh/status")
     assert resp.status_code == 200
     assert resp.json() == {"available": False}
+
+
+class _AliveThread:
+    def is_alive(self):
+        return True
+
+
+def test_no_collection_summary_before_first_round(tmp_path, monkeypatch):
+    provider = _FakeCustomProvider(batch=True)
+    provider.get_intraday_status = lambda: {}
+    svc = _svc(tmp_path, monkeypatch, full_minute_provider="eltdx_gateway", custom=provider)
+    assert svc.status()["collection"] is None
+
+
+def test_repair_provider_interval_and_actual_partial_coverage(tmp_path, monkeypatch):
+    provider = _FakeCustomProvider(batch=True)
+    provider.full_minute_min_interval_s = 300
+    provider.get_intraday_status = lambda: {"requests": 7}
+    svc = _svc(tmp_path, monkeypatch, full_minute_provider="eltdx_gateway", custom=provider)
+    svc.set_repo(_FakeRepo(["600000.SH", "000001.SZ", "920580.BJ"]))
+    svc._thread = _AliveThread()
+    _patch_write(monkeypatch)
+    svc._run_round()
+    st = svc.status()
+    assert st["interval_seconds"] == 300
+    assert st["last_requests"] == 7
+    assert st["last_symbols"] == 2
+    assert st["requested_symbols"] == 3 and st["missing_symbols"] == 1
+    assert st["rounds"] == 1 and st["last_rows"] == 2
+    assert "1" in st["last_error"]
+    assert not svc.is_healthy()  # valid data written, but no suppression of per-symbol fetches
+
+
+@pytest.mark.parametrize("minimum,expected", [(None, 60), (True, 60), (-1, 60), (5000, 3600)])
+def test_invalid_or_excessive_provider_interval_is_bounded(tmp_path, monkeypatch, minimum, expected):
+    provider = _FakeCustomProvider(batch=True)
+    provider.full_minute_min_interval_s = minimum
+    svc = _svc(tmp_path, monkeypatch, full_minute_provider="custom", custom=provider)
+    assert svc._effective_interval() == expected
+
+
+@pytest.mark.parametrize("lag,complete,collecting,healthy", [
+    (60, True, False, True), (181, True, False, False), (-1, True, False, False),
+    (60, False, False, False), (60, True, True, False),
+])
+def test_collection_freshness_uses_oldest_symbol_bar(tmp_path, monkeypatch, lag, complete, collecting, healthy):
+    from datetime import timedelta
+
+    from app.market_time import cn_now
+    now = cn_now()
+    oldest = now.replace(tzinfo=None) - timedelta(seconds=lag)
+    stats = {"oldest_latest_bar": oldest, "collecting": collecting, "collection_complete": complete}
+    provider = _FakeCustomProvider(batch=True)
+    provider.full_minute_min_interval_s = 300
+    provider.get_intraday_status = lambda: stats
+    svc = _svc(tmp_path, monkeypatch, full_minute_provider="eltdx_gateway", custom=provider)
+    svc._thread = _AliveThread()
+    svc._state.last_round_at = time.time()
+    svc._state.extra = {"coverage_complete": True}
+    monkeypatch.setattr(minute_refresh, "cn_now", lambda: now)
+    assert svc.is_healthy() is healthy
+    assert svc.status()["collection"]["oldest_latest_bar"] == oldest.isoformat()
+    assert stats["oldest_latest_bar"] == oldest  # reporting must not mutate provider state
+
+
+def test_collection_not_healthy_before_write_finishes(tmp_path, monkeypatch):
+    provider = _FakeCustomProvider(batch=True)
+    svc = _svc(tmp_path, monkeypatch, full_minute_provider="custom", custom=provider)
+    svc._thread = _AliveThread()
+    svc._state.last_round_at = time.time()
+    svc._state.extra = {"coverage_complete": True}
+
+    def write(df, minute_dir):
+        assert not svc.is_healthy()
+        return df.height
+
+    monkeypatch.setattr("app.services.kline_sync._write_minute_partition", write)
+    svc._run_round()
+    assert svc.is_healthy()

@@ -2491,6 +2491,20 @@ export const api = {
       last_requests?: number
       next_round_at?: number | null
       last_error?: string | null
+      requested_symbols?: number
+      missing_symbols?: number
+      coverage_complete?: boolean
+      collection?: {
+        requested_symbols: number
+        covered_symbols: number
+        empty_symbols: number
+        failed_symbols: number
+        unqueried_symbols: number
+        requests: number
+        collecting: boolean
+        collection_complete: boolean
+        oldest_latest_bar: string | null
+      } | null
     }>('/api/settings/minute-refresh/status'),
   updatePipelinePullTypes: (cfg: Partial<Pick<Preferences, 'pipeline_pull_a_share' | 'pipeline_pull_etf' | 'pipeline_pull_index'>>) =>
     request<{

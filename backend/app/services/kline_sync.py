@@ -1507,6 +1507,11 @@ def fetch_intraday_custom_batch(
         if callable(method):
             df = method(symbols)
             requests = 1
+            status_method = getattr(provider, "get_intraday_status", None)
+            if callable(status_method):
+                reported = status_method().get("requests")
+                if isinstance(reported, int) and not isinstance(reported, bool) and reported >= 0:
+                    requests = reported
         else:
             counted = {"requests": 0}
 

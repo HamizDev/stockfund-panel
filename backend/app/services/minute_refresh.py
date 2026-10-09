@@ -187,10 +187,14 @@ class MinuteRefreshService:
         return provider is not None and not self._custom_supports_increment(provider)
 
     def _effective_interval(self) -> int:
-        """本轮间隔: 偏好值; 仅修复轮的自定义源下限 60s (全天批量打不住 6s 节奏)。"""
+        """仅修复轮至少60s; 源可声明更高下限, 不改变增量源的偏好间隔。"""
         interval = preferences.get_minute_refresh_interval()
         if self.repair_only():
-            return max(interval, _REPAIR_ONLY_MIN_INTERVAL_S)
+            provider, _ = self._resolve_custom()
+            minimum = getattr(provider, "full_minute_min_interval_s", _REPAIR_ONLY_MIN_INTERVAL_S)
+            if not isinstance(minimum, int) or isinstance(minimum, bool):
+                minimum = _REPAIR_ONLY_MIN_INTERVAL_S
+            return max(interval, _REPAIR_ONLY_MIN_INTERVAL_S, min(minimum, 3600))
         return interval
 
     def _gate_reason(self) -> str | None:
@@ -288,6 +292,7 @@ class MinuteRefreshService:
             mode = "full"
         mode_label = "增量" if mode == "increment" else "全天修复"
         with self._round_lock:
+            self._state.extra = {"coverage_complete": False}
             if mode == "increment":
                 # fetch 计时只覆盖网络取数; full 分支的 universe 维表读取不计入
                 fetch_started = time.perf_counter()
@@ -316,6 +321,14 @@ class MinuteRefreshService:
                     df, requests = kline_sync.fetch_intraday_full_market_burst(symbols, capset)
             fetch_ms = (time.perf_counter() - fetch_started) * 1000
             self._state.last_requests = requests
+            if mode == "full":
+                covered = df["symbol"].n_unique() if not df.is_empty() else 0
+                missing = len(set(symbols) - set(df["symbol"].to_list())) if covered else len(symbols)
+                self._state.last_symbols = covered
+                self._state.extra = {
+                    "requested_symbols": len(symbols), "missing_symbols": missing,
+                    "coverage_complete": False,  # not committed until the partition write succeeds
+                }
             if df.is_empty():
                 self._empty_rounds += 1
                 self._state.last_error = f"intraday {mode} returned no data"
@@ -336,7 +349,9 @@ class MinuteRefreshService:
         self._state.last_round_ms = (time.perf_counter() - t0) * 1000
         self._state.last_rows = written
         self._state.last_mode = mode
-        self._state.last_error = None
+        missing = self._state.extra.get("missing_symbols", 0)
+        self._state.last_error = f"本轮有 {missing} 只股票未返回当日分钟K" if missing else None
+        self._state.extra["coverage_complete"] = missing == 0
         logger.info(
             "全量分钟[%s] 第 %d 轮: 取数 %.0fms (%d 请求, %d 标的), "
             "落盘 %.0fms (%d 行), 总计 %.0fms",
@@ -369,11 +384,26 @@ class MinuteRefreshService:
             return False
         if self._thread is None or not self._thread.is_alive():
             return False
+        if not self._state.extra.get("coverage_complete", True):
+            return False
         last = self._state.last_round_at
         if last is None:
             return False
-        interval = preferences.get_minute_refresh_interval()
-        return (time.time() - float(last)) <= max(2.0 * interval, 30.0)
+        interval = self._effective_interval()
+        if (time.time() - float(last)) > max(2.0 * interval, 30.0):
+            return False
+        # A slow fan-out scan can finish "now" with old bars for early symbols.
+        # Do not make consumers skip on-demand queries solely on completion time.
+        custom, _ = self._resolve_custom()
+        if callable(getattr(custom, "get_intraday_status", None)):
+            stats = custom.get_intraday_status()
+            oldest_latest = stats.get("oldest_latest_bar")
+            if not oldest_latest or stats.get("collecting") or not stats.get("collection_complete"):
+                return False
+            lag = (cn_now().replace(tzinfo=None) - oldest_latest).total_seconds()
+            if lag < 0 or lag > 180:
+                return False
+        return True
 
     def status(self) -> dict[str, Any]:
         import contextlib
@@ -382,6 +412,13 @@ class MinuteRefreshService:
             enabled = preferences.get_minute_refresh_enabled()
         running = self._thread is not None and self._thread.is_alive()
         gate = self._gate_reason()
+        custom, _ = self._resolve_custom()
+        status_method = getattr(custom, "get_intraday_status", None)
+        collection = dict(status_method()) if callable(status_method) else None
+        if not collection:
+            collection = None
+        if collection and collection.get("oldest_latest_bar"):
+            collection["oldest_latest_bar"] = collection["oldest_latest_bar"].isoformat()
         return {
             "enabled": enabled,
             "running": running,
@@ -389,7 +426,7 @@ class MinuteRefreshService:
             "provider": self.active_provider(),
             "provider_effective": self._resolve_custom()[1],
             "repair_only": self.repair_only(),
-            "interval_seconds": preferences.get_minute_refresh_interval(),
+            "interval_seconds": self._effective_interval(),
             "capability_ok": self.capability_ok(),
             "in_trading_hours": _in_continuous_session(),
             "gate_reason": gate if (enabled and running) else (gate or "disabled"),
@@ -402,6 +439,8 @@ class MinuteRefreshService:
             "last_mode": self._state.last_mode,
             "next_round_at": self._state.next_round_at,
             "last_error": self._state.last_error,
+            "collection": collection,
+            **self._state.extra,
         }
 
     def trigger_manual_round(self) -> dict[str, Any]:
