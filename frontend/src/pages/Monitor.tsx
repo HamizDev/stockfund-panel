@@ -18,6 +18,7 @@ import { boardTag } from '@/components/stock-table/primitives'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { markSeen, resetBadge, leaveMonitorPage } from '@/lib/monitorBadge'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
+import { AlertDetailsDialog } from '@/components/monitor/AlertDetailsDialog'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { toNavItems, type NavItem } from '@/lib/listNav'
 import { DimensionMembersDialog, type DimensionKind, type DimensionMembersTarget } from '@/components/DimensionMembersDialog'
@@ -328,7 +329,7 @@ function SectionHeader({ icon: Icon, title }: { icon: any; title: string }) {
 }
 
 // ── 触发记录列表 ──────────────────────────────────────
-function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs, monitorExtFields }: {
+export function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs, monitorExtFields }: {
   alertsQuery: ReturnType<typeof useQuery>
   confirmClear: boolean
   setConfirmClear: (v: boolean) => void
@@ -341,6 +342,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
   const [confirmTs, setConfirmTs] = useState<number | null>(null)
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [previewEv, setPreviewEv] = useState<AlertEvent | null>(null)
+  const [detailEv, setDetailEv] = useState<AlertEvent | null>(null)
   const [memberPreview, setMemberPreview] = useState<{ symbol: string; name?: string } | null>(null)
   const [previewNavList, setPreviewNavList] = useState<NavItem[]>([])
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
@@ -374,13 +376,28 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
 
   // 切股导航列表: 有 symbol 的触发记录 (按展示顺序)
   const alertsNavItems = useMemo(
-    () => toNavItems(events.filter((ev: AlertEvent) => ev.symbol)),
+    () => toNavItems(events.filter((ev: AlertEvent) => ev.symbol && ev.asset_type !== 'index' && ev.sector_kind !== 'index')),
     [events],
   )
   const handlePreviewEvent = useCallback((ev: AlertEvent) => {
+    if (ev.asset_type === 'index' || ev.sector_kind === 'index') {
+      navigate(`/indices?symbol=${encodeURIComponent(ev.symbol ?? '')}`)
+      return
+    }
+    setMemberPreview(null)
     setPreviewEv(ev)
     setPreviewNavList(alertsNavItems)
-  }, [alertsNavItems])
+  }, [alertsNavItems, navigate])
+  const handleDetailPreview = (ev: AlertEvent) => {
+    setDetailEv(null)
+    if (ev.related_symbols?.length && ev.asset_type !== 'index') {
+      setPreviewEv(null)
+      setMemberPreview({ symbol: ev.symbol!, name: ev.name ?? undefined })
+      setPreviewNavList(toNavItems(ev.related_symbols))
+    } else {
+      handlePreviewEvent(ev)
+    }
+  }
   // 弹窗内切股: 来自成分弹窗则更新 memberPreview, 否则按 symbol 找到对应事件 (保住 triggerInfo)
   const handleNavigate = useCallback((sym: string, name?: string) => {
     if (memberPreview) { setMemberPreview({ symbol: sym, name }); return }
@@ -411,6 +428,10 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
             return (
               <motion.div
                 key={`${ev.ts}-${ev.symbol ?? ''}-${ev.rule_name ?? ''}`}
+                role="article"
+                onClick={event => {
+                  if (!(event.target as HTMLElement).closest('button, a, input, select, textarea')) setDetailEv(ev)
+                }}
                 initial={isNew ? { opacity: 0, y: -8, scale: 0.98 } : { opacity: 0, y: 4 }}
                 animate={isNew ? {
                   opacity: [0, 1, 1, 0.85, 1],
@@ -419,7 +440,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                 } : { opacity: 1, y: 0 }}
                 transition={isNew ? { duration: 1.2, times: [0, 0.2, 0.5, 0.75, 1] } : { duration: 0.2, delay: Math.min(i * 0.02, 0.2) }}
                 className={cn(
-                  'group relative flex items-start gap-3 overflow-hidden rounded-lg border bg-surface pl-3.5 pr-3 py-2.5 shadow-sm transition-all duration-200 hover:border-border hover:shadow-md hover:shadow-black/10 hover:-translate-y-px',
+                  'group relative flex cursor-pointer items-start gap-3 overflow-hidden rounded-lg border bg-surface pl-3.5 pr-3 py-2.5 shadow-sm transition-all duration-200 hover:border-border hover:shadow-md hover:shadow-black/10 hover:-translate-y-px',
                   isNew ? 'border-accent/60 ring-1 ring-accent/30' : 'border-border/50',
                 )}
               >
@@ -624,6 +645,12 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                   <span className="text-[10px] text-muted/60 font-mono">
                     {new Date(ev.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
                   </span>
+                  <button
+                    type="button"
+                    aria-label="查看消息详情"
+                    onClick={() => setDetailEv(ev)}
+                    className="rounded px-1.5 py-0.5 text-[11px] text-accent hover:bg-accent/10"
+                  >详情</button>
                   {confirmTs === ev.ts ? (
                     // 确认态: 红色实心按钮 (原删除图标位置), 再点确认删除
                     <button
@@ -660,6 +687,14 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
         onConfirm={() => clearMut.mutate()}
         pending={clearMut.isPending}
       />
+
+      {detailEv && <AlertDetailsDialog
+        event={detailEv}
+        sourceLabel={TYPE_LABEL[detailEv.source] ?? detailEv.source}
+        signalLabel={field => cnSignal(field, customNames)}
+        onClose={() => setDetailEv(null)}
+        onPreview={handleDetailPreview}
+      />}
 
       <StockPreviewDialog
         symbol={memberPreview?.symbol ?? previewEv?.symbol ?? null}

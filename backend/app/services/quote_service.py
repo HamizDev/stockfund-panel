@@ -1336,6 +1336,7 @@ class QuoteService:
                                 "logic": ev.get("logic") or "and",
                             }
                             for key in (
+                                "asset_type", "related_symbols",
                                 "sector_kind", "sector_key", "sector_name",
                                 "sector_source_field", "sector_value", "sector_level",
                                 "window_change_pct", "coverage_ratio", "valid_count",

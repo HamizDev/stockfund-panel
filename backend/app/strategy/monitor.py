@@ -1142,6 +1142,7 @@ class MonitorRuleEngine:
                 "rule_id": rule["id"],
                 "rule_name": rule.get("name", ""),
                 "strategy_id": rule.get("strategy_id") if rtype == "strategy" else None,
+                "asset_type": rule.get("asset_type", "stock"),
                 "source": source,
                 "type": ev_type,
                 "symbol": "" if is_batch else sym,
@@ -1158,6 +1159,11 @@ class MonitorRuleEngine:
             }
             if paper_items:
                 ev["_paper_items"] = paper_items
+                # 公开触发快照保留批次成员, 详情页不从名称猜测代码。
+                ev["related_symbols"] = [
+                    {"symbol": item["symbol"], "name": item.get("name")}
+                    for item in paper_items
+                ]
             events.append(ev)
             if self._alert_handler:
                 try:
@@ -1422,7 +1428,10 @@ class MonitorRuleEngine:
                 paper_symbols = ranked + [symbol for symbol in symbol_list if symbol not in ranked_set]
                 results.append((
                     event_type, "_batch", message, None, None, hit_signals,
-                    [{"symbol": symbol} for symbol in paper_symbols],
+                    [{
+                        "symbol": symbol,
+                        "name": row_map.get(symbol, {}).get("name") or self._name_map.get(symbol),
+                    } for symbol in paper_symbols],
                 ))
                 continue
             for symbol in symbol_list:

@@ -1362,6 +1362,8 @@ export interface MonitorRuleOptions {
 }
 
 export interface AlertEvent {
+  asset_type?: 'stock' | 'etf' | 'index'
+  related_symbols?: { symbol: string; name?: string | null }[]
   ts: number
   rule_id?: string
   rule_name?: string

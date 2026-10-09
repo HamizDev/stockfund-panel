@@ -205,6 +205,7 @@ def test_strategy_batch_keeps_individual_symbols_for_paper_orders():
         _result(day),
         _result(day, pool=symbols, buys=symbols),
     ]))
+    engine.set_name_map({symbol: f"标的{symbol}" for symbol in symbols})
     engine.set_rules([_rule("buy_signal")])
 
     with patch("app.strategy.monitor.time.time", side_effect=[100, 101]):
@@ -214,6 +215,17 @@ def test_strategy_batch_keeps_individual_symbols_for_paper_orders():
     assert len(events) == 1
     assert events[0]["symbol"] == ""
     assert [item["symbol"] for item in events[0]["_paper_items"]] == list(symbols)
+    assert events[0]["asset_type"] == "stock"
+    assert events[0]["related_symbols"] == [
+        {"symbol": symbol, "name": f"标的{symbol}"} for symbol in symbols
+    ]
+    from app.strategy.paper_auto import prepare_rule_events
+
+    public, auto = prepare_rule_events(events, {symbols[0]: 10.5})
+    assert public[0]["related_symbols"] == events[0]["related_symbols"]
+    assert "_paper_items" not in public[0]
+    assert [event["symbol"] for event in auto] == list(symbols)
+    assert auto[0]["price"] == 10.5
 
 
 def test_strategy_sell_and_pool_exit_are_independent_events():
@@ -408,6 +420,8 @@ def test_quote_service_forwards_real_strategy_id(monkeypatch, tmp_path):
         "change_pct": 0.01,
         "signals": ["signal_buy"],
         "severity": "info",
+        "asset_type": "etf",
+        "related_symbols": [{"symbol": "A", "name": "测试股票"}],
     }
 
     class _Engine:
@@ -438,7 +452,8 @@ def test_quote_service_forwards_real_strategy_id(monkeypatch, tmp_path):
         def get_instruments():
             return pl.DataFrame({"symbol": ["A"], "name": ["测试股票"]})
 
-    monkeypatch.setattr(alert_store, "append_many", lambda *args: None)
+    persisted = []
+    monkeypatch.setattr(alert_store, "append_many", lambda _path, events: persisted.extend(events))
     monkeypatch.setattr(preferences, "get_system_notify_enabled", lambda: False)
     service = QuoteService()
     subscriber = service.subscribe()
@@ -449,4 +464,8 @@ def test_quote_service_forwards_real_strategy_id(monkeypatch, tmp_path):
     with patch.object(QuoteService, "_is_continuous_trading", return_value=True):
         service._evaluate_monitors(pl.DataFrame(), None)
 
-    assert subscriber.pop()["alerts"][0]["strategy_id"] == "demo"
+    alert = subscriber.pop()["alerts"][0]
+    assert alert["strategy_id"] == "demo"
+    assert alert["asset_type"] == "etf"
+    assert alert["related_symbols"] == event["related_symbols"]
+    assert persisted[0]["related_symbols"] == event["related_symbols"]
