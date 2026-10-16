@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 def build_router() -> APIRouter:
     router = APIRouter(prefix="/api/custom/market-flow", tags=["custom-market-flow"])
 
+    @router.get('/membership-status')
+    def membership_status() -> dict:
+        from app.services.board_membership import cached_status
+        return cached_status()
+
     @router.get("/popularity")
     def popularity(limit: int = Query(100, ge=1, le=500)) -> dict:
         """人气排行。"""

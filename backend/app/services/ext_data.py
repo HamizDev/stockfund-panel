@@ -625,6 +625,7 @@ def write_ext_parquet(
     snapshot_date: date | None = None,
     *,
     keep_strategy_cache: bool = False,
+    replace_snapshot: bool = False,
 ) -> int:
     """将 DataFrame 写入扩展数据 Parquet。
 
@@ -636,6 +637,8 @@ def write_ext_parquet(
         写入行数。
     """
     # 缺省分区日期按北京日期, 与定时拉取 (ext_pull.fetch_and_ingest) 同口径
+    if replace_snapshot and config.mode != 'snapshot':
+        raise ValueError('Full replacement is only supported for snapshot tables')
     snap = snapshot_date or cn_today()
     cfg_dir = _config_dir(config.id, data_dir)
 
@@ -650,7 +653,7 @@ def write_ext_parquet(
         out_path = cfg_dir / "part.parquet"
 
         # 如果已有文件，合并去重后覆盖
-        if out_path.exists():
+        if out_path.exists() and not replace_snapshot:
             try:
                 existing = pl.read_parquet(out_path)
                 key = "symbol" if "symbol" in df.columns else df.columns[0]
@@ -709,6 +712,11 @@ def _invalidate_ext_derived(data_dir: Path, *, keep_strategy_cache: bool = False
         invalidate_ext_caches(data_dir, keep_strategy_cache=keep_strategy_cache)
     except Exception as e:
         logger.warning("扩展数据缓存失效失败: %s", e)
+    try:
+        from app.services.rps_rotation import invalidate_cache
+        invalidate_cache()
+    except Exception as exc:
+        logger.warning('扩展板块映射缓存失效失败: %s', type(exc).__name__)
 
 
 def delete_ext_parquet(config_id: str, data_dir: Path) -> None:
@@ -786,6 +794,7 @@ def rows_to_parquet(
     snapshot_date: date | None = None,
     *,
     keep_strategy_cache: bool = False,
+    replace_snapshot: bool = False,
 ) -> int:
     """将 JSON 行列表转为 DataFrame 写入 Parquet，复用 write_ext_parquet 的存储逻辑。
 
@@ -799,4 +808,5 @@ def rows_to_parquet(
     return write_ext_parquet(
         df, config, data_dir, snapshot_date=snapshot_date,
         keep_strategy_cache=keep_strategy_cache,
+        replace_snapshot=replace_snapshot,
     )

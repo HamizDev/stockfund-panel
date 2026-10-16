@@ -155,8 +155,9 @@ def test_sync_instruments_interrupted_keeps_existing_table(tmp_path: Path, crash
     assert_frame_equal(pl.read_parquet(target), old)
 
     crash.armed = False
-    assert instrument_sync.sync_instruments(tmp_path) == 1
-    assert pl.read_parquet(target)["symbol"].to_list() == ["600036.SH"]
+    assert instrument_sync.sync_instruments(tmp_path) == 2
+    assert pl.read_parquet(target)["symbol"].to_list() == ["000001.SZ", "600036.SH"]
+    assert pl.read_parquet(target)["name"].to_list() == ["平安银行", "招商银行"]
     assert _no_tmp_left(target)
 
 

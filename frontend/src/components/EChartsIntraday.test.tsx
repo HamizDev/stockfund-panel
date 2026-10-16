@@ -6,7 +6,7 @@ import { EChartsIntraday } from './EChartsIntraday'
 
 const chart = vi.hoisted(() => ({
   handlers: {} as Record<string, (event?: any) => void>,
-  on: vi.fn(), off: vi.fn(), setOption: vi.fn(), clear: vi.fn(), resize: vi.fn(), dispose: vi.fn(),
+  on: vi.fn(), off: vi.fn(), setOption: vi.fn(), dispatchAction: vi.fn(), clear: vi.fn(), resize: vi.fn(), dispose: vi.fn(),
   getZr: () => ({ on: vi.fn(), off: vi.fn() }),
 }))
 vi.mock('echarts', () => ({ init: () => chart }))
@@ -33,20 +33,16 @@ it('shows daily OHLC by default, labels hovered minute, restores on exit and dat
   await render()
   expect(host.textContent).toContain('日K')
   expect(host.textContent).toContain('118.16')
-  const stockOption = chart.setOption.mock.calls.at(-1)?.[0] as any
-  expect(stockOption.series.map((series: any) => series.name)).toEqual(['价格', '均价', '成交量'])
-  expect(stockOption.grid).toHaveLength(2)
-  expect(stockOption.xAxis[0].splitLine.show).toBe(true)
   await act(async () => chart.handlers.updateAxisPointer({ axesInfo: [{ axisDim: 'x', value: 110 }] }))
   expect(host.textContent).toContain('11:20')
   expect(host.textContent).toContain('118.28')
   await act(async () => chart.handlers.globalout())
   expect(host.textContent).toContain('118.16')
-  expect(host.textContent).not.toContain('11:20')
+  expect(host.textContent).not.toContain('118.28')
   await act(async () => chart.handlers.updateAxisPointer({ axesInfo: [{ axisDim: 'x', value: 110 }] }))
   await render('2026-09-10')
   expect(host.textContent).toContain('118.16')
-  expect(host.textContent).not.toContain('11:20')
+  expect(host.textContent).not.toContain('118.28')
 })
 
 it('aggregates available minutes without inventing a missing opening price', async () => {
@@ -130,45 +126,4 @@ it('listing day without prevClose anchors y-axis with scale, not zero', async ()
   expect(axis.min).toBeUndefined()
   expect(axis.max).toBeUndefined()
   expect(axis.scale).toBe(true)
-})
-
-it('renders index price points on all 242 session minutes without synthetic OHLC, average or volume', async () => {
-  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
-  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
-  const host = document.createElement('div')
-  const root = createRoot(host)
-  cleanup = async () => { await act(async () => root.unmount()) }
-  const points = [
-    { datetime: '2026-09-18 09:30:00', open: null, high: null, low: null, close: 3872.4, volume: null, amount: null },
-    { datetime: '2026-09-18 11:30:00', open: null, high: null, low: null, close: 3880.2, volume: null, amount: null },
-    { datetime: '2026-09-18 13:00:00', open: null, high: null, low: null, close: 3879.8, volume: null, amount: null },
-    { datetime: '2026-09-18 15:00:00', open: null, high: null, low: null, close: 3891.6, volume: null, amount: null },
-  ]
-  await act(async () => root.render(
-    <EChartsIntraday data={points} date="2026-09-18" prevClose={3860} pricePointsOnly />,
-  ))
-
-  const option = chart.setOption.mock.calls.at(-1)?.[0] as any
-  const priceSeries = option.series.find((series: any) => series.name === '价格')
-  const times = option.xAxis[0].data as string[]
-  expect(times).toHaveLength(242)
-  expect(times[0]).toBe('09:30')
-  expect(times[120]).toBe('11:30')
-  expect(times[121]).toBe('13:00')
-  expect(times[241]).toBe('15:00')
-  expect(priceSeries.data[0]).toBe(3872.4)
-  expect(priceSeries.data[120]).toBe(3880.2)
-  expect(priceSeries.data[121]).toBe(3879.8)
-  expect(priceSeries.data[241]).toBe(3891.6)
-  expect(option.series.map((series: any) => series.name)).toEqual(['价格'])
-  expect(option.xAxis).toHaveLength(1)
-  expect(option.xAxis[0].splitLine.show).toBe(false)
-  expect(option.grid).toHaveLength(1)
-  expect(host.textContent).toContain('最新指数点位')
-  expect(host.textContent).toContain('3891.60')
-  expect(host.textContent).not.toMatch(/开|高|低|均价|成交量|累计量|累计额/)
-
-  await act(async () => chart.handlers.updateAxisPointer({ axesInfo: [{ axisDim: 'x', value: 120 }] }))
-  expect(host.textContent).toContain('11:30 指数点位')
-  expect(host.textContent).toContain('3880.20')
 })

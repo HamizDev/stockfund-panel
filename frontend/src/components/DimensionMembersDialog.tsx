@@ -2,14 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { Link } from 'react-router-dom'
-import {
-  createChart,
-  LineStyle,
-  type IChartApi,
-  type ISeriesApi,
-  type LineData,
-  type Time,
-} from 'lightweight-charts'
+import * as echarts from 'echarts'
+import type { ECharts, EChartsOption } from 'echarts'
 import { Activity, Building2, ChevronRight, Database, RefreshCw, Search, Tags, Users, X } from 'lucide-react'
 import { Modal } from '@/components/Modal'
 import { boardTag } from '@/components/stock-table/primitives'
@@ -331,8 +325,6 @@ const INTRADAY_SECTOR_COLOR: Record<DimensionKind, string> = {
   industry: '#0EA5E9',
 }
 const INTRADAY_MARKET_COLOR = '#94A3B8'
-// 横轴伪时间戳基点 (2020-01-01 UTC), 每点 +60s 保持均匀间距
-const INTRADAY_BASE_TS = 1577836800
 
 function lastNonNull(points: DimensionIntradayPoint[], key: 'sector' | 'market'): number | null {
   for (let i = points.length - 1; i >= 0; i--) {
@@ -420,120 +412,141 @@ function DimensionIntradaySection({ configId, field, value, date, kind }: {
   )
 }
 
-function IntradayChart({ points, kind }: { points: DimensionIntradayPoint[]; kind: DimensionKind }) {
+export function IntradayChart({ points, kind }: { points: DimensionIntradayPoint[]; kind: DimensionKind }) {
   const containerRef = useRef<HTMLDivElement>(null)
-  const chartRef = useRef<IChartApi | null>(null)
-  const sectorRef = useRef<ISeriesApi<'Line'> | null>(null)
-  const marketRef = useRef<ISeriesApi<'Line'> | null>(null)
+  const chartRef = useRef<ECharts | null>(null)
   const ct = useChartTheme()
-  const ctRef = useRef(ct)
-  ctRef.current = ct
-  // v4 不支持字符串时间: 用均匀伪时间戳作横轴, 标签经 formatter 映射回 HH:MM
-  const labelsRef = useRef<string[]>([])
-  const labelAt = (time: number) => labelsRef.current[time - INTRADAY_BASE_TS] ?? ''
 
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-
-    const chart = createChart(el, {
-      width: el.clientWidth,
-      height: 132,
-      layout: {
-        // 关闭 TV 角标 (licence 归属改由 README 技术栈外链承担)
-        attributionLogo: false,
-        background: { color: 'transparent' },
-        textColor: ctRef.current.text,
-        fontFamily: 'JetBrains Mono, monospace',
-        fontSize: 10,
-      },
-      grid: {
-        vertLines: { color: ctRef.current.grid },
-        horzLines: { color: ctRef.current.grid },
-      },
-      rightPriceScale: { borderColor: ctRef.current.border, scaleMargins: { top: 0.12, bottom: 0.04 } },
-      timeScale: {
-        borderColor: ctRef.current.border,
-        rightOffset: 2,
-        barSpacing: 4,
-        tickMarkFormatter: (time: number) => labelAt(time),
-      },
-      localization: {
-        timeFormatter: (time: number) => labelAt(time),
-      },
-      crosshair: {
-        vertLine: { labelVisible: false },
-        horzLine: { labelVisible: true },
-      },
-      handleScroll: false,
-      handleScale: false,
-    })
-    const sector = chart.addLineSeries({
-      color: INTRADAY_SECTOR_COLOR[kind],
-      lineWidth: 2,
-      priceLineVisible: false,
-      lastValueVisible: true,
-      priceFormat: { type: 'custom', formatter: (v: number) => `${(v * 100).toFixed(2)}%`, minMove: 0.0001 },
-      crosshairMarkerRadius: 3,
-    })
-    const market = chart.addLineSeries({
-      color: INTRADAY_MARKET_COLOR,
-      lineWidth: 1,
-      lineStyle: LineStyle.Dashed,
-      priceLineVisible: false,
-      lastValueVisible: false,
-      crosshairMarkerRadius: 2,
-    })
-    sector.createPriceLine({
-      price: 0,
-      color: ctRef.current.border,
-      lineWidth: 1,
-      lineStyle: LineStyle.Dashed,
-      axisLabelVisible: false,
-    })
+    const chart = echarts.init(el, undefined, { renderer: 'canvas' })
     chartRef.current = chart
-    sectorRef.current = sector
-    marketRef.current = market
-
-    const observer = new ResizeObserver(() => {
-      chart.applyOptions({ width: el.clientWidth })
-    })
-    observer.observe(el)
-    return () => {
-      observer.disconnect()
-      chart.remove()
-      chartRef.current = null
-      sectorRef.current = null
-      marketRef.current = null
+    const resize = () => chart.resize()
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(resize)
+      observer.observe(el)
+      return () => {
+        observer.disconnect()
+        chart.dispose()
+        chartRef.current = null
+      }
     }
-  }, [kind])
+    window.addEventListener('resize', resize)
+    return () => {
+      window.removeEventListener('resize', resize)
+      chart.dispose()
+      chartRef.current = null
+    }
+  }, [])
 
   useEffect(() => {
-    chartRef.current?.applyOptions({
-      layout: { textColor: ct.text },
-      grid: { vertLines: { color: ct.grid }, horzLines: { color: ct.grid } },
-      rightPriceScale: { borderColor: ct.border },
-      timeScale: { borderColor: ct.border },
-    })
-  }, [ct])
-
-  useEffect(() => {
-    const sectorSeries = sectorRef.current
-    const marketSeries = marketRef.current
-    if (!sectorSeries || !marketSeries) return
-    labelsRef.current = points.map(p => p.time)
-    const toData = (key: 'sector' | 'market'): LineData[] =>
-      points
-        .map((p, i) => ({ time: (INTRADAY_BASE_TS + i * 60) as Time, value: p[key] }))
-        .filter((d): d is LineData => d.value != null)
-    sectorSeries.setData(toData('sector'))
-    marketSeries.setData(toData('market'))
-    chartRef.current?.timeScale().fitContent()
-  }, [points])
+    chartRef.current?.setOption(buildDimensionIntradayOption(points, kind, ct), true)
+  }, [ct, kind, points])
 
   return (
     <div className="px-2 pb-2 pt-1">
-      <div ref={containerRef} className="w-full" />
+      <div ref={containerRef} className="w-full" style={{ height: 132 }} role="img" aria-label="板块与全市场等权分时百分比走势" />
     </div>
   )
+}
+
+function buildDimensionIntradayOption(
+  points: DimensionIntradayPoint[],
+  kind: DimensionKind,
+  ct: ReturnType<typeof useChartTheme>,
+): EChartsOption {
+  const values = points.flatMap(point => [point.sector, point.market])
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+  const minimum = Math.min(0, ...values)
+  const maximum = Math.max(0, ...values)
+  const span = Math.max(maximum - minimum, 0.001)
+  const padding = span * 0.08
+  const percent = (value: unknown) => typeof value === 'number' && Number.isFinite(value)
+    ? `${value > 0 ? '+' : ''}${(value * 100).toFixed(2)}%`
+    : '—'
+
+  return {
+    animation: false,
+    backgroundColor: 'transparent',
+    grid: { left: 8, right: 56, top: 12, bottom: 22, containLabel: true },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: any) => {
+        const entries = (Array.isArray(params) ? params : [params]) as Array<{
+          axisValueLabel?: string
+          axisValue?: string
+          seriesName?: string
+          marker?: string
+          value?: number | null
+        }>
+        const first = entries[0]
+        if (!first) return ''
+        const rows = entries
+          .filter(entry => typeof entry.value === 'number' && Number.isFinite(entry.value))
+          .map(entry => `${entry.marker ?? ''}${entry.seriesName ?? ''}: ${percent(entry.value)}`)
+        return [first.axisValueLabel ?? first.axisValue ?? '', ...rows].join('<br/>')
+      },
+      backgroundColor: ct.tooltipBg,
+      borderColor: ct.tooltipBorder,
+      textStyle: { color: ct.tooltipText, fontFamily: 'JetBrains Mono, monospace', fontSize: 10 },
+      axisPointer: {
+        type: 'cross',
+        label: { show: true, backgroundColor: ct.tooltipBg, borderColor: ct.tooltipBorder, color: ct.tooltipText },
+        crossStyle: { color: ct.crosshair, type: 'dashed' },
+        lineStyle: { color: ct.crosshair, type: 'dashed' },
+      },
+    },
+    axisPointer: { link: [{ xAxisIndex: 'all' }] },
+    xAxis: {
+      type: 'category',
+      data: points.map(point => point.time),
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: ct.border } },
+      axisTick: { show: false },
+      axisLabel: { color: ct.text, fontFamily: 'JetBrains Mono, monospace', fontSize: 9, hideOverlap: true },
+      axisPointer: { show: true, lineStyle: { color: ct.crosshair, type: 'dashed' }, label: { show: true, backgroundColor: ct.tooltipBg, color: ct.tooltipText } },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: 'value',
+      position: 'right',
+      min: minimum - padding,
+      max: maximum + padding,
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { color: ct.text, fontFamily: 'JetBrains Mono, monospace', fontSize: 9, formatter: (value: number) => percent(value) },
+      splitLine: { lineStyle: { color: ct.grid } },
+      axisPointer: { show: true, label: { show: true, backgroundColor: ct.tooltipBg, color: ct.tooltipText, formatter: (params: { value: unknown }) => percent(params.value) } },
+    },
+    series: [
+      {
+        name: '板块',
+        type: 'line',
+        data: points.map(point => point.sector),
+        connectNulls: false,
+        showSymbol: false,
+        lineStyle: { color: INTRADAY_SECTOR_COLOR[kind], width: 2 },
+        itemStyle: { color: INTRADAY_SECTOR_COLOR[kind] },
+        emphasis: { focus: 'series' },
+        markLine: {
+          silent: true,
+          symbol: 'none',
+          label: { show: false },
+          lineStyle: { color: ct.border, width: 1, type: 'dashed' },
+          data: [{ yAxis: 0 }],
+        },
+      },
+      {
+        name: '全市场',
+        type: 'line',
+        data: points.map(point => point.market),
+        connectNulls: false,
+        showSymbol: false,
+        lineStyle: { color: INTRADAY_MARKET_COLOR, width: 1, type: 'dashed' },
+        itemStyle: { color: INTRADAY_MARKET_COLOR },
+        emphasis: { focus: 'series' },
+      },
+    ],
+  }
 }

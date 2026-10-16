@@ -24,7 +24,7 @@ const PAGE_LABELS: Record<string, string> = {
   '/screener': '策略',
   '/factors': '因子',
   '/backtest': '回测',
-  '/stock-analysis': '个股分析',
+  '/stock-analysis': '股票 / ETF 分析',
   '/limit-ladder': '连板梯队',
   '/concept-analysis': '概念分析',
   '/industry-analysis': '行业分析',

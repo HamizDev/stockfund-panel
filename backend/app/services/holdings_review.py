@@ -3,6 +3,7 @@
 Only this service's latest report is written. Holdings, alerts and trading
 ledgers are read-only. Page visits read status, then explicitly start a job.
 """
+# ruff: noqa: RUF001
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.market_time import cn_today
 from app.services import ai_provider
@@ -30,16 +31,22 @@ _lock = threading.Lock()
 _jobs: dict[tuple[str, Scope], asyncio.Task] = {}
 MAX_ITEMS = 50
 MAX_CONTENT = 60_000
+REPORT_VERSION = 2
 
 
 class ReviewIn(BaseModel):
     force: bool = False
 
 
-_PROMPT = """你是持仓研究助手。只使用本次资料，输出中文 Markdown 每日持仓分析。
-依次给出：组合概览、逐标的可考虑的操作及依据、触发/失效条件、今日核对清单。
-操作可包括维持、观察、考虑减仓、考虑追加，但必须说明适用条件和反向证据；
-数据不足时先观察/核对，不为了给操作而编造事实。不得预测收益、保证胜率、声称下单。
+_PROMPT = """你是持仓研究助手。只使用本次资料，输出一个 JSON 对象，不加代码围栏。
+对象字段：content（中文 Markdown：组合概览、风险、今日核对清单）、actions（逐持仓数组）。
+actions必须覆盖每一个输入symbol且不重复，每项包含symbol、action、reason、trigger、invalidation、missing_data。
+action只选一个主动作：继续持有、暂停追加、条件追加、条件减仓、条件部分赎回、资料不足待核实。
+股票/场内ETF使用条件减仓；场外基金使用条件部分赎回，不混淆交易方式。
+reason、trigger、invalidation为非空中文字符串；missing_data为具体待补字段的字符串数组。
+不要把所有结果笼统写成观察；已有资料能支持的判断应明确给主动作及其条件，
+不能判断的项目明确指出会改变结论的缺口。不得预测收益、保证胜率、声称下单。
+缺少日期或有效价格的项目必须选资料不足待核实，不把缺失信息编成0。
 逐标的引用代码、名称、实际数据日期、关键数值，并区分事实与判断。
 登记数量/成本/金额/收益是用户填写的参考值，不是实时券商余额，缺少更新时间；
 不能据此声称今日盈亏、可用资金、真实总仓位或精确新增投资金额。
@@ -60,6 +67,80 @@ quote_time为空时不能声称已确认实时报价时点或今日收盘。
 """
 
 
+class HoldingAction(BaseModel):
+    symbol: str
+    action: Literal["继续持有", "暂停追加", "条件追加", "条件减仓", "条件部分赎回", "资料不足待核实"]
+    reason: str
+    trigger: str
+    invalidation: str
+    missing_data: list[str] = Field(default_factory=list)
+
+
+def _has_evidence(row: dict) -> bool:
+    return bool(row.get("data_date")) and any(
+        isinstance(point.get(field), (int, float)) and not isinstance(point.get(field), bool)
+        and math.isfinite(point[field]) and point[field] > 0
+        for point in row.get("nav", row.get("daily", []))
+        for field in ("unit_nav", "close", "raw_close")
+    )
+
+
+def _group_observations(rows: list[dict]) -> list[dict]:
+    """Analyze one symbol once; retain every registered batch without inventing a balance."""
+    grouped = {}
+    for row in rows:
+        symbol = row.get('symbol')
+        if not isinstance(symbol, str) or not symbol:
+            raise ValueError('Missing holding symbol')
+        if symbol not in grouped:
+            grouped[symbol] = {**row, 'registered_batches': []}
+            grouped[symbol].pop('registered_lot', None)
+            grouped[symbol].pop('registered_holding', None)
+        elif grouped[symbol].get('asset_type') != row.get('asset_type'):
+            raise ValueError('Mixed asset types for holding')
+        batch = row.get('registered_lot', row.get('registered_holding'))
+        if batch is not None:
+            grouped[symbol]['registered_batches'].append(batch)
+    return list(grouped.values())
+
+
+def _parse_report(text: str, observations: list[dict]) -> tuple[str, list[dict]]:
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_CONTENT:
+        raise ValueError("Empty or oversized report")
+    stripped = text.strip()
+    if stripped.startswith("```") and stripped.endswith("```"):
+        stripped = stripped.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    payload = json.loads(stripped)
+    if not isinstance(payload, dict) or not isinstance(payload.get("content"), str) or not payload["content"].strip():
+        raise ValueError("Missing report content")
+    raw = payload.get("actions")
+    by_symbol = {row["symbol"]: row for row in observations}
+    if not isinstance(raw, list) or len(raw) != len(observations) or len(by_symbol) != len(observations):
+        raise ValueError("Action coverage mismatch")
+    actions, seen = [], set()
+    for item in raw:
+        action = HoldingAction.model_validate(item)
+        if action.symbol not in by_symbol or action.symbol in seen:
+            raise ValueError("Unknown or duplicate holding")
+        row = by_symbol[action.symbol]
+        if row.get('asset_type') in {'stock', 'etf'} and action.action == '条件部分赎回':
+            raise ValueError('Redemption action for exchange-traded asset')
+        if row.get('asset_type') == 'fund' and action.action == '条件减仓':
+            raise ValueError('Exchange action for off-exchange fund')
+        if any(not value.strip() or len(value) > 2000 for value in (action.reason, action.trigger, action.invalidation)):
+            raise ValueError("Missing action conditions")
+        if len(action.missing_data) > 20 or any(not value.strip() or len(value) > 200 for value in action.missing_data):
+            raise ValueError("Invalid missing data")
+        if not _has_evidence(row) and action.action != "资料不足待核实":
+            raise ValueError("Action without dated evidence")
+        seen.add(action.symbol)
+        actions.append({**action.model_dump(), "name": row.get("name") or action.symbol,
+                        "data_date": row.get("data_date"), "asset_type": row.get("asset_type")})
+    # Keep input order, not the model's ranking of a user's portfolio.
+    order = {row["symbol"]: i for i, row in enumerate(observations)}
+    return payload["content"], sorted(actions, key=lambda row: order[row["symbol"]])
+
+
 def clean(value):
     """Preserve units and dates; remove non-finite numbers from model context."""
     if isinstance(value, dict):
@@ -74,7 +155,7 @@ def clean(value):
 
 
 def _fingerprint(holdings: list[dict]) -> str:
-    rows = sorted((json.dumps(clean(row), sort_keys=True, ensure_ascii=False) for row in holdings))
+    rows = sorted(json.dumps(clean(row), sort_keys=True, ensure_ascii=False) for row in holdings)
     return hashlib.sha256("\n".join(rows).encode()).hexdigest()
 
 
@@ -119,23 +200,35 @@ def status(data_dir: Path, scope: Scope, holdings: list[dict]) -> dict:
         task = _jobs.get(key)
         running = task is not None and not task.done()
     same_day = report is not None and report.get("report_date") == today
+    changed = bool(report and (
+        report.get("holdings_fingerprint") != _fingerprint(holdings)
+        or report.get("model_identity") != _model()
+        or report.get("version") != REPORT_VERSION
+    ))
     if running:
         state = "running"
     elif not holdings:
         state = "empty"
-    elif same_day:
+    elif same_day and not changed:
         # A server restart cannot leave a persisted job stuck in "running".
         state = report.get("status") if report.get("status") in {"complete", "failed"} else "failed"
         if state == "failed" and not report.get("error"):
             report = {**report, "error": "上次生成被中断，请手动重新生成。"}
+    elif same_day and report.get('auto_attempt_date') == today:
+        state = 'outdated'
     elif not ai_provider.ai_configured():
         state = "unconfigured"
     else:
         state = "not_generated"
-    public = {field: report.get(field) for field in (
-        "report_date", "generated_at_ms", "model", "content", "observations", "warnings", "error"
+    display_report = (report.get('previous_report') or report) if report and report.get('status') != 'complete' else report
+    public = {field: display_report.get(field) for field in (
+        "report_date", "generated_at_ms", "model", "content", "actions", "observations", "warnings", "error", "error_category"
     )} if report else None
+    if public:
+        public['error'] = report.get('error')
+        public['error_category'] = report.get('error_category')
     return {"status": state, "today": today, "holdings_count": len(holdings),
+            "report_current": bool(same_day and not changed and display_report is report),
             "holdings_changed": bool(report and report.get("holdings_fingerprint") != _fingerprint(holdings)),
             "model_changed": bool(report and report.get("model_identity") != _model()),
             "report": public}
@@ -148,16 +241,23 @@ async def start(data_dir: Path, scope: Scope, holdings: list[dict],
     # No await between the state check and task reservation on this event loop.
     current = status(data_dir, scope, holdings)
     if current["status"] in {"running", "empty"} or (
-        not force and current["status"] in {"complete", "failed"}
+        not force and current["status"] in {"complete", "failed", "outdated"}
     ):
         return current
     if not ai_provider.ai_configured():
         return {**current, "status": "unconfigured"}
     identity = _model()
+    previous = _read(data_dir, scope)
+    if previous and previous.get('status') != 'complete':
+        previous = previous.get('previous_report')
     report = {"scope": scope, "status": "running", "report_date": cn_today().isoformat(),
+              "version": REPORT_VERSION,
+              "auto_attempt_date": cn_today().isoformat(),
               "generated_at_ms": round(time.time() * 1000), "model": identity["model"],
               "model_identity": identity, "holdings_fingerprint": _fingerprint(holdings),
-              "content": "", "observations": [], "warnings": []}
+              "content": "", "actions": [], "observations": [], "warnings": []}
+    if previous and previous.get('content'):
+        report['previous_report'] = {key: value for key, value in previous.items() if key != 'previous_report'}
     # Refuse oversized accounts rather than silently omit holdings.
     if len(holdings) > MAX_ITEMS:
         report.update(status="failed", error=f"当前登记超过 {MAX_ITEMS} 条，本次未调用模型；请先核对登记范围。")
@@ -170,35 +270,38 @@ async def start(data_dir: Path, scope: Scope, holdings: list[dict],
 
 
 async def _generate(data_dir: Path, scope: Scope, holdings: list[dict], collect, report: dict) -> None:
+    phase = "data"
     try:
-        observations = clean(await run_in_threadpool(collect, holdings))
+        observations = _group_observations(clean(await run_in_threadpool(collect, holdings)))
         report["observations"] = [{key: row.get(key) for key in (
             "symbol", "name", "asset_type", "data_date", "warning"
         )} for row in observations]
-        if not any(row.get("data_date") and any(
-            isinstance(point.get(field), (int, float)) and not isinstance(point.get(field), bool)
-            and point[field] > 0
-            for point in row.get("nav", row.get("daily", []))
-            for field in ("unit_nav", "close", "raw_close")
-        ) for row in observations):
+        if not any(_has_evidence(row) for row in observations):
             raise ValueError("No dated market evidence")
         report["warnings"] = list(dict.fromkeys(row["warning"] for row in observations if row.get("warning")))
+        phase = "model"
         content = await asyncio.wait_for(ai_provider.generate_ai_text(
             [{"role": "system", "content": _PROMPT},
              {"role": "user", "content": json.dumps({"report_date": report["report_date"],
                 "scope": scope, "holdings": observations}, ensure_ascii=False, allow_nan=False)}],
             temperature=0.2, max_tokens=None, timeout=600,
         ), timeout=900)
-        if not isinstance(content, str) or not content.strip() or len(content) > MAX_CONTENT:
-            raise ValueError("Model returned empty or oversized report")
-        report.update(status="complete", content=content, generated_at_ms=round(time.time() * 1000))
+        phase = "output"
+        content, actions = _parse_report(content, observations)
+        report.update(status="complete", content=content, actions=actions, generated_at_ms=round(time.time() * 1000))
+        report.pop('previous_report', None)
     except asyncio.CancelledError:
         report.update(status="failed", error="生成被中断，请手动重新生成。")
         raise
-    except Exception:
+    except Exception as exc:
         # Do not expose upstream exceptions containing keys, URLs or holdings.
-        logger.warning("Daily holding review failed for scope %s", scope)
-        report.update(status="failed", error="日报未完成：行情资料或模型不可用，请核对数据日期与 AI 设置后重试。")
+        category = "timeout" if isinstance(exc, TimeoutError) else phase
+        logger.warning("Daily holding review failed: scope=%s phase=%s type=%s", scope, category, type(exc).__name__)
+        messages = {"data": "行情资料读取失败或没有带日期的有效价格，请核对数据。",
+                    "model": "AI 请求未完成，请核对模型连接后重试。",
+                    "output": "AI 返回的操作分析格式或持仓覆盖不完整，请重新生成。",
+                    "timeout": "AI 请求超时，请稍后重新生成。"}
+        report.update(status="failed", error_category=category, error=messages[category])
     finally:
         try:
             _save(data_dir, scope, report)

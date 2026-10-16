@@ -28,7 +28,7 @@ vi.mock('@/components/TradingViewDailyChart', async () => {
   return {
     TradingViewDailyChart: (props: { contextKey: string }) => React.createElement(
       'div',
-      { 'data-testid': 'tradingview-chart', 'data-context': props.contextKey },
+      { 'data-testid': 'canvas-chart', 'data-context': props.contextKey },
     ),
   }
 })
@@ -63,23 +63,25 @@ afterEach(async () => {
   mocked.useQuery.mockReset()
 })
 
-it('defaults to TradingView and lets the user switch back to the existing professional ECharts chart', async () => {
+it('defaults to the self-built Canvas chart and can switch to the professional ECharts chart', async () => {
   await act(async () => root.render(
     <StockDailyKChart symbol="510300.SH" dateRange={{ start: '2026-09-01', end: '2026-09-30' }} />,
   ))
 
-  expect(host.querySelector('[data-testid="tradingview-chart"]')?.getAttribute('data-context'))
+  expect(host.querySelector('[data-testid="canvas-chart"]')?.getAttribute('data-context'))
     .toBe('510300.SH|2026-09-01|2026-09-30')
   expect(host.querySelector('[data-testid="professional-chart"]')).toBeNull()
 
+  const canvasButton = [...host.querySelectorAll('button')].find(button => button.textContent === '自研Canvas')
+  expect(canvasButton?.getAttribute('aria-pressed')).toBe('true')
   const professionalButton = [...host.querySelectorAll('button')].find(button => button.textContent === '专业指标')
   expect(professionalButton).toBeDefined()
   act(() => professionalButton?.dispatchEvent(new MouseEvent('click', { bubbles: true })))
   expect(host.querySelector('[data-testid="professional-chart"]')).not.toBeNull()
-  expect(host.querySelector('[data-testid="tradingview-chart"]')).toBeNull()
+  expect(host.querySelector('[data-testid="canvas-chart"]')).toBeNull()
 })
 
-it('defaults to professional mode and explains when a backtest range must be kept visible', async () => {
+it('defaults to professional mode when backtest ranges must remain visible', async () => {
   await act(async () => root.render(
     <StockDailyKChart
       symbol="510300.SH"
@@ -89,8 +91,11 @@ it('defaults to professional mode and explains when a backtest range must be kep
   ))
 
   expect(host.querySelector('[data-testid="professional-chart"]')).not.toBeNull()
-  expect(host.querySelector('[data-testid="tradingview-chart"]')).toBeNull()
+  expect(host.querySelector('[data-testid="canvas-chart"]')).toBeNull()
   expect(host.textContent).toContain('回测区间标注仅在专业指标图中完整显示')
-  const tradingViewButton = [...host.querySelectorAll('button')].find(button => button.textContent === 'TradingView')
-  expect(tradingViewButton?.disabled).toBe(true)
+  const canvasButton = [...host.querySelectorAll('button')].find(button => button.textContent === '自研Canvas')
+  expect(canvasButton?.disabled).toBe(true)
+  expect(canvasButton?.getAttribute('aria-pressed')).toBe('false')
+  const professionalButton = [...host.querySelectorAll('button')].find(button => button.textContent === '专业指标')
+  expect(professionalButton?.getAttribute('aria-pressed')).toBe('true')
 })

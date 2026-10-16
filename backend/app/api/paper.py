@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -115,6 +116,13 @@ def list_accounts(request: Request):
     return {"accounts": paper.list_accounts(_data_dir(request))}
 
 
+@router.get("/replays")
+def list_historical_replays(request: Request):
+    from app.services.paper_replay import list_replays
+
+    return list_replays(_data_dir(request))
+
+
 @router.get("/account")
 def get_account(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
     acc = paper.get_account(_data_dir(request), _acc(request, account))
@@ -141,6 +149,12 @@ def create_account(request: Request, body: AccountModel):
 
 @router.post("/strategy_accounts")
 def create_strategy_account(request: Request, body: StrategyAccountModel):
+    return _create_strategy_account(request, body)
+
+
+def _create_strategy_account(request: Request, body: StrategyAccountModel, *,
+                             instance_id: str | None = None, account_name: str | None = None,
+                             fee_settings: dict | None = None, strategy_params: dict | None = None):
     """Create one isolated paper account per monitored strategy.
 
     Entry and exit use separate direction-aware rules. Creating the account
@@ -164,7 +178,7 @@ def create_strategy_account(request: Request, body: StrategyAccountModel):
         raise HTTPException(status_code=400, detail="该策略不支持所选市场")
     data_dir = _data_dir(request)
     with paper.PAPER_LOCK:
-        existing_id = next(
+        existing_id = instance_id or next(
             (aid for aid in paper.list_account_ids(data_dir)
              if (paper.get_account(data_dir, aid) or {}).get("strategy_id") == body.strategy_id
              and ((paper.get_account(data_dir, aid) or {}).get("asset_type") or
@@ -172,20 +186,40 @@ def create_strategy_account(request: Request, body: StrategyAccountModel):
             None,
         )
         account_id = existing_id or f"strat_{uuid.uuid4().hex[:16]}"
+        current = paper.get_account(data_dir, account_id)
+        if current and (current.get("strategy_id") != body.strategy_id or
+                        current.get("asset_type", "stock") != asset_type):
+            raise HTTPException(status_code=409, detail="账户标识已用于其他策略或市场，不会覆盖")
+        if current and instance_id is not None and (
+            current.get("initial_cash") != body.initial_cash
+            or current.get("etf_plan") is not True
+            or current.get("max_positions") != 1
+            or any(current.get(key) != value for key, value in (fee_settings or {}).items())
+        ):
+            raise HTTPException(status_code=409, detail="已有账户的本金、费用或限仓与 ETF 计划不一致，不会覆盖。请先核对已有账户")
         monitor_id = _paper_monitor_id(account_id)
         monitor = monitor_rules.load_one(data_dir, monitor_id)
         if monitor and (monitor.get("strategy_id") != body.strategy_id or
                         monitor.get("asset_type", "stock") != asset_type):
             raise HTTPException(status_code=409, detail="专属监控的市场或策略与账户不一致。请先核对")
+        if monitor and instance_id is not None and any(
+            monitor.get("strategy_params", {}).get(key) != value for key, value in (strategy_params or {}).items()
+        ):
+            raise HTTPException(status_code=409, detail="已有 ETF 监控预算与计划不一致，不会覆盖。请先核对监控参数")
         if monitor and monitor.get("enabled") and not _monitor_has_both_sides(monitor):
             raise HTTPException(status_code=409, detail="策略模拟仓监控缺少买入或卖出事件。请先在监控中心补齐")
         try:
             account = paper.create_account(
                 data_dir, body.initial_cash, account_id=account_id,
-                name=f"策略 · {meta.get('name') or body.strategy_id}",
+                name=account_name or f"策略 · {meta.get('name') or body.strategy_id}",
                 strategy_id=body.strategy_id,
                 asset_type=asset_type,
+                **(fee_settings or {}),
             )
+            if current is None and instance_id is not None:
+                account["max_positions"] = 1
+                account["etf_plan"] = True
+                paper.save_account(data_dir, account, account_id)
             rules = paper_auto.load_auto_rules(data_dir, account_id)
             for side, size_mode, size_value, cooldown in (
                 ("buy", "pct_equity", body.entry_pct, 5),
@@ -212,6 +246,8 @@ def create_strategy_account(request: Request, body: StrategyAccountModel):
                     "strategy_id": body.strategy_id, "direction": "entry",
                     "notify_events": ["buy_signal", "sell_signal", "pool_entry", "pool_exit"],
                     "conditions": [], "cooldown_seconds": 0, "enabled": True,
+                    "strategy_params": strategy_params or {},
+                    "emit_current_on_start": instance_id is not None,
                 })
                 monitor_rules.validate(monitor)
                 monitor_rules.save_one(data_dir, monitor)
@@ -222,6 +258,82 @@ def create_strategy_account(request: Request, body: StrategyAccountModel):
             raise HTTPException(status_code=400, detail=str(e)) from e
     return {"account": account, "rules": rules,
             "monitor_enabled": monitor.get("enabled") is True and _monitor_has_both_sides(monitor)}
+
+
+class EtfShorttermModel(BaseModel):
+    mode: Literal["t0_reversion", "base_t"]
+    initial_cash: Literal[5000, 10000, 20000, 100000]
+    max_positions: int = Field(ge=1, le=3)
+
+
+@router.get("/etf_shortterm_plan")
+def etf_shortterm_plan(request: Request):
+    from app.strategy import etf_shortterm
+
+    service = getattr(request.app.state, "etf_shortterm_service", None)
+    return {**etf_shortterm.plan(), "pool": etf_plan(request)["pool"],
+            "runtime": service.status() if service else {"status": "短线服务不可用"}}
+
+
+@router.post("/etf_shortterm_plan")
+def create_etf_shortterm(request: Request, body: EtfShorttermModel):
+    from app.strategy import etf_shortterm
+
+    try:
+        account, created = etf_shortterm.create_account(_data_dir(request), body.mode, body.initial_cash, body.max_positions)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"account": account, "created": created}
+
+
+class EtfPlanAccountModel(BaseModel):
+    family: Literal["core", "sector"]
+    initial_cash: Literal[5000, 20000]
+
+
+@router.get("/etf_plan")
+def etf_plan(request: Request):
+    from app.strategy.etf_presets import BUDGETS, COMMISSION_PCT, ENTRY_PCT, FAMILIES, POOL, SLIPPAGE_BPS, symbols_for
+    import polars as pl
+
+    root = _data_dir(request) / "kline_etf_daily"
+    paths = sorted(root.glob("date=*/*.parquet")) if root.exists() else []
+    prices = {}
+    if paths:
+        # Latest partition only: no full history read on each visit.
+        try:
+            frame = pl.read_parquet(paths[-1]).filter(pl.col("symbol").is_in([r[0] for r in POOL]))
+            prices = {str(r["symbol"]): r for r in frame.iter_rows(named=True)}
+        except Exception:
+            logger.warning("ETF plan latest price read failed", exc_info=True)
+    rows = []
+    for symbol, name, category, _, _ in POOL:
+        row = prices.get(symbol, {})
+        price = row.get("raw_close", row.get("close"))
+        price = float(price) if isinstance(price, (int, float)) and math.isfinite(price) and price > 0 else None
+        lot = None if price is None else round(100 * paper.apply_slippage(price, "buy", SLIPPAGE_BPS) +
+                                              paper.buy_fee(100, paper.apply_slippage(price, "buy", SLIPPAGE_BPS), COMMISSION_PCT), 2)
+        rows.append({"symbol": symbol, "name": name, "category": category, "last_close": price,
+                     "as_of": str(row.get("date")) if row.get("date") else None,
+                     "lot_cost": lot, "affordable_budgets": [b for b in BUDGETS if lot is not None and lot <= b * ENTRY_PCT / 100]})
+    return {"commission_pct": COMMISSION_PCT, "min_commission": paper.MIN_COMMISSION,
+            "stamp_tax_pct": 0, "slippage_bps": SLIPPAGE_BPS, "entry_pct": ENTRY_PCT,
+            "max_positions": 1, "budgets": BUDGETS,
+            "strategies": [{"family": key, **value, "symbols": symbols_for(key)} for key, value in FAMILIES.items()],
+            "pool": rows}
+
+
+@router.post("/etf_plan")
+def create_etf_plan_account(request: Request, body: EtfPlanAccountModel):
+    from app.strategy.etf_presets import COMMISSION_PCT, ENTRY_PCT, FAMILIES, SLIPPAGE_BPS
+    family = FAMILIES[body.family]
+    return _create_strategy_account(request, StrategyAccountModel(
+        strategy_id=family["strategy_id"], initial_cash=body.initial_cash,
+        asset_type="etf", entry_pct=ENTRY_PCT),
+        instance_id=f"etf_{body.family}_{body.initial_cash}",
+        account_name=f"{family['name']} · {body.initial_cash:,}元",
+        fee_settings={"commission_pct": COMMISSION_PCT, "stamp_tax_pct": 0, "slippage_bps": SLIPPAGE_BPS},
+        strategy_params={"max_ticket": body.initial_cash * ENTRY_PCT / 100})
 
 
 @router.get("/overview")
@@ -238,6 +350,27 @@ def overview(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
         return {"initialized": False, "account_id": acc_id}
     ov = paper.overview(data_dir, account_id=acc_id)
     ov["fees"] = {k: acc[k] for k in ("commission_pct", "stamp_tax_pct", "slippage_bps")}
+
+    if acc.get("etf_shortterm"):
+        from app.market_time import cn_now, in_continuous_session
+        from app.services import trading_day
+        service = getattr(request.app.state, "etf_shortterm_service", None)
+        qs = getattr(request.app.state, "quote_service", None)
+        snapshot = {}
+        if (service and qs and acc["status"] == "active" and not qs.is_paused()
+                and qs.status().get("enabled") is True and in_continuous_session(cn_now())
+                and trading_day.is_trading_day() is not False):
+            snapshot = {s: q["last_price"] for s, q in service.fresh_quotes().items()}
+        held = {h["symbol"] for h in ov["holdings"]}
+        complete = held.issubset(snapshot)
+        if complete and held:
+            live = paper.overview(data_dir, snapshot, account_id=acc_id)
+            live["fees"] = ov["fees"]
+            ov = live
+        ov.update(etf_shortterm=acc["etf_shortterm"], valuation_complete=complete,
+                  valuation_note="盘中来源行情估算，盘后净值另行定版" if held and complete
+                  else "暂无持仓，权益等于现金" if not held else "持仓行情未就绪，暂不展示实时市值和盈亏")
+        return ov
 
     # 盘中实时估算: 从行情服务的当日 enriched 快照取 raw_close (软失败, 降级日线)
     qs = getattr(request.app.state, "quote_service", None)
@@ -259,6 +392,8 @@ def overview(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
 def create_order(request: Request, body: OrderModel, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
     data_dir = _data_dir(request)
     acc_id = _acc(request, account)
+    if (paper.get_account(data_dir, acc_id) or {}).get("etf_shortterm"):
+        raise HTTPException(status_code=400, detail="短线账户仅由内置短线策略建单；手动交易请使用其他模拟账户")
     asset_type = _resolve_asset_type(request, body.symbol)
     ref_price = body.ref_price
     if ref_price is None:
@@ -352,11 +487,18 @@ def compare_accounts(request: Request):
                             (acc.get("asset_type") is None or monitor.get("asset_type", "stock") == acc["asset_type"]) and
                             all(r.get("asset_type") in (None, acc.get("asset_type") or monitor.get("asset_type", "stock")) for r in rules) and
                             {r.get("side") for r in rules if r.get("enabled")} == {"buy", "sell"})
+        shortterm = None
+        if acc.get("etf_shortterm"):
+            from app.strategy import etf_shortterm
+            shortterm = etf_shortterm.read_state(data_dir, acc_id)
+            auto_enabled = bool(acc["etf_shortterm"]["enabled"])
         rows.append({
             "account": acc_id,
             "name": acc.get("name") or acc_id,
             "strategy_id": acc.get("strategy_id"),
             "auto_enabled": auto_enabled,
+            "shortterm": shortterm,
+            "max_positions": (acc.get("etf_shortterm") or {}).get("max_positions", acc.get("max_positions")),
             "asset_type": acc.get("asset_type") or (monitor or {}).get("asset_type"),
             "wins": st.get("wins"),
             "holdings_count": len(ov.get("holdings") or []),
@@ -396,6 +538,14 @@ def set_strategy_account_enabled(request: Request, account_id: str, enabled: boo
         strategy_id = account.get("strategy_id") if account else None
         if not strategy_id:
             raise HTTPException(status_code=404, detail="策略模拟仓不存在")
+        if account.get("etf_shortterm"):
+            if enabled and account.get("status") != "active":
+                raise HTTPException(status_code=409, detail="冻结账户不能启用短线模拟")
+            if enabled and getattr(request.app.state, "etf_shortterm_service", None) is None:
+                raise HTTPException(status_code=503, detail="ETF短线服务不可用")
+            account["etf_shortterm"]["enabled"] = enabled
+            paper.save_account(data_dir, account, account_id)
+            return {"enabled": enabled}
         if enabled and account.get("status") == "frozen":
             raise HTTPException(status_code=409, detail="冻结账户不能启用自动跟单")
         monitor = monitor_rules.load_one(data_dir, _paper_monitor_id(account_id))
@@ -414,6 +564,13 @@ def set_strategy_account_enabled(request: Request, account_id: str, enabled: boo
             raise HTTPException(status_code=409, detail="跟单规则的市场与账户不一致。请先核对")
         for rule in rules:
             paper_auto.set_enabled(data_dir, rule["id"], enabled, account_id)
+        if enabled and account.get("etf_plan"):
+            # Restart the signal epoch of this account, not any other monitor.
+            monitor["paper_activation"] = uuid.uuid4().hex
+            monitor_rules.save_one(data_dir, monitor)
+            runtime_monitor = getattr(request.app.state, "monitor_engine", None)
+            if runtime_monitor is not None:
+                runtime_monitor.set_rules(monitor_rules.load_all(data_dir))
     return {"enabled": enabled}
 
 
@@ -429,17 +586,24 @@ def freeze(request: Request, frozen: bool = True, account: str = Query(paper.DEF
     """冻结/解冻账户: 冻结后拒绝新订单, 持仓只读。"""
     data_dir = _data_dir(request)
     acc_id = _acc(request, account)
-    acc = paper.get_account(data_dir, acc_id)
-    if acc is None:
-        raise HTTPException(status_code=400, detail="尚未创建模拟账户")
-    acc["status"] = "frozen" if frozen else "active"
-    paper.save_account(data_dir, acc, acc_id)
+    with paper.PAPER_LOCK:
+        acc = paper.get_account(data_dir, acc_id)
+        if acc is None:
+            raise HTTPException(status_code=400, detail="尚未创建模拟账户")
+        if not frozen and acc.get("ledger_error"):
+            raise HTTPException(status_code=409, detail=acc["ledger_error"])
+        acc["status"] = "frozen" if frozen else "active"
+        paper.save_account(data_dir, acc, acc_id)
     return {"account": acc}
 
 
 @router.post("/settings")
 def update_settings(request: Request, body: SettingsModel, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
     """更新账户设置 (涨跌停排队等开关)。"""
+    acc = paper.get_account(_data_dir(request), _acc(request, account))
+    if acc and acc.get("etf_shortterm") and any(value is not None and value != acc.get(key)
+                                                for key, value in body.model_dump().items()):
+        raise HTTPException(status_code=400, detail="短线账户按银河证券费用固定模拟，请创建其他账户比较费用")
     try:
         acc = paper.update_settings(_data_dir(request), _acc(request, account), **body.model_dump())
     except ValueError as e:
@@ -469,6 +633,8 @@ def list_auto_rules(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT
 @router.post("/auto_rules")
 def create_auto_rule(request: Request, body: AutoRuleModel, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
     from app.strategy import paper_auto
+    if (paper.get_account(_data_dir(request), _acc(request, account)) or {}).get("etf_shortterm"):
+        raise HTTPException(status_code=400, detail="短线账户使用专属盘中策略，无需日线自动跟单规则")
     try:
         rule = paper_auto.create_auto_rule(_data_dir(request), body.model_dump(), _acc(request, account))
     except ValueError as e:

@@ -23,6 +23,7 @@ const AI_DIRECTIONS = {
 const AI_SCOPES = { market: '市场', industry: '行业', company: '公司', unclear: '范围待核对' } as const
 const timeText = (value: string | null) => value ? value.slice(5, 16).replace('T', ' ') : '尚未取得'
 const badge = 'inline-flex items-center rounded border px-1.5 py-0.5 text-xs'
+const NEWS_PAGE_SIZE = 50
 const DIRECTION_JOB_STORAGE_KEY = 'stockfund.news-direction-job.v1'
 type NewsDirectionEffort = 'high' | 'max'
 interface NewsDirectionSession { id: string; effort: NewsDirectionEffort }
@@ -189,6 +190,7 @@ export function NewsPage() {
   const waitingForAssociationSync = scope === 'mine' && feedData?.association_status === ''
   const busy = feed.isFetching || refresh.isPending
   const generate = (id: string) => { setError(''); analyze.mutate(id) }
+  const displayFilterKey = JSON.stringify([feedDay, view, search, source, category, scope])
   const directionStatusLabels: Record<NewsDirectionJob['status'], string> = {
     running: '正在后台判断', complete: '方向判断完成', partial: '部分快讯已完成判断',
     failed: '方向判断失败', busy: '已有方向判断任务正在运行', unconfigured: 'AI 尚未配置',
@@ -284,10 +286,10 @@ export function NewsPage() {
         </div>
         {(error || feed.error) && <div role="alert" className="rounded border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">{error || (feed.error instanceof Error ? feed.error.message : '快讯加载失败')}</div>}
         {feed.isLoading || (feed.isFetching && !feedData) ? <div className="flex items-center justify-center gap-2 py-20 text-sm text-muted"><Loader2 className="animate-spin" size={18} />正在拉取公开快讯…</div>
-          : visible.length === 0 ? <div className="rounded-lg border border-border py-20 text-center text-sm text-muted">{waitingForAssociationSync ? '快讯缓存已恢复，个股持仓关联待更新' : rows.length === 0 ? '暂无有效快讯，请核对来源状态后刷新' : '没有符合当前筛选的快讯'}{scope === 'mine' && !waitingForAssociationSync && <p className="mt-2 text-xs">仅匹配本地自选和登记的股票 / ETF，未命中不代表没有相关新闻。</p>}</div>
-          : <section aria-label="快讯列表" className="overflow-hidden rounded-lg border border-border">
-            {visible.map(item => <NewsRow key={item.id} item={item} classification={classification} onAnalyze={() => generate(item.id)} analyzing={analyze.isPending} onPreview={setPreview} />)}
-          </section>}
+          : <PaginatedNewsResults key={displayFilterKey} items={visible} classification={classification}
+            analyzing={analyze.isPending} onAnalyze={generate} onPreview={setPreview}
+            emptyMessage={waitingForAssociationSync ? '快讯缓存已恢复，个股持仓关联待更新' : rows.length === 0 ? '暂无有效快讯，请核对来源状态后刷新' : '没有符合当前筛选的快讯'}
+            showMineHint={scope === 'mine' && !waitingForAssociationSync} />}
         <p className="pb-2 text-center text-[11px] leading-relaxed text-muted">词表初筛和 AI 推断仅供继续研究；新闻未覆盖所有市场事件，关联不代表受益。请核对原文、发布时间和实际行情。</p>
       </div>
     </main>
@@ -307,6 +309,38 @@ export function NewsPage() {
     </aside>}
     {preview && <StockPreviewDialog symbol={preview.symbol} name={preview.name} onClose={() => setPreview(null)} />}
   </div>
+}
+
+function PaginatedNewsResults({ items, classification, analyzing, onAnalyze, onPreview, emptyMessage, showMineHint }: {
+  items: NewsItem[]
+  classification: 'serenity' | 'wojianshan'
+  analyzing: boolean
+  onAnalyze: (id: string) => void
+  onPreview: (stock: { symbol: string; name: string }) => void
+  emptyMessage: string
+  showMineHint: boolean
+}) {
+  const [requestedPage, setRequestedPage] = useState(0)
+  const pageCount = Math.max(1, Math.ceil(items.length / NEWS_PAGE_SIZE))
+  const page = Math.min(requestedPage, pageCount - 1)
+  const start = page * NEWS_PAGE_SIZE
+  const displayed = items.slice(start, start + NEWS_PAGE_SIZE)
+
+  return <>
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted">
+      <span role="status">显示 {items.length ? start + 1 : 0}–{start + displayed.length} / {items.length} 条 · 第 {page + 1}/{pageCount} 页</span>
+      <div className="flex items-center gap-2">
+        <button type="button" disabled={page === 0} onClick={() => setRequestedPage(page - 1)}
+          className="rounded border border-border px-2.5 py-1 text-foreground hover:border-accent/50 hover:text-accent disabled:opacity-40">上一页</button>
+        <button type="button" disabled={page + 1 >= pageCount} onClick={() => setRequestedPage(page + 1)}
+          className="rounded border border-border px-2.5 py-1 text-foreground hover:border-accent/50 hover:text-accent disabled:opacity-40">下一页</button>
+      </div>
+    </div>
+    {items.length === 0 ? <div className="rounded-lg border border-border py-20 text-center text-sm text-muted">{emptyMessage}{showMineHint && <p className="mt-2 text-xs">仅匹配本地自选和登记的股票 / ETF，未命中不代表没有相关新闻。</p>}</div>
+      : <section aria-label="快讯列表" className="overflow-hidden rounded-lg border border-border">
+        {displayed.map(item => <NewsRow key={item.id} item={item} classification={classification} onAnalyze={() => onAnalyze(item.id)} analyzing={analyzing} onPreview={onPreview} />)}
+      </section>}
+  </>
 }
 
 function NewsRow({ item, classification, onAnalyze, analyzing, onPreview }: {

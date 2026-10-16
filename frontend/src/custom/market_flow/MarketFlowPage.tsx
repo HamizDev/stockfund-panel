@@ -7,6 +7,9 @@
  * 样式: 与主面板 Dashboard 一致 (accent 色条标题 / surface 卡片 / 紧凑字号)。
  */
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
+import { QK } from '@/lib/queryKeys'
 import { Activity, Flame, Droplets, Zap } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import {
@@ -124,6 +127,12 @@ function MoneyFlowTable({ items, main }: { items: (MoneyFlowItem | MoneyFlowMain
 }
 
 export function MarketFlowPage() {
+  const { data: membership, isError: membershipError } = useQuery({
+    queryKey: QK.marketMembershipStatus,
+    queryFn: marketFlowApi.membershipStatus,
+    staleTime: 60_000,
+    retry: false,
+  })
   const [tab, setTab] = useState<TabId>('popularity')
   const [items, setItems] = useState<(PopularityItem | MoneyFlowItem | MoneyFlowMainItem)[]>([])
   const [loading, setLoading] = useState(true)
@@ -156,6 +165,19 @@ export function MarketFlowPage() {
 
   return (
     <div className="space-y-2.5">
+      <section className="rounded-md border border-border/40 bg-surface/60 px-3 py-2.5 text-[11px] leading-5 text-secondary">
+        <p>概念 / 行业归属使用同花顺 Fuyao 本地快照；下方人气和资金排行仍来自 shy313。</p>
+        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+          {(['concept', 'industry'] as const).map(kind => {
+            const value = membership?.[kind]
+            return <Link key={kind} to={kind === 'concept' ? '/concept-analysis' : '/industry-analysis'} className="text-accent hover:underline">
+              {kind === 'concept' ? '概念' : '行业'}：{value?.available ? `${value.board_count} 板块 / ${value.stock_count} 股票` : membershipError ? '状态读取失败' : membership ? '尚未获取' : '读取缓存中'}
+              {value?.available && value.fetched_at_ms && <span className="ml-1 text-muted">（获取于 {new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value.fetched_at_ms))}{value.stale ? '，快照待更新' : ''}）</span>}
+            </Link>
+          })}
+        </div>
+        <p className="text-muted">获取时间不是数据公告时间；完整刷新只在手动获取时执行，24小时内复用快照。</p>
+      </section>
       <div className="flex items-center gap-1">
         {TABS.map((t) => (
           <button

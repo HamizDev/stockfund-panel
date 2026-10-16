@@ -1,15 +1,15 @@
+# ruff: noqa: RUF001, RUF002, RUF003 -- Chinese labels and documentation use native punctuation.
 """内置扩展数据预设 — 概念/行业启动时只创建配置, 等待用户手动获取 (#199)。
 
 设计原则:
-  - 扩展数据通用逻辑零改动 (ExtConfig / fetch_and_ingest / API / 前端均不动)
-  - 仅在本模块做「接口结构 → 本地 schema」的转换
-  - 「已存在则跳过」: 绝不覆盖用户已有数据, 老用户零影响
+  - provider 负责取得完整归属快照，本模块转换为本地 schema
+  - 保留用户自定义 recipe，仅迁移已知旧预设并停止旧自动拉取
+  - 当前归属不写成历史分区，完整快照成功后才替换成员表
   - 拉取失败只记 warning, 不阻断启动 (保持「没数据也能跑」)
 
-种子数据来源 (概念/行业各自独立配置):
-  - 概念: https://shy313.com/api/plugins/market_flow/exports/ths-concepts
-  - 行业: https://shy313.com/api/plugins/market_flow/exports/ths-industries
-作者更新数据只需改接口上的 JSON, 用户下次拉取自动同步, 无需发版。
+种子数据通过 provider 的 board_membership 能力取得同花顺 Fuyao 完整快照。
+目录与每个板块成分全部成功后才更新缓存；页面读取不触发批量请求。
+沪深北 A 股归属按日手动更新，不把获取时间当成公告时间或历史归属证据。
 
 接入点: app.main.lifespan → ensure_builtin_presets(store.data_dir)
 """
@@ -29,9 +29,9 @@ from app.services.ext_data import (
 
 logger = logging.getLogger(__name__)
 
-# 种子数据源 (概念/行业各自独立配置, 作者维护)
-_CONCEPT_DATA_URL = "https://shy313.com/api/plugins/market_flow/exports/ths-concepts"
-_INDUSTRY_DATA_URL = "https://shy313.com/api/plugins/market_flow/exports/ths-industries"
+# 配置展示地址；实际获取由 provider 完成鉴权、转换和完整快照缓存。
+_CONCEPT_DATA_URL = "https://fuyao.aicubes.cn/api/a-share-index/catalog/ths-index-list?tag=cn_concept"
+_INDUSTRY_DATA_URL = "https://fuyao.aicubes.cn/api/a-share-index/catalog/ths-index-list?tag=industry"
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ def _concept_preset() -> ExtConfig:
             ExtField("股票简称", "string", "股票简称"),
             ExtField("所属概念", "string", "所属概念"),
         ],
-        description="同花顺概念分类 (启动仅创建配置, 在概念/行业页手动获取)",
+        description="同花顺Fuyao概念归属；手动获取，完整快照缓存24小时，不在页面读取时批量请求",
         symbol_map={"type": "mapped", "col": "股票代码"},
         code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"},
         pull=PullConfig(
@@ -72,8 +72,8 @@ def _concept_preset() -> ExtConfig:
 def _industry_preset() -> ExtConfig:
     """扩展行业 (ext_hy_ths)。
 
-    接口结构: [{symbol, name, industries: [一级行业, 二级行业, 三级行业]}]
-    本地 schema: 股票代码 / 股票简称 / 所属同花顺行业(横杠拼接) / symbol / code
+    归属结构: [{symbol, name, industries: [行业归属名称, ...]}]
+    本地 schema: 股票代码 / 股票简称 / 所属同花顺行业(分号分隔) / symbol / code
     """
     return ExtConfig(
         id="ext_hy_ths",
@@ -86,7 +86,7 @@ def _industry_preset() -> ExtConfig:
             ExtField("股票简称", "string", "股票简称"),
             ExtField("所属同花顺行业", "string", "所属同花顺行业"),
         ],
-        description="同花顺行业分类 (启动仅创建配置, 在概念/行业页手动获取)",
+        description="同花顺Fuyao行业归属（不保证三级层级顺序）；手动获取，完整快照缓存24小时",
         symbol_map={"type": "mapped", "col": "股票代码"},
         code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"},
         pull=PullConfig(
@@ -143,7 +143,7 @@ def _flatten_concept_rows(raw_rows: list[dict]) -> list[dict]:
 
 
 def _flatten_industry_rows(raw_rows: list[dict]) -> list[dict]:
-    """行业: industries 数组 → 横杠拼接成「所属同花顺行业」字符串。
+    """行业: industries 数组 → 分号分隔的行业归属字符串。
 
     [{symbol, name, industries:[...]}] → [{股票代码, 股票简称, 所属同花顺行业, symbol, code}]
     """
@@ -157,7 +157,7 @@ def _flatten_industry_rows(raw_rows: list[dict]) -> list[dict]:
         out.append({
             "股票代码": sym,
             "股票简称": r.get("name") or "",
-            "所属同花顺行业": "-".join(labels),
+            "所属同花顺行业": ";".join(labels),
             "symbol": sym,
             "code": _symbol_to_code(sym),
         })
@@ -212,13 +212,20 @@ async def _fetch_json(url: str) -> list[dict]:
 
 async def _seed_one(config: ExtConfig, flatten, data_dir: Path) -> int:
     """拉取 + 转换 + 写入单个预设。返回写入行数。"""
-    from datetime import date
+    from fastapi.concurrency import run_in_threadpool
 
-    raw = await _fetch_json(config.pull.url)
+    from app.market_time import cn_today
+    from app.services.board_membership import get_snapshot
+
+    kind = 'concept' if config.id == 'ext_gn_ths' else 'industry'
+    snapshot = await run_in_threadpool(get_snapshot, kind, data_dir, refresh=True)
+    if snapshot is None:
+        raise RuntimeError('板块归属快照不可用，保留已有数据')
+    raw = snapshot['rows']
     rows = flatten(raw)
     if not rows:
-        raise ValueError(f"接口返回 0 行: {config.pull.url}")
-    n = rows_to_parquet(rows, config, data_dir, snapshot_date=date.today())
+        raise RuntimeError('板块归属快照为空，保留已有数据')
+    n = rows_to_parquet(rows, config, data_dir, snapshot_date=cn_today(), replace_snapshot=True)
     return n
 
 
@@ -234,6 +241,15 @@ def get_preset(config_id: str) -> ExtConfig | None:
     return None
 
 
+def is_managed_preset_pull(config: ExtConfig) -> bool:
+    preset = get_preset(config.id)
+    if preset is None or not config.pull:
+        return False
+    endpoint = 'ths-concepts' if config.id == 'ext_gn_ths' else 'ths-industries'
+    legacy = f'https://shy313.com/api/plugins/market_flow/exports/{endpoint}'
+    return config.pull.url in {legacy, preset.pull.url}
+
+
 async def ensure_builtin_presets(data_dir: Path) -> None:
     """启动时: 为缺失的预设创建 config.json (含 pull 配置), 但【不拉取数据】。
 
@@ -241,7 +257,7 @@ async def ensure_builtin_presets(data_dir: Path) -> None:
     网络请求阻塞, 也避免「自动拉取」与「用户自主控制」的预期冲突。
 
     安全保证:
-      - 已存在则完全跳过 (绝不覆盖用户数据)
+      - 保留用户名称、字段和自定义 URL; 仅迁移已知预设 URL 并关闭旧自动拉取
       - 只写 config.json, 失败只记 warning 不阻断启动
     """
     store = ExtConfigStore(data_dir)
@@ -249,7 +265,11 @@ async def ensure_builtin_presets(data_dir: Path) -> None:
     for config in _presets():
         existing = store.get(config.id)
         if existing is not None:
-            # 用户已有此表 (老用户 / 自己重建过) → 一律不动
+            if is_managed_preset_pull(existing) and (existing.pull.url != config.pull.url or existing.pull.enabled):
+                existing.pull.url = config.pull.url
+                existing.pull.enabled = False
+                store.upsert(existing)
+            # Preserve labels, schema and user-authored recipes; migrate only the known preset recipe.
             continue
         try:
             store.upsert(config)

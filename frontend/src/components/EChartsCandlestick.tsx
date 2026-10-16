@@ -1,6 +1,8 @@
+import { chartPrice } from '@/lib/chartPrice'
 import { useEffect, useRef, useCallback, useMemo } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import { fmtPct } from '@/lib/format'
+import { volumeAverageAt } from '@/lib/dailyChartRows'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 
@@ -10,7 +12,7 @@ export interface OHLC {
   high: number
   low: number
   close: number
-  volume?: number
+  volume?: number | null
   ma5?: number | null
   ma10?: number | null
   ma20?: number | null
@@ -26,6 +28,12 @@ export interface OHLC {
   kdj_j?: number | null
   boll_upper?: number | null
   boll_lower?: number | null
+  atr_14?: number | null
+  adx_14?: number | null
+  adx_plus_di_14?: number | null
+  adx_minus_di_14?: number | null
+  anchored_vwap?: number | null
+  is_live?: boolean
 }
 
 export interface ChartMarker {
@@ -90,9 +98,7 @@ function volMaN(data: OHLC[], n: number): (number | null)[] {
   const result: (number | null)[] = []
   for (let i = 0; i < data.length; i++) {
     if (i < n - 1) { result.push(null); continue }
-    let sum = 0
-    for (let j = i - n + 1; j <= i; j++) sum += data[j].volume ?? 0
-    result.push(sum / n)
+    result.push(volumeAverageAt(data, i, n))
   }
   return result
 }
@@ -125,6 +131,25 @@ function fmtVolumeRatio(value: number | null, digits = 2): string {
 
 export const SUB_CHARTS: SubChartDef[] = [
   {
+    key: 'adx', label: 'ADX 趋势', height: 84, yAxisConfig: { min: 0, max: 100 },
+    buildSeries: data => [
+      { key: 'adx_14', name: 'ADX', color: '#FACC15' },
+      { key: 'adx_plus_di_14', name: '+DI', color: '#C74040' },
+      { key: 'adx_minus_di_14', name: '−DI', color: '#2D9B65' },
+    ].map(line => ({ name: line.name, type: 'line',
+      data: data.map(row => row[line.key as keyof OHLC] ?? null),
+      symbol: 'none', animation: false, connectNulls: false,
+      lineStyle: { width: 1, color: line.color }, itemStyle: { color: line.color },
+    })),
+    buildInfo: row => [
+      { key: 'adx_14', label: 'ADX', color: '#FACC15' },
+      { key: 'adx_plus_di_14', label: '+DI', color: '#C74040' },
+      { key: 'adx_minus_di_14', label: '−DI', color: '#2D9B65' },
+    ].map(line => ({ label: line.label, color: line.color,
+      value: typeof row?.[line.key as keyof OHLC] === 'number'
+        ? Number(row?.[line.key as keyof OHLC]).toFixed(2) : '—' })),
+  },
+  {
     key: 'vol',
     label: '成交量',
     height: 84,
@@ -140,7 +165,7 @@ export const SUB_CHARTS: SubChartDef[] = [
           data: data.map((d, index) => {
             const ratio = volumeRatioAt(data, index, compareDays)
             return {
-              value: d.volume ?? 0,
+              value: d.volume ?? null,
               volumeRatioLabel: ratio == null ? '' : fmtVolumeRatio(ratio, 1),
               itemStyle: {
                 color: d.close >= d.open ? 'rgba(240,68,56,0.6)' : 'rgba(18,183,106,0.6)',
@@ -390,9 +415,7 @@ function buildSubInfoGraphics(
     if (def.key === 'vol' && d) {
       const calcVolMa = (n: number) => {
         if (infoIdx < n - 1) return null
-        let sum = 0
-        for (let j = infoIdx - n + 1; j <= infoIdx; j++) sum += data[j].volume ?? 0
-        return sum / n
+        return volumeAverageAt(data, infoIdx, n)
       }
       const vol5 = calcVolMa(5)
       const vol10 = calcVolMa(10)
@@ -658,7 +681,7 @@ function buildOption(
       lineStyle: { color: '#3B82F6', type: 'dashed', width: 1, opacity: 0.7 },
       label: {
         show: true,
-        formatter: linkedPrice.toFixed(2),
+        formatter: chartPrice(linkedPrice),
         position: 'insideEndTop',
         color: '#3B82F6',
         fontSize: 10,
@@ -698,6 +721,14 @@ function buildOption(
     series.push(maLine('ma10', THEME.ma10, 'MA10'))
     series.push(maLine('ma20', THEME.ma20, 'MA20'))
     series.push(maLine('ma60', THEME.ma60, 'MA60'))
+  }
+
+  if (data.some(row => row.anchored_vwap != null)) {
+    series.push({ name: '锚定VWAP估算', type: 'line',
+      data: data.map(row => row.anchored_vwap ?? null),
+      symbol: 'none', animation: false, connectNulls: false,
+      lineStyle: { width: 1.5, color: '#F59E0B' }, itemStyle: { color: '#F59E0B' },
+    })
   }
 
   // 加入自选日标注: 蓝色竖虚线从该根K线的下沿连到主图底端的「自选」标签。
@@ -994,13 +1025,13 @@ export function EChartsCandlestick({
     let html = `<div style="display:flex;align-items:center;gap:6px;padding:0 8px;font:11px 'JetBrains Mono',monospace;select:none;min-height:20px;flex-wrap:wrap">`
     html += `<span style="color:${CT().text}">${d.date}</span>`
     html += `<span style="color:${CT().text}">开</span>`
-    html += `<span style="color:${d.open >= d.close ? THEME.bear : THEME.bull}">${d.open.toFixed(2)}</span>`
+    html += `<span style="color:${d.open >= d.close ? THEME.bear : THEME.bull}">${chartPrice(d.open, _symbol)}</span>`
     html += `<span style="color:${CT().text}">高</span>`
-    html += `<span style="color:${THEME.bull}">${d.high.toFixed(2)}</span>`
+    html += `<span style="color:${THEME.bull}">${chartPrice(d.high, _symbol)}</span>`
     html += `<span style="color:${CT().text}">低</span>`
-    html += `<span style="color:${THEME.bear}">${d.low.toFixed(2)}</span>`
+    html += `<span style="color:${THEME.bear}">${chartPrice(d.low, _symbol)}</span>`
     html += `<span style="color:${CT().text}">收</span>`
-    html += `<span style="color:${clr};font-weight:600">${d.close.toFixed(2)}</span>`
+    html += `<span style="color:${clr};font-weight:600">${chartPrice(d.close, _symbol)}</span>`
     // 涨跌幅 (收盘后, 换手前; 和收间隔一些距离)
     if (prev) {
       const chgPct = (chg / prev.close * 100)
@@ -1029,12 +1060,12 @@ export function EChartsCandlestick({
     // 第二行: MA + BOLL
     if (showMA) {
       html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;select:none;min-height:20px;flex-wrap:wrap">`
-      if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
-      if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
-      if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
-      if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
+      if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${chartPrice(d.ma5, _symbol)}</span>`
+      if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${chartPrice(d.ma10, _symbol)}</span>`
+      if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${chartPrice(d.ma20, _symbol)}</span>`
+      if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${chartPrice(d.ma60, _symbol)}</span>`
       if (d.boll_upper != null && activeIndicators.includes('boll')) {
-        html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
+        html += `<span style="color:#E879F9">BOLL:${chartPrice(d.boll_upper, _symbol)}/${chartPrice(d.ma20, _symbol)}/${chartPrice(d.boll_lower, _symbol)}</span>`
       }
       html += `</div>`
     }
@@ -1284,15 +1315,15 @@ export function EChartsCandlestick({
     let html = `<div style="display:flex;align-items:center;gap:6px;padding:0 8px;font:11px 'JetBrains Mono',monospace;min-height:20px;flex-wrap:wrap">`
     html += `<span style="color:${CT().text}">${d.date}</span>`
     html += `<span style="color:${CT().text}">开</span>`
-    html += `<span style="color:${d.open >= d.close ? THEME.bear : THEME.bull}">${d.open.toFixed(2)}</span>`
+    html += `<span style="color:${d.open >= d.close ? THEME.bear : THEME.bull}">${chartPrice(d.open, _symbol)}</span>`
     html += `<span style="color:${CT().text}">高</span>`
-    html += `<span style="color:${THEME.bull}">${d.high.toFixed(2)}</span>`
+    html += `<span style="color:${THEME.bull}">${chartPrice(d.high, _symbol)}</span>`
     html += `<span style="color:${CT().text}">低</span>`
-    html += `<span style="color:${THEME.bear}">${d.low.toFixed(2)}</span>`
+    html += `<span style="color:${THEME.bear}">${chartPrice(d.low, _symbol)}</span>`
     html += `<span style="color:${CT().text}">收</span>`
     const prevClose0 = data[idx-1]?.close ?? d.close
     const clr0 = d.close >= prevClose0 ? THEME.bull : THEME.bear
-    html += `<span style="color:${clr0};font-weight:600">${d.close.toFixed(2)}</span>`
+    html += `<span style="color:${clr0};font-weight:600">${chartPrice(d.close, _symbol)}</span>`
     // 涨跌幅 (收盘后, 换手前; 和收间隔一些距离)
     if (idx > 0) {
       const chgPct0 = ((d.close - prevClose0) / prevClose0 * 100)
@@ -1305,12 +1336,12 @@ export function EChartsCandlestick({
     html += `</div>`
     if (showMA) {
       html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;min-height:20px;flex-wrap:wrap">`
-      if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
-      if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
-      if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
-      if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
+      if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${chartPrice(d.ma5, _symbol)}</span>`
+      if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${chartPrice(d.ma10, _symbol)}</span>`
+      if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${chartPrice(d.ma20, _symbol)}</span>`
+      if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${chartPrice(d.ma60, _symbol)}</span>`
       if (d.boll_upper != null && activeIndicators.includes('boll')) {
-        html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
+        html += `<span style="color:#E879F9">BOLL:${chartPrice(d.boll_upper, _symbol)}/${chartPrice(d.ma20, _symbol)}/${chartPrice(d.boll_lower, _symbol)}</span>`
       }
       html += `</div>`
     }

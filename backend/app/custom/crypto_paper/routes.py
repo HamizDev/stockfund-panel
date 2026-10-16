@@ -62,6 +62,12 @@ def _quote(market: str, symbol: str) -> dict:
 
 def build_router() -> APIRouter:
     router = APIRouter(prefix="/api/custom/crypto-paper", tags=["custom-crypto-paper"])
+    from .demo_routes import build_router as build_demo_router
+
+    router.include_router(build_demo_router())
+    from .research_routes import build_router as build_research_router
+
+    router.include_router(build_research_router())
 
     @router.get("/quote/{market}/{symbol}")
     def get_quote(market: str, symbol: str) -> dict:
@@ -136,6 +142,15 @@ def build_router() -> APIRouter:
         except Exception as exc:
             logger.warning("AI crypto draft failed: %s", type(exc).__name__)
             raise HTTPException(status_code=502, detail="AI策略草案暂不可用, 请检查AI设置; 没有创建或启用账户") from exc
+
+    @router.post("/strategy-preview")
+    def preview_strategy(body: strategy_draft.PreviewRequest) -> dict:
+        try:
+            return strategy_draft.preview(body)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail="信号预览校验失败: " + str(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=503, detail=auto._connection_error(exc, body.exchange, "行情")) from exc
 
     @router.get("/strategy-accounts")
     def strategy_accounts(request: Request) -> dict:

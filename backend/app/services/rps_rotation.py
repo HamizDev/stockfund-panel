@@ -45,6 +45,8 @@ def invalidate_cache() -> None:
     _cache.clear()
     _cache_ts.clear()
     _cache_days.clear()
+    _map_cache.clear()
+    _map_ts.clear()
 
 
 def _latest_enriched_date(repo) -> date | None:

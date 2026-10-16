@@ -315,17 +315,25 @@ def test_matrix_crossovers_skip_missing_asset_bars_like_polars_signals(
 
 def test_builtin_matrix_strategies_use_their_declared_formula_modules():
     strategy_dir = REPO_ROOT / "backend" / "app" / "strategy" / "builtin"
-    strategy_files = sorted(
+    source_files = sorted(
         path for path in strategy_dir.glob("*.py") if path.name != "__init__.py"
     )
+    # _etf_presets.py is shared helper code, not a registered strategy module.
+    strategy_files = [path for path in source_files if not path.name.startswith("_")]
 
     # 分钟形态策略 (minute_red_streak) 已迁至自定义策略目录, 内置策略全部 matrix 后端
-    assert len(strategy_files) == 26
+    assert len(source_files) == 29
+    assert len(strategy_files) == 28
     for strategy_path in strategy_files:
         strategy = StrategyEngine._load_file(strategy_path)
         assert strategy.execution_backend == "matrix_native"
         assert strategy.matrix_strategy is not None
-        assert strategy.matrix_strategy.__class__.__module__ == strategy_path.stem
+        expected_module = (
+            "_etf_presets"
+            if strategy_path.stem in {"etf_core_trend", "etf_sector_trend"}
+            else strategy_path.stem
+        )
+        assert strategy.matrix_strategy.__class__.__module__ == expected_module
         assert strategy.filter_fn is None
         assert strategy.filter_history_fn is None
 
@@ -790,7 +798,7 @@ def test_registered_builtin_matrix_strategies_share_one_cache_profile():
         if s.execution_backend != "minute_filter"
     )
 
-    assert len(strategies) == 26
+    assert len(strategies) == 28
     assert all(strategy.execution_backend == "matrix_native" for strategy in strategies)
     assert profile.warmup_bars > 0
     assert profile.forward_bars == max(int(strategy.max_hold_days or 0) for strategy in strategies)

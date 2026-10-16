@@ -49,6 +49,16 @@ export interface MemberItem {
   name: string | null
 }
 
+export interface MembershipStatus {
+  source: string
+  available: boolean
+  fetched_at_ms: number | null
+  source_updated_at_ms: number | null
+  board_count: number
+  stock_count: number
+  stale: boolean
+}
+
 async function req<T>(path: string): Promise<T> {
   const res = await fetch(`/api/custom/market-flow${path}`, { credentials: 'same-origin' })
   if (!res.ok) {
@@ -65,6 +75,9 @@ async function req<T>(path: string): Promise<T> {
 }
 
 export const marketFlowApi = {
+  membershipStatus(): Promise<Record<'concept' | 'industry', MembershipStatus>> {
+    return req('/membership-status')
+  },
   popularity(limit = 100): Promise<{ items: PopularityItem[] }> {
     return req(`/popularity?limit=${limit}`)
   },

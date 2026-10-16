@@ -1,3 +1,4 @@
+import { chartPrice } from '@/lib/chartPrice'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
@@ -7,6 +8,9 @@ import { useChartTheme, type ChartTheme } from '@/lib/theme'
 
 type YMode = 'adaptive' | 'limit'
 type IntradayRow = MinuteKlineRow | IndexMinuteRow
+type DataZoomRange = { start: number; end: number }
+
+const FULL_DAY_ZOOM: DataZoomRange = { start: 0, end: 100 }
 
 // 序列颜色 (双主题通用); 画布轴/网格/十字线等主题相关色走 ChartTheme
 const THEME = {
@@ -267,6 +271,14 @@ function buildOption(
     axisPointer: {
       link: [{ xAxisIndex: 'all' }],
     },
+    dataZoom: [{
+      type: 'inside',
+      xAxisIndex: pricePointsOnly ? [0] : [0, 1],
+      start: FULL_DAY_ZOOM.start,
+      end: FULL_DAY_ZOOM.end,
+      zoomOnMouseWheel: true,
+      moveOnMouseMove: true,
+    }],
     grid: pricePointsOnly
       ? [{ left: 60, right: 55, top: 24, bottom: 24 }]
       : [
@@ -339,7 +351,7 @@ function buildOption(
           label: {
             formatter: (params: any) => {
               const v = params.value
-              return typeof v === 'number' ? v.toFixed(2) : ''
+              return typeof v === 'number' ? chartPrice(v) : ''
             },
           },
         },
@@ -347,7 +359,7 @@ function buildOption(
           color: ct.text,
           fontSize: 10,
           fontFamily: 'JetBrains Mono, monospace',
-          formatter: (v: number) => v.toFixed(2),
+          formatter: (v: number) => chartPrice(v),
         },
       },
       ...(!pricePointsOnly ? [{
@@ -458,6 +470,9 @@ export function EChartsIntraday({
   onPriceDoubleClickRef.current = onPriceDoubleClick
   // 全日索引 → 数据数组索引 的映射 (ref 避免重建 chart)
   const fullDayToDataIdx = useRef<Map<number, number>>(new Map())
+  const dataZoomRangeRef = useRef<DataZoomRange>(FULL_DAY_ZOOM)
+  const dataContextRef = useRef<{ date?: string; prevClose?: number; pricePointsOnly: boolean } | null>(null)
+  const hasChartOptionRef = useRef(false)
 
   const [infoIdx, setInfoIdx] = useState(-1)
   const [yMode, setYMode] = useState<YMode>('adaptive')
@@ -533,6 +548,13 @@ export function EChartsIntraday({
         onPriceHoverRef.current?.(null)
       })
 
+      chart.on('dataZoom', () => {
+        const zoom = (chart!.getOption() as any).dataZoom?.[0]
+        if (typeof zoom?.start === 'number' && typeof zoom?.end === 'number') {
+          dataZoomRangeRef.current = { start: zoom.start, end: zoom.end }
+        }
+      })
+
       const handlePriceDoubleClick = (event: { offsetX: number; offsetY: number }) => {
         const pixel: [number, number] = [event.offsetX, event.offsetY]
         if (!chart!.containPixel({ gridIndex: 0 }, pixel)) return
@@ -560,17 +582,33 @@ export function EChartsIntraday({
       }
       fullDayToDataIdx.current = mapping
 
+      const previousContext = dataContextRef.current
+      const contextChanged = !previousContext
+        || previousContext.date !== date
+        || previousContext.prevClose !== prevClose
+        || previousContext.pricePointsOnly !== pricePointsOnly
+      const zoomToRestore = contextChanged ? FULL_DAY_ZOOM : dataZoomRangeRef.current
+      if (contextChanged) {
+        dataContextRef.current = { date, prevClose, pricePointsOnly }
+        dataZoomRangeRef.current = FULL_DAY_ZOOM
+      }
+
       chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, pricePointsOnly), true)
+      if (hasChartOptionRef.current && !contextChanged) {
+        chart.dispatchAction({ type: 'dataZoom', ...zoomToRestore })
+      }
+      hasChartOptionRef.current = true
     } else {
       fullDayToDataIdx.current = new Map()
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, pricePointsOnly])
+  }, [data, date, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, pricePointsOnly])
 
   useEffect(() => {
     return () => {
       chartRef.current?.off('updateAxisPointer')
       chartRef.current?.off('globalout')
+      chartRef.current?.off('dataZoom')
       if (priceDoubleClickHandlerRef.current) {
         chartRef.current?.getZr().off('dblclick', priceDoubleClickHandlerRef.current)
       }
@@ -595,6 +633,21 @@ export function EChartsIntraday({
   const isFlat = chg != null ? chg === 0 : false
   const priceClr = isFlat ? '#A1A1AA' : isUp ? '#C74040' : '#2D9B65'
   const pointPriceClr = pointChg === 0 ? '#A1A1AA' : pointChg != null && pointChg < 0 ? '#2D9B65' : '#C74040'
+  const resetToFullDay = () => {
+    dataZoomRangeRef.current = FULL_DAY_ZOOM
+    chartRef.current?.dispatchAction({ type: 'dataZoom', ...FULL_DAY_ZOOM })
+  }
+  const resetZoomButton = (
+    <button
+      type="button"
+      aria-label="恢复全天范围"
+      title="恢复全天范围"
+      onClick={resetToFullDay}
+      className="ml-auto rounded border border-border px-1.5 py-0.5 text-[10px] leading-none text-muted hover:text-secondary"
+    >
+      全日
+    </button>
+  )
 
   return (
     <div className="w-full">
@@ -627,8 +680,9 @@ export function EChartsIntraday({
       {pricePointsOnly ? (
         <div className="flex flex-wrap items-center gap-x-2 px-2 font-mono text-[11px] select-none" style={{ minHeight: 20, backgroundColor: ct.infoBarBg }}>
           {date && <span className="text-muted">{date}</span>}
-          <span className="text-muted">{hovered ? `${formatMinuteTime(hovered.datetime)} 指数点位` : '最新指数点位'}</span>
-          <span className="font-semibold" style={{ color: pointPriceClr }}>{point ? point.close.toFixed(2) : '—'}</span>
+          <span className="text-muted">{hovered ? `${formatMinuteTime(hovered.datetime)} 指数点位` : point ? `最新 ${formatMinuteTime(point.datetime)}` : '最新指数点位'}</span>
+          <span className="font-semibold" style={{ color: pointPriceClr }}>{point ? chartPrice(point.close) : '—'}</span>
+          {data.length > 0 && resetZoomButton}
         </div>
       ) : (
         <div style={{ backgroundColor: ct.infoBarBg }}>
@@ -639,14 +693,16 @@ export function EChartsIntraday({
               <>
                 {date && <span className="text-muted">{date}</span>}
                 <span className="text-muted">{hovered ? `${formatMinuteTime(hovered.datetime)} 分钟` : daily ? '日K（前复权）' : '分时汇总'}</span>
+                {!hovered && point && <span className="text-muted">最新 {formatMinuteTime(point.datetime)}</span>}
                 <span className="text-muted">开</span>
-                <span style={{ color: priceClr }}>{ohlc.open != null ? ohlc.open.toFixed(2) : '—'}</span>
+                <span style={{ color: priceClr }}>{ohlc.open != null ? chartPrice(ohlc.open) : '—'}</span>
                 <span className="text-muted">高</span>
-                <span style={{ color: priceClr }}>{ohlc.high.toFixed(2)}</span>
+                <span style={{ color: priceClr }}>{chartPrice(ohlc.high)}</span>
                 <span className="text-muted">低</span>
-                <span style={{ color: priceClr }}>{ohlc.low.toFixed(2)}</span>
+                <span style={{ color: priceClr }}>{chartPrice(ohlc.low)}</span>
                 <span className="text-muted">收</span>
-                <span style={{ color: priceClr }} className="font-semibold">{ohlc.close.toFixed(2)}</span>
+                <span style={{ color: priceClr }} className="font-semibold">{chartPrice(ohlc.close)}</span>
+                {data.length > 0 && resetZoomButton}
               </>
             )}
           </div>
@@ -656,11 +712,11 @@ export function EChartsIntraday({
               <>
                 <span className="flex items-center gap-x-1">
                   <span style={{ display: 'inline-block', width: 14, height: 2, background: priceClr }} />
-                  <span style={{ color: priceClr }}>{d.close.toFixed(2)}</span>
+                  <span style={{ color: priceClr }}>{chartPrice(d.close)}</span>
                 </span>
                 {showAvgLine && <span className="flex items-center gap-x-1">
                   <span style={{ display: 'inline-block', width: 14, height: 2, background: THEME.avgLine }} />
-                  <span style={{ color: THEME.avgLine }}>{avg != null ? avg.toFixed(2) : '—'}</span>
+                  <span style={{ color: THEME.avgLine }}>{avg != null ? chartPrice(avg) : '—'}</span>
                 </span>}
                 <span className="text-muted">{hovered ? '量' : '累计量'}</span>
                 <span className="text-secondary">{d.volume.toFixed(0)}</span>

@@ -133,6 +133,7 @@ export interface NewsClassification {
   score: number
   matched: string[]
 }
+
 export interface NewsItem {
   id: string
   title: string
@@ -400,6 +401,11 @@ export interface KlineRow {
   macd_hist?: number | null
   rsi_14?: number | null
   vol_ratio_5d?: number | null
+  atr_14?: number | null
+  adx_14?: number | null
+  adx_plus_di_14?: number | null
+  adx_minus_di_14?: number | null
+  is_live?: boolean
   [key: string]: any
 }
 
@@ -590,14 +596,21 @@ export interface OverviewDimensionRankItem {
   } | null
 }
 
-/** Dashboard 首屏聚合接口返回 — 与各单独接口返回格式一致，仅做聚合 */
+export interface DashboardDataSummary {
+  known: boolean
+  daily: { trading_days: number; earliest_date: string | null; latest_date: string | null } | null
+  enriched: { trading_days: number; earliest_date: string | null; latest_date: string | null } | null
+}
+
+/** Dashboard 独立日期摘要与聚合返回。完整 DataStatus 仍只用于数据页。 */
 export interface DashboardInit {
   overview: OverviewMarket
   capabilities: CapabilitiesResponse
   settings: SettingsState
   preferences: Preferences
   data_sources: DataSourcesResponse
-  data_status: DataStatus
+  data_summary: DashboardDataSummary
+  data_status?: DataStatus
   alerts: { alerts: AlertEvent[]; total: number }
 }
 
@@ -625,7 +638,7 @@ export interface OverviewMarket {
   }
   amount: { total: number; avg: number }
   boards: { board: string; count: number; up: number; down: number; up_pct: number; amount: number }[]
-  limit: { limit_up: number; broken: number; failed: number; limit_down: number; max_boards: number; seal_rate?: number; tiers: { boards: number; count: number; stocks?: { symbol: string; name?: string; amount?: number }[] }[]; sealed_ready?: boolean; fake_up?: number; fake_down?: number }
+  limit: { limit_up: number; broken: number; failed: number; limit_down: number; max_boards: number; seal_rate?: number; tiers: { boards: number; count: number; stocks?: { symbol: string; name?: string; amount?: number }[] }[]; sealed_ready?: boolean; fake_up?: number; fake_down?: number; sealed_counts_up?: { real: number; fake: number; pending: number }; sealed_counts_down?: { real: number; fake: number; pending: number }; count_basis?: 'price_limit' }
   distribution: { label: string; count: number; pct: number }[]
   trend: { above_ma5: number; above_ma20: number; above_ma60: number; above_ma5_pct: number; above_ma20_pct: number; above_ma60_pct: number; new_high: number; new_low: number }
   activity: { avg_turnover: number; high_turnover: number; high_vol_ratio: number; vol_ratio: number }
@@ -1163,6 +1176,18 @@ export interface HoldingsDailyReviewReport {
   generated_at_ms: number
   model: string
   content: string
+  actions?: Array<{
+    symbol: string
+    name: string
+    asset_type?: string
+    data_date: string | null
+    action: '继续持有' | '暂停追加' | '条件追加' | '条件减仓' | '条件部分赎回' | '资料不足待核实'
+    reason: string
+    trigger: string
+    invalidation: string
+    missing_data: string[]
+  }>
+  error_category?: 'data' | 'model' | 'output' | 'timeout'
   observations: Array<{
     symbol: string
     name?: string
@@ -1175,12 +1200,13 @@ export interface HoldingsDailyReviewReport {
 }
 
 export interface HoldingsDailyReviewState {
-  status: 'not_generated' | 'running' | 'complete' | 'failed' | 'empty' | 'unconfigured'
+  status: 'not_generated' | 'running' | 'complete' | 'failed' | 'outdated' | 'empty' | 'unconfigured'
   /** 服务端北京时间日期；前端不依据浏览器本地时区计算当日报告状态。 */
   today: string
   holdings_count: number
   holdings_changed: boolean
   model_changed: boolean
+  report_current?: boolean
   report: HoldingsDailyReviewReport | null
 }
 
@@ -1216,12 +1242,103 @@ export interface PaperAccountSummary {
   created_at?: string
 }
 
+export type PaperEtfFamily = 'core' | 'sector'
+
+export interface PaperEtfStrategy {
+  family: PaperEtfFamily
+  strategy_id: string
+  name: string
+  description: string
+  symbols: string[]
+}
+
+export interface PaperEtfPoolItem {
+  symbol: string
+  name: string
+  category: '宽基' | '行业' | '债券' | '黄金'
+  last_close: number | null
+  as_of: string | null
+  lot_cost: number | null
+  affordable_budgets: number[]
+}
+
+export interface PaperEtfPlan {
+  commission_pct: number
+  min_commission: number
+  stamp_tax_pct: number
+  slippage_bps: number
+  entry_pct: number
+  max_positions: number
+  budgets: number[]
+  strategies: PaperEtfStrategy[]
+  pool: PaperEtfPoolItem[]
+}
+
+export type PaperEtfShortTermModeId = 't0_reversion' | 'base_t'
+export type PaperEtfShortTermBudget = 5000 | 10000 | 20000 | 100000
+export type PaperEtfShortTermPositionCount = 1 | 2 | 3
+
+export interface PaperEtfShortTermMode {
+  id: PaperEtfShortTermModeId
+  name: string
+  description: string
+  symbols: string[]
+}
+
+export interface PaperEtfShortTermRuntime {
+  status?: string
+  minute_provider?: string | null
+  minute_error?: string | null
+  minute_rows?: number | null
+  last_fetch?: string | null
+}
+
+export interface PaperEtfShortTermPlan {
+  pool?: PaperEtfPoolItem[]
+  budgets: PaperEtfShortTermBudget[]
+  commission_pct: number
+  min_commission: number
+  slippage_bps: number
+  modes: PaperEtfShortTermMode[]
+  max_positions_by_budget: Record<'5000' | '10000' | '20000' | '100000', number>
+  rules: string[]
+  runtime?: PaperEtfShortTermRuntime
+}
+
 /** 多账户横向对比行 (GET /api/paper/compare): 概览 + 回合统计 + 定版净值 */
 export interface PaperCompareRow {
   account: string
   name: string
   strategy_id?: string | null
   auto_enabled?: boolean | null
+  max_positions?: number | null
+  shortterm?: {
+    state_error?: string
+    status?: string
+    last_check?: string
+    symbols: Record<string, {
+      reason?: string
+      action?: string | null
+      checked_at?: string
+      cycle?: { qty: number; price: number }
+      diagnostic?: {
+        quote_price?: number
+        mean_30m?: number
+        range_ratio?: number
+        reversion_ratio?: number
+        spread_ratio?: number
+        required_ratio?: number | null
+        roundtrip_fee?: number | null
+        slippage_ratio?: number
+        buffer_ratio?: number
+        qty?: number
+        available_qty?: number
+        held_qty?: number
+        bar_time?: string
+      }
+    }>
+    t_rounds: Array<{ date: string; symbol: string; net_spread: number }>
+  } | null
   asset_type?: 'stock' | 'etf' | null
   wins?: number
   holdings_count?: number
@@ -1244,7 +1361,7 @@ export interface PaperCompareRow {
   avg_holding_days: number
   realized_pnl: number
   max_drawdown: number | null
-  nav: Array<{ date: string; nav: number }>
+  nav: Array<{ date: string; nav: number; valuation_complete?: boolean }>
 }
 
 export interface PaperHolding {
@@ -1265,9 +1382,14 @@ export interface PaperNavItem {
   mv: number
   nav: number
   benchmark_close?: number
+  valuation_complete?: boolean
+  missing_symbols?: string[]
 }
 
 export interface PaperOverview {
+  etf_shortterm?: { mode: PaperEtfShortTermModeId; max_positions: number; enabled: boolean }
+  valuation_complete?: boolean
+  valuation_note?: string
   initialized: boolean
   account_id?: string
   account_name?: string
@@ -1281,6 +1403,41 @@ export interface PaperOverview {
   estimating?: boolean
   holdings?: PaperHolding[]
   fees?: { commission_pct: number; stamp_tax_pct: number; slippage_bps: number }
+}
+
+export interface PaperReplayCase {
+  initial_cash: number
+  max_positions: number
+  signal_at: string
+  sample_at: string
+  qty: number
+  assumed_fill_price: number
+  buy_fee: number
+  cost: number
+  remaining_cash: number
+  close_price: number
+  close_position_value: number
+  close_floating_pnl: number
+  available_same_day: 0
+}
+
+export interface PaperReplay {
+  id: string
+  title: string
+  date: string
+  symbol: string
+  name: string
+  basis: 'historical_minute_approx'
+  read_only: true
+  source_name: string
+  source_response_sha256: string
+  commission_pct: number
+  min_commission: number
+  slippage_bps: number
+  raw_close: number
+  primary: PaperReplayCase[]
+  alternatives: PaperReplayCase[]
+  limitations: string[]
 }
 
 export interface PaperOrder {
@@ -3009,7 +3166,7 @@ export const api = {
     request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
   /** Dashboard 首屏聚合：一次返回 overview/capabilities/settings/preferences/data-sources/data-status/alerts */
-  dashboardInit: (asOf?: string) => request<DashboardInit>(`/api/dashboard/init${asOf ? `?as_of=${asOf}` : ''}`),
+  dashboardInit: (asOf?: string) => request<DashboardInit>(`/api/dashboard/init?include_data_status=false${asOf ? `&as_of=${encodeURIComponent(asOf)}` : ''}`),
   industryKline: (code: string, days = 60) => request<{ code: string; kline: any[] }>(`/api/dashboard/industry-kline?code=${code}&days=${days}`),
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序
@@ -3957,6 +4114,9 @@ export const api = {
   paperAccounts: () =>
     request<{ accounts: PaperAccountSummary[] }>('/api/paper/accounts'),
 
+  paperReplays: () =>
+    request<{ replays: PaperReplay[]; errors: { message: string }[] }>('/api/paper/replays'),
+
   paperOverview: (account?: string) =>
     request<PaperOverview>(accUrl('/api/paper/overview', account)),
 
@@ -3968,6 +4128,28 @@ export const api = {
 
   paperCreateStrategyAccount: (body: { strategy_id: string; initial_cash: number; entry_pct: number; asset_type?: 'stock' | 'etf' }) =>
     request<{ account: PaperAccount; monitor_enabled: boolean }>('/api/paper/strategy_accounts', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  paperEtfPlan: () =>
+    request<PaperEtfPlan>('/api/paper/etf_plan'),
+
+  paperCreateEtfPlanAccount: (body: { family: PaperEtfFamily; initial_cash: 5000 | 20000 }) =>
+    request<{ account: PaperAccount; monitor_enabled: boolean }>('/api/paper/etf_plan', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  paperEtfShortTermPlan: () =>
+    request<PaperEtfShortTermPlan>('/api/paper/etf_shortterm_plan'),
+
+  paperCreateEtfShortTermAccount: (body: {
+    mode: PaperEtfShortTermModeId
+    initial_cash: PaperEtfShortTermBudget
+    max_positions: PaperEtfShortTermPositionCount
+  }) =>
+    request<{ account: PaperAccount; created: boolean }>('/api/paper/etf_shortterm_plan', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -4004,10 +4186,10 @@ export const api = {
     request<{ fills: PaperFill[] }>(accUrl('/api/paper/trades', account)),
 
   paperNav: (account?: string) =>
-    request<{ nav: Array<{ date: string; cash: number; mv: number; nav: number }> }>(accUrl('/api/paper/nav', account)),
+    request<{ nav: PaperNavItem[] }>(accUrl('/api/paper/nav', account)),
 
   paperStats: (account?: string) =>
-    request<{ rounds: number; win_rate: number; profit_loss_ratio: number | null; avg_holding_days: number; realized_pnl: number; max_drawdown: number | null }>(accUrl('/api/paper/stats', account)),
+    request<{ rounds: number; wins?: number; win_rate: number; profit_loss_ratio: number | null; avg_holding_days: number; realized_pnl: number; max_drawdown: number | null }>(accUrl('/api/paper/stats', account)),
 
   paperCompare: () =>
     request<{ accounts: PaperCompareRow[] }>('/api/paper/compare'),

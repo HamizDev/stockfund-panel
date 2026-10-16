@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, type UseQueryResult } from '@tanstack/react-query'
 import {
-  Activity, ChevronRight, Compass, FlaskConical, HelpCircle, History, Power,
-  Radar, RefreshCw, Ruler, Search, Settings2,
+  Activity, Compass, FlaskConical, HelpCircle, History, Power,
+  RefreshCw, Ruler, Search, Settings2,
 } from 'lucide-react'
 import {
   api, type AbnormalIntradayRow, type AbnormalOverview, type AbnormalRow,
@@ -12,16 +12,18 @@ import {
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
+import { usePageState } from '@/lib/usePageState'
 import { toNavItems, type NavItem } from '@/lib/listNav'
 import { fmtPrice, fmtPct, priceColorClass } from '@/lib/format'
 import { boardTag } from '@/components/stock-table/primitives'
+import { FreeAuctionCard } from '@/components/auction/FreeAuctionCard'
 import { PageHeader } from '@/components/PageHeader'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 
 /**
  * 异动监控 — 全时段异动中心, 按交易时间线分三个 tab:
  *
- * - 竞价异动 (盘前 9:15-9:25): 同花顺短线风向标名单 + 全市场竞价扫描 (待采集任务)
+ * - 竞价异动 (盘前 9:15-9:25): 免费集合竞价按需查询 + 同花顺短线风向标名单
  * - 盘中异动 (盘中实时): enriched 当日信号聚合 — 涨停/炸板/翘板/跌停/新高/新低/放量
  * - 偏移异动 (多日累计): 交易所异动规则口径 (3日±20%/30%/40%, 10日+100%, 30日+200%)
  *   实时计算个股「偏离值/阈值」接近度, 找出处于异动边缘的标的。
@@ -54,7 +56,7 @@ const REFRESH_MS = 60_000
 type AbnormalTab = 'auction' | 'intraday' | 'deviation'
 
 const TAB_META: Array<{ key: AbnormalTab; label: string; icon: typeof Compass; desc: string }> = [
-  { key: 'auction', label: '竞价异动', icon: Compass, desc: '盘前 9:15-9:25 · 同花顺风向标 + 竞价扫描' },
+  { key: 'auction', label: '竞价异动', icon: Compass, desc: '盘前 9:15-9:25 · 免费按需查询 + 同花顺风向标' },
   { key: 'intraday', label: '盘中异动', icon: Activity, desc: '当日量价信号 · 涨停/炸板/翘板/新高新低/放量' },
   { key: 'deviation', label: '偏移异动', icon: Ruler, desc: '多日累计偏离值 · 交易所异动规则接近度' },
 ]
@@ -73,7 +75,8 @@ const SIGNAL_META: Record<IntradaySignalKey, { label: string; cls: string }> = {
 }
 
 export function AbnormalMoves() {
-  const [tab, setTab] = useState<AbnormalTab>('intraday')
+  const [tab, setTab] = usePageState<AbnormalTab>('abnormalTab', 'intraday',
+    (value): value is AbnormalTab => value === 'auction' || value === 'intraday' || value === 'deviation')
   // navList: 弹窗切股的候选列表, 打开详情时由来源 tab 一并给出
   const [preview, setPreview] = useState<{ symbol: string; name: string; navList: NavItem[] } | null>(null)
 
@@ -173,56 +176,10 @@ function AuctionView({ onOpenStock }: {
     retry: 1,
   })
 
-  // fuyao 未配置: 整个 tab 的统一引导态 (风向标与全市场扫描都依赖 fuyao),
-  // 不再展示零散的降级卡/占位卡 — 与偏移 tab「监控未开启」空态同款式
-  if (q.data?.state === 'source_unavailable') {
-    return (
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-        <div className="m-auto rounded-card border border-border bg-surface p-8 text-center">
-          <span className="mx-auto grid h-10 w-10 place-items-center rounded-full bg-cyan-500/10 text-cyan-500 ring-1 ring-cyan-500/20">
-            <Compass className="h-5 w-5" />
-          </span>
-          <div className="mt-3 text-sm font-medium text-foreground">竞价数据源未配置</div>
-          <p className="mx-auto mt-2 max-w-md text-xs leading-relaxed text-muted">
-            竞价异动 (同花顺盘前风向标与全市场竞价扫描) 依赖 fuyao 数据源,
-            复盘页的龙虎榜同样来自该数据源。在「设置 → 数据源」配置 fuyao API Key 后即可使用。
-          </p>
-          <Link
-            to="/settings?tab=data-sources"
-            className="mt-5 inline-flex h-9 items-center gap-2 rounded-btn bg-accent px-4 text-xs font-medium text-white transition-colors hover:bg-accent/90"
-          >
-            前往配置数据源
-            <ChevronRight className="h-3.5 w-3.5" />
-          </Link>
-        </div>
-      </div>
-    )
-  }
-
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 overflow-y-auto">
+      <FreeAuctionCard />
       <BenchmarkCard q={q} onOpenStock={onOpenStock} />
-
-      {/* 全市场竞价扫描: 采集任务启用后填充 (接口与批量能力已验证) */}
-      <div className="rounded-card border border-dashed border-border bg-surface/50 px-4 py-4">
-        <div className="flex items-start gap-3">
-          <span className="grid h-8 w-8 shrink-0 place-items-center rounded bg-elevated/60">
-            <Radar className="h-4 w-4 text-muted/50" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-medium text-foreground">全市场竞价扫描</span>
-              <span className="rounded-full border border-border bg-elevated px-2 py-px text-[9px] leading-tight text-muted">
-                待采集任务启用
-              </span>
-            </div>
-            <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
-              9:25 竞价终态后扫描全市场 (实测 5547 只约 2 秒), 自动筛出高开 ≥5% 且竞价量比 ≥10
-              的标的并按日落盘积累历史。竞价明细无历史接口, 数据从采集启用之日起积累。
-            </p>
-          </div>
-        </div>
-      </div>
 
       <p className="px-1 text-[10px] leading-relaxed text-muted/70">
         风向标为同花顺盘前竞价筛选名单 (每日约 5~6 只)。60 日回测: 名单当日开盘买入均值 +0.54%
@@ -258,9 +215,7 @@ function BenchmarkCard({ q, onOpenStock }: {
     )
   }
 
-  // source_unavailable (fuyao 未配置) 由 AuctionView 统一引导态处理, 此处不再分支
-
-  if (!d || d.state === 'no_data') {
+  if (!d || d.state === 'no_data' || d.state === 'source_unavailable') {
     return (
       <div className="flex items-center gap-3 rounded-card border border-border bg-surface/50 px-4 py-3">
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded bg-elevated/60">

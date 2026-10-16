@@ -117,16 +117,17 @@ def _apply_field_map(rows: list[dict], field_map: dict[str, str]) -> list[dict]:
 # 拉取执行
 # ---------------------------------------------------------------------------
 
-def _apply_preset_flatten(config_id: str, rows: list[dict]) -> list[dict]:
+def _apply_preset_flatten(config: ExtConfig, rows: list[dict]) -> list[dict]:
     """对内置预设 (概念/行业) 应用结构转换, 与 fetch_preset 保持一致。
 
     延迟导入避免与 ext_presets 形成循环依赖。
-    非预设 id 原样返回。
+    自定义 URL 的 recipe 原样返回。
     """
-    if config_id not in ("ext_gn_ths", "ext_hy_ths"):
+    from app.services.ext_presets import is_managed_preset_pull
+    if not is_managed_preset_pull(config):
         return rows
     from app.services.ext_presets import _flatten_concept_rows, _flatten_industry_rows
-    flatten = _flatten_concept_rows if config_id == "ext_gn_ths" else _flatten_industry_rows
+    flatten = _flatten_concept_rows if config.id == "ext_gn_ths" else _flatten_industry_rows
     return flatten(rows)
 
 
@@ -253,7 +254,7 @@ async def fetch_rows_for_date(config: ExtConfig, target_date: date) -> list[dict
     # 否则 raw 接口列 (concepts/industries 数组、name) 会直接覆盖正确的 part.parquet,
     # 导致分析页因找不到维度字段 (所属概念/所属同花顺行业) 而"数据消失"。
     # 见 ext_presets._flatten_* —— 手动拉取 / 定时拉取都必须走同一套转换。
-    rows = _apply_preset_flatten(config.id, rows)
+    rows = _apply_preset_flatten(config, rows)
 
     # 字段映射
     rows = _apply_field_map(rows, pull.field_map)
@@ -288,6 +289,12 @@ async def fetch_and_ingest(
     """
     # 同上: 落盘分区按北京日期, 否则 UTC 容器在北京时间 08:00 之前写的是前一天。
     day = target_date or cn_today()
+    from app.services.ext_presets import is_managed_preset_pull
+    if is_managed_preset_pull(config):
+        if target_date is not None and target_date != cn_today():
+            raise ValueError('当前板块归属快照不支持历史回填')
+        from app.services.ext_presets import fetch_preset
+        return await fetch_preset(config.id, Path(data_dir)), day.isoformat()
     rows = await fetch_rows_for_date(config, day)
     if not rows:
         raise ValueError("提取到的行数为 0")
@@ -327,6 +334,9 @@ async def backfill_history(
     分区日期 —— 非交易日无人气数据, 也避免无谓请求。单日失败不中断,
     汇总进 failed 清单返回; 该日无数据 (空响应或 404) 计入 empty 跳过。
     """
+    from app.services.ext_presets import is_managed_preset_pull
+    if is_managed_preset_pull(config):
+        raise ValueError("当前板块归属快照不支持历史回填")
     if config.mode != "timeseries":
         raise ValueError("仅 timeseries 模式支持历史回补 (snapshot 无历史概念)")
     pull = config.pull
@@ -467,7 +477,10 @@ class PullScheduler:
         active_ids: set[str] = set()
         enabled_configs: list[ExtConfig] = []
 
+        from app.services.ext_presets import is_managed_preset_pull
         for config in configs:
+            if is_managed_preset_pull(config):
+                continue  # Managed full snapshots are refreshed explicitly, never via generic URL scheduling.
             if not config.pull or not config.pull.enabled or not config.pull.url:
                 continue
             active_ids.add(config.id)

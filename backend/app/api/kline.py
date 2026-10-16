@@ -330,7 +330,7 @@ def _get_price_limit_info(
         instruments = repo.get_instruments_asset(asset_type)
         available = [
             column
-            for column in ("symbol", "limit_up", "limit_down", "listing_date")
+            for column in ("symbol", "limit_up", "limit_down", "listing_date", "limit_price_date", "as_of")
             if column in instruments.columns
         ]
         if "symbol" in available and len(available) > 1:
@@ -352,6 +352,10 @@ def _get_price_limit_info(
         return info
 
     if row is None:
+        return info
+
+    limit_date_key = "limit_price_date" if "limit_price_date" in row else "as_of"
+    if limit_date_key in row and parse_listing_date(row[limit_date_key]) != trade_date:
         return info
 
     has_authoritative_price = False
@@ -596,7 +600,7 @@ def _latest_live_candle(
                 "kdj_k", "kdj_d", "kdj_j",
                 "boll_upper", "boll_lower",
                 "rsi_6", "rsi_14", "rsi_24",
-                "atr_14", "vol_ratio_5d"):
+                "atr_14", "vol_ratio_5d", "adx_14", "adx_plus_di_14", "adx_minus_di_14"):
         if key in q and q[key] is not None:
             live_row[key] = q[key]
     return live_row

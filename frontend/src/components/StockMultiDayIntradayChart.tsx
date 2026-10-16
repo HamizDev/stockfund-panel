@@ -191,6 +191,7 @@ export function StockMultiDayIntradayChart({
         </div>
       )}
       <EChartsMultiDayIntraday
+        key={symbol}
         sessions={sessions}
         height={chartHeight}
         onPriceDoubleClick={onPriceDoubleClick}

@@ -205,11 +205,11 @@ export function StockPanel({
       />
 
       {infoBarOnly ? null : (
-      <div className="flex gap-3 items-start">
+      <div className="grid grid-cols-1 gap-3 items-start md:flex">
         <StockDailyKChart
           symbol={symbol}
           height={height}
-          className={`${dailyKlineFlex} min-w-0`}
+          className={`${dailyKlineFlex} w-full min-w-0 md:w-auto`}
           dateRange={dateRange}
           markers={markers}
           ranges={ranges}
@@ -225,7 +225,7 @@ export function StockPanel({
         />
 
         {showIntraday && selectedDate && !intradayDismissed && (
-          <div className="relative flex-1 min-w-0 border-l border-border pl-3">
+          <div className="relative w-full min-w-0 border-t border-border pt-3 md:w-auto md:flex-1 md:border-t-0 md:border-l md:pt-0 md:pl-3">
             <button
               onClick={() => setIntradayDismissed(true)}
               className="absolute -left-1.5 -top-1.5 z-10 flex h-5 w-5 items-center justify-center rounded-full border border-border bg-surface text-muted shadow-sm transition-colors hover:text-foreground hover:bg-elevated"

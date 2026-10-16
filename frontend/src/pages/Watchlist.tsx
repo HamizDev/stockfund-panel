@@ -337,10 +337,10 @@ function StockSearchBox({
                     onClick={() => handleSelect(r)}
                     className="flex items-center gap-2.5 flex-1 min-w-0 text-left"
                   >
-                    <span className="font-mono shrink-0 w-[80px]">{r.symbol}</span>
+                    <span className="order-2 font-mono shrink-0 text-[10px] text-muted">{r.symbol}</span>
                     {/* 名称+标签组: 标签紧贴名称文字, 而不是被 flex-1 推到行尾 */}
                     <span className="flex min-w-0 flex-1 items-center gap-1">
-                      <span className="truncate text-secondary">{r.name}</span>
+                      <span className="truncate font-medium text-foreground">{r.name}</span>
                       {r.asset_type === 'etf' && (
                         <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-accent/10 text-accent">ETF</span>
                       )}
@@ -562,12 +562,8 @@ const StockCard = React.memo(function StockCard({
       <div className="pl-4 pr-2.5 pt-2.5 pb-0">
         {/* 第一行: 代码 + 名称 + 板块标识 */}
         <div className="flex items-center gap-1.5 min-w-0 mb-2 pr-8">
-          <span className="shrink-0 font-mono text-foreground text-xs tracking-wide">
-            {r.symbol}
-          </span>
-          {name && (
-            <span className="text-xs text-secondary truncate">{name}</span>
-          )}
+          <span className="text-sm font-medium text-foreground truncate">{name || '名称暂缺'}</span>
+          <span className="shrink-0 font-mono text-muted text-[10px]">{r.symbol}</span>
           {board && (
             <span className={`shrink-0 inline-flex items-center justify-center px-1 h-[16px] rounded text-[9px] font-bold leading-none ${board.color}`}>
               {board.label}
@@ -1741,14 +1737,8 @@ export function Watchlist() {
                           onClick={() => { setPreviewSymbol(r.symbol); setPreviewName(name ?? '') }}
                           className="flex items-center gap-1 text-left min-w-0"
                         >
-                          <span className="font-mono text-foreground text-xs group-hover:text-accent transition-colors duration-150">
-                            {r.symbol}
-                          </span>
-                          {name && (
-                            <span className="text-xs text-secondary truncate group-hover:text-foreground transition-colors duration-150">
-                              {name}
-                            </span>
-                          )}
+                          <span className="text-xs font-medium text-foreground truncate group-hover:text-accent transition-colors duration-150">{name || '名称暂缺'}</span>
+                          <span className="font-mono text-muted text-[10px]">{r.symbol}</span>
                           {board ? (
                             <span className={`shrink-0 inline-flex items-center justify-center w-[18px] h-[18px] rounded text-[9px] font-bold leading-none border ${board.color}`}>
                               {board.label}

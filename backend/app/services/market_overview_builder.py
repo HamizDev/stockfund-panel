@@ -504,26 +504,25 @@ def build_market_overview(
     strong_up = sum(1 for v in pct_values if v >= 0.03)
     strong_down = sum(1 for v in pct_values if v <= -0.03)
 
-    limit_up = sum(1 for r in rows if bool(r.get("signal_limit_up")) or (_finite(r.get("consecutive_limit_ups")) or 0) > 0)
+    up_symbols = {r["symbol"] for r in rows if bool(r.get("signal_limit_up"))}
+    down_symbols = {r["symbol"] for r in rows if bool(r.get("signal_limit_down"))}
+    limit_up = len(up_symbols)
     broken = sum(1 for r in rows if bool(r.get("signal_broken_limit_up")))
     limit_down = sum(1 for r in rows if bool(r.get("signal_limit_down")))
     max_boards = max([int(_finite(r.get("consecutive_limit_ups")) or 0) for r in rows], default=0)
 
-    # 五档 sealed 修正: 假涨停/假跌停不计入(需 Pro+ depth5.batch 能力)
+    # Price-limit counts describe closing/latest prices; order-book snapshots have their own time.
+    from app.services.limit_counts import sealed_counts
+
     sealed_ready = False
-    fake_up = 0
-    fake_down = 0
+    up_map, down_map = {}, {}
     if depth_service:
         up_map = depth_service.get_sealed_map(as_of, is_down=False)
         down_map = depth_service.get_sealed_map(as_of, is_down=True)
         sealed_ready = bool(up_map or down_map) and depth_service.is_sealed_ready(as_of)
-        if up_map:
-            fake_up = sum(1 for v in up_map.values() if v.get("sealed") is False)
-        if down_map:
-            fake_down = sum(1 for v in down_map.values() if v.get("sealed") is False)
-    if sealed_ready:
-        limit_up = max(0, limit_up - fake_up)
-        limit_down = max(0, limit_down - fake_down)
+    sealed_up = sealed_counts(up_symbols, up_map, sealed_ready)
+    sealed_down = sealed_counts(down_symbols, down_map, sealed_ready)
+    fake_up, fake_down = sealed_up["fake"], sealed_down["fake"]
 
     seal_rate = limit_up / (limit_up + broken) * 100 if (limit_up + broken) > 0 else 0
 
@@ -640,7 +639,7 @@ def build_market_overview(
         },
         "amount": {"total": total_amount, "avg": avg_amount},
         "boards": boards,
-        "limit": {"limit_up": limit_up, "broken": broken, "failed": 0, "limit_down": limit_down, "max_boards": max_boards, "seal_rate": seal_rate, "tiers": tiers, "sealed_ready": sealed_ready, "fake_up": fake_up, "fake_down": fake_down},
+        "limit": {"limit_up": limit_up, "broken": broken, "failed": 0, "limit_down": limit_down, "max_boards": max_boards, "seal_rate": seal_rate, "tiers": tiers, "sealed_ready": sealed_ready, "fake_up": fake_up, "fake_down": fake_down, "sealed_counts_up": sealed_up, "sealed_counts_down": sealed_down, "count_basis": "price_limit"},
         "distribution": _pct_band_rows(pct_values),
         "trend": {
             "above_ma5": above_ma5,

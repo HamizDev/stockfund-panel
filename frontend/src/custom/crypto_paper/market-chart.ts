@@ -1,7 +1,6 @@
-import type { Time } from 'lightweight-charts'
-
 export type CryptoChartInterval = '1m' | '5m' | '15m' | '1h' | '4h'
 export type CryptoChartMarket = 'spot' | 'usdm'
+export type CryptoChartTime = number | string | { year: number; month: number; day: number }
 
 export interface CryptoMarketBar {
   open_time_ms: number
@@ -10,7 +9,7 @@ export interface CryptoMarketBar {
   high: string
   low: string
   close: string
-  volume: string
+  volume?: string | null
 }
 
 export interface NormalizedMarketBar {
@@ -20,7 +19,7 @@ export interface NormalizedMarketBar {
   high: number
   low: number
   close: number
-  volume: number
+  volume: number | null
 }
 
 export interface CryptoMarketTrade {
@@ -70,14 +69,14 @@ function parsePositiveNumber(value: string): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null
 }
 
-function parseVolume(value: string): number | null {
+function parseVolume(value: unknown): number | null {
   if (typeof value !== 'string' || value.trim() === '') return null
   const parsed = Number(value)
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
 }
 
 /**
- * Validate and sort API candles before sending them to Lightweight Charts.
+ * Validate and sort API candles before sending them to the Canvas renderer.
  * If an open time appears more than once, every copy is discarded so the chart
  * never picks an arbitrary candle from an ambiguous response.
  */
@@ -105,7 +104,7 @@ export function normalizeMarketBars(bars: readonly CryptoMarketBar[]): Normalize
     const low = parsePositiveNumber(bar.low)
     const close = parsePositiveNumber(bar.close)
     const volume = parseVolume(bar.volume)
-    if (open === null || high === null || low === null || close === null || volume === null) {
+    if (open === null || high === null || low === null || close === null) {
       parsed.push(null)
       continue
     }
@@ -116,8 +115,7 @@ export function normalizeMarketBars(bars: readonly CryptoMarketBar[]): Normalize
 
     parsed.push({
       openTimeMs,
-      // Lightweight Charts expects Unix seconds. This is the only ms-to-seconds
-      // conversion; labels format the resulting UTC time in Asia/Shanghai.
+      // The Canvas x-axis uses epoch seconds; labels format them in Asia/Shanghai.
       time,
       open,
       high,
@@ -204,7 +202,7 @@ export function buildTradeMarkers(
     .map(({ id: _id, ...marker }) => marker)
 }
 
-function timeToEpochSeconds(time: Time): number | null {
+function timeToEpochSeconds(time: CryptoChartTime): number | null {
   if (typeof time === 'number') return Number.isFinite(time) ? time : null
   if (typeof time === 'string') {
     const timestamp = Date.parse(time.includes('T') ? time : `${time}T00:00:00Z`)
@@ -224,7 +222,7 @@ const beijingDateFormatter = new Intl.DateTimeFormat('en-CA', {
   hourCycle: 'h23',
 })
 
-export function formatBeijingTime(time: Time, includeYear = false): string {
+export function formatBeijingTime(time: CryptoChartTime, includeYear = false): string {
   const seconds = timeToEpochSeconds(time)
   if (seconds === null) return ''
   const parts = beijingDateFormatter.formatToParts(new Date(seconds * 1_000))

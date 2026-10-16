@@ -156,6 +156,13 @@ def validate(rule: dict) -> None:
 
     # 策略类型: 需要 strategy_id + direction,conditions 可空
     if rule.get("type") == "strategy":
+        params = rule.get("strategy_params", {})
+        if not isinstance(params, dict) or any(
+            not isinstance(key, str) or isinstance(value, bool) or
+            not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0
+            for key, value in params.items()
+        ):
+            raise ValueError("策略监控参数必须是有限非负数字")
         if not rule.get("strategy_id"):
             raise ValueError("策略类型规则必须指定 strategy_id")
         if rule.get("direction", "entry") not in DIRECTIONS:

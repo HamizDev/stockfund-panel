@@ -2,8 +2,26 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { PaperCompareRow, StrategyDetail } from '@/lib/api'
 import { StrategyPaperTable } from './StrategyPaperTable'
+
+const apiMocks = vi.hoisted(() => ({
+  paperOverview: vi.fn(async () => ({ initialized: true, cash: 50_000, holdings: [], valuation_complete: false })),
+  paperNav: vi.fn(async () => ({ nav: [] })),
+}))
+
+vi.mock('@/lib/api', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/lib/api')>()
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      paperOverview: apiMocks.paperOverview,
+      paperNav: apiMocks.paperNav,
+    },
+  }
+})
 
 type StrategyPaperRow = PaperCompareRow & {
   asset_type?: 'stock' | 'etf' | null
@@ -19,6 +37,7 @@ type StrategyPaperRow = PaperCompareRow & {
 const container = document.createElement('div')
 document.body.appendChild(container)
 let root: Root | null = null
+let client: QueryClient | null = null
 
 function makeRow(overrides: Partial<StrategyPaperRow> = {}): StrategyPaperRow {
   return {
@@ -89,15 +108,18 @@ const strategies = [makeStrategy('alpha', 'Alpha'), makeStrategy('beta', 'Beta')
 function render(rows: PaperCompareRow[], onToggle = vi.fn(), togglePending = false) {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   root = createRoot(container)
+  client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity } } })
   act(() => {
     root!.render(
-      <StrategyPaperTable
-        rows={rows}
-        strategies={strategies}
-        onSelect={vi.fn()}
-        onToggle={onToggle}
-        togglePending={togglePending}
-      />,
+      <QueryClientProvider client={client}>
+        <StrategyPaperTable
+          rows={rows}
+          strategies={strategies}
+          onSelect={vi.fn()}
+          onToggle={onToggle}
+          togglePending={togglePending}
+        />
+      </QueryClientProvider>,
     )
   })
   return { onToggle }
@@ -117,7 +139,11 @@ afterEach(() => {
     act(() => root!.unmount())
     root = null
   }
+  client?.clear()
+  client = null
   container.innerHTML = ''
+  apiMocks.paperOverview.mockClear()
+  apiMocks.paperNav.mockClear()
 })
 
 it('shows an empty closed-round sample as — (0/0)', () => {
@@ -239,10 +265,10 @@ it('allows pausing an active account but blocks enabling a frozen account', () =
 it('expands the sample, holdings, and fee explanations', () => {
   render([makeRow()])
 
-  click(container.querySelector<HTMLButtonElement>('button[aria-label="展开Alpha统计口径"]')!)
+  click(container.querySelector<HTMLButtonElement>('button[aria-label="展开Alpha统计详情"]')!)
 
-  expect(container.textContent).toContain('5 个 FIFO 配对的已平仓回合')
-  expect(container.textContent).toContain('当前持仓标的 2 个')
+  expect(container.textContent).toContain('已平仓回合5')
+  expect(container.textContent).toContain('持仓标的2')
   expect(container.textContent).toContain('只有行情完整的已保存收盘净值可用于累计收益')
   expect(container.textContent).toContain('佣金')
 })

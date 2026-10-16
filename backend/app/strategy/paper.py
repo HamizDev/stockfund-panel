@@ -286,12 +286,13 @@ def sell_fee(qty: int, price: float, commission_pct: float, stamp_tax_pct: float
 
 # ── 涨跌停 (纯函数, 金融口径须测试) ─────────────────────
 def limit_pct(symbol: str, asset_type: str) -> float:
-    """涨跌停幅度。V1 简化: ST 未识别 (无名称数据), 基金统一 10%。
+    """涨跌停幅度。已核对的科创/创业板 ETF 为20%，未知ETF保守取10%。
 
     股票: 创业板 300/301 与科创板 688 → 20%; 北交所 43/83/87/92 开头 → 30%; 其余 10%。
     """
     if asset_type == "etf":
-        return 0.10
+        from app.strategy.etf_presets import trading_rule
+        return trading_rule(symbol)[1]
     code = symbol.split(".")[0]
     if code.startswith(("300", "301", "688")):
         return 0.20
@@ -384,7 +385,7 @@ def create_order(
             return None, "订单市场与策略账户不一致"
 
         # ETF 即时单 → 次日开盘 (盘中钩子只喂股票快照)
-        if order_type == "market" and asset_type == "etf":
+        if order_type == "market" and asset_type == "etf" and not acc.get("etf_shortterm"):
             order_type = "next_open"
 
         if qty is None and amount is None:
@@ -402,8 +403,8 @@ def create_order(
         acc_cash = float(acc["cash"])
         if side == "buy":
             # 买入资金预检 (按参考价上界估算, 撮合时二次校验)
-            est_price = float(ref_price) if ref_price else 0.0
-            if est_price > 0 and qty * est_price * (1 + acc["slippage_bps"] / 10000) + buy_fee(qty, est_price, acc["commission_pct"]) > acc_cash:
+            est_price = apply_slippage(float(ref_price), "buy", acc["slippage_bps"]) if ref_price else 0.0
+            if est_price > 0 and qty * est_price + buy_fee(qty, est_price, acc["commission_pct"]) > acc_cash:
                 return None, f"可用资金不足 (需约 {qty * est_price:.0f}, 可用 {acc_cash:.0f})"
         else:
             pos = load_positions(data_dir, account_id).get(symbol)
@@ -428,6 +429,19 @@ def create_order(
 
         # 持仓标的数上限 (仅新开仓的买入; 加仓已有持仓不受限)
         positions = load_positions(data_dir, account_id)
+        if side == "buy" and acc.get("etf_shortterm"):
+            from app.strategy.etf_shortterm import buy_guard
+            if not ref_price or not math.isfinite(ref_price) or ref_price <= 0:
+                return None, "ETF短线订单需要有效原始参考价"
+            error = buy_guard(data_dir, acc, symbol, qty, ref_price)
+            if error:
+                return None, error
+        if side == "buy" and acc.get("etf_plan"):
+            occupied = {s for s, pos in positions.items() if pos.get("qty", 0) > 0}
+            occupied.update(o["symbol"] for o in load_orders(data_dir, account_id)
+                            if o["status"] == "pending" and o["side"] == "buy")
+            if symbol in occupied or len(occupied) >= int(acc.get("max_positions", 1)):
+                return None, "ETF 计划账户已有持仓或待买单，请先卖出或撤单"
         if (
             side == "buy"
             and symbol not in positions
@@ -452,6 +466,8 @@ def create_order(
             "fees": None,
             "reason": None,
         }
+        if acc.get("etf_shortterm") and order_type == "market":
+            order["intraday_only"] = True
         save_order(data_dir, order, account_id)
         return order, None
 
@@ -497,7 +513,10 @@ def load_positions(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> dict
     if p.exists():
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-            return data.get("positions", {})
+            positions = data.get("positions", {})
+            for symbol, pos in positions.items():
+                pos.setdefault("symbol", symbol)
+            return positions
         except Exception as e:
             logger.warning("paper positions load failed, rebuilding: %s", e)
     return replay_positions(data_dir, account_id=account_id)[0]
@@ -535,6 +554,7 @@ def replay_positions(
         if side == "buy":
             cash -= qty * price + fee
             pos = positions.setdefault(symbol, {
+                "symbol": symbol,
                 "asset_type": f.get("asset_type", "stock"),
                 "qty": 0, "avg_cost": 0.0, "available_qty": 0, "lots": [],
             })
@@ -568,9 +588,12 @@ def replay_positions(
 
 
 def _available_of(pos: dict, today: str | None = None) -> int:
-    """T+1 可卖数量: buy_date < today 的批次之和。today 为空则全部可卖 (重建口径)。"""
+    """股票/未知ETF为T+1；显式核对的债券/黄金ETF可当日卖。"""
+    from app.strategy.etf_presets import trading_rule
     if today is None:
         return int(sum(lot["qty"] for lot in pos["lots"]))
+    if pos.get("asset_type") == "etf" and trading_rule(pos.get("symbol", ""))[0]:
+        return int(sum(lot["qty"] for lot in pos["lots"] if lot["date"] <= today))
     return int(sum(lot["qty"] for lot in pos["lots"] if lot["date"] < today))
 
 
@@ -635,9 +658,26 @@ def _fill_order(data_dir: Path, order: dict, raw_price: float, day: str, account
             _queue_or_expire(data_dir, order, acc, f"触及跌停 {down} 卖不出 (模拟)", account_id)
             return None
 
-    fee = buy_fee(qty, price, acc["commission_pct"]) if side == "buy" else sell_fee(qty, price, acc["commission_pct"], acc["stamp_tax_pct"])
+    stamp_tax = 0.0 if asset_type == "etf" else acc["stamp_tax_pct"]
+    fee = buy_fee(qty, price, acc["commission_pct"]) if side == "buy" else sell_fee(qty, price, acc["commission_pct"], stamp_tax)
     gross = qty * price
     if side == "buy":
+        if acc.get("etf_shortterm"):
+            from app.strategy.etf_shortterm import buy_guard
+            error = buy_guard(data_dir, acc, symbol, qty, raw_price, exclude_order=order["id"])
+            if error:
+                _expire(data_dir, order, error, account_id)
+                return None
+        if acc.get("etf_plan"):
+            from app.strategy.etf_presets import ENTRY_PCT
+            cap = float(acc["initial_cash"]) * ENTRY_PCT / 100
+            if gross + fee > cap + 1e-6:
+                _expire(data_dir, order, f"成交成本超出 ETF 入场预算 {cap:.2f}，本次不成交", account_id)
+                return None
+            occupied = [pos for pos in load_positions(data_dir, account_id).values() if pos.get("qty", 0) > 0]
+            if len(occupied) >= int(acc.get("max_positions", 1)):
+                _expire(data_dir, order, "ETF 计划账户持仓已达上限，本次不成交", account_id)
+                return None
         if gross + fee > float(acc["cash"]) + 1e-6:
             _expire(data_dir, order, f"资金不足 (需 {gross + fee:.2f}, 可用 {acc['cash']:.2f})", account_id)
             return None
@@ -737,7 +777,7 @@ def _expire(data_dir: Path, order: dict, reason: str, account_id: str = DEFAULT_
 def _queue_or_expire(data_dir: Path, order: dict, acc: dict, reason: str, account_id: str = DEFAULT_ACCOUNT_ID) -> None:
     """涨跌停拒单处理: 排队开启 → 转 next_open 次日重试 (计顺延, 超限过期); 关 → 过期。"""
     postponed = int(order.get("postponed", 0))
-    if acc.get("queue_limit_orders"):
+    if acc.get("queue_limit_orders") and not order.get("intraday_only"):
         if postponed < MAX_POSTPONE_DAYS:
             order["order_type"] = "next_open"
             order["postponed"] = postponed + 1
@@ -794,7 +834,8 @@ def evaluate_intraday(data_dir: Path, snapshot: dict[str, float], account_id: st
     with PAPER_LOCK:
         today = cn_today().isoformat()
         pending_orders = sorted(
-            (o for o in load_orders(data_dir, account_id) if o["status"] == "pending" and o["order_type"] == "market"),
+            (o for o in load_orders(data_dir, account_id) if o["status"] == "pending" and o["order_type"] == "market"
+             and not o.get("intraday_only")),
             key=_order_sort_key,
         )
         for order in pending_orders:
@@ -803,6 +844,131 @@ def evaluate_intraday(data_dir: Path, snapshot: dict[str, float], account_id: st
                 continue  # 无快照顺延
             fill = _fill_order(data_dir, order, float(price), today, account_id)
             if fill is not None:
+                events.append(_fill_event(fill, account_id))
+    return events
+
+
+def _recover_etf_intraday(data_dir: Path, account_id: str) -> bool:
+    """Recover opt-in accounts from durable fills before another order can execute.
+
+    The common ledger appends a fill before updating its order and projections.
+    Replay that committed fill after interruption; ambiguous ledgers stay frozen.
+    Caller holds PAPER_LOCK. No other accounts are migrated or repaired here.
+    """
+    acc = get_account(data_dir, account_id)
+    if acc.get("ledger_error"):
+        return False
+    try:
+        path = _fills_path(data_dir, account_id)
+        fills = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] if path.exists() else []
+        orders = {o["id"]: o for o in load_orders(data_dir, account_id)}
+        committed = {}
+        lots_by_symbol: dict[str, list[dict]] = {}
+        ledger_cash = float(acc["initial_cash"])
+        previous_ts = None
+        for fill in fills:
+            if not isinstance(fill, dict):
+                raise ValueError("成交记录结构待核对")
+            if fill.get("kind", "fill") == "corp_action":
+                factor = float(fill["factor"])
+                if not math.isfinite(factor) or factor <= 0:
+                    raise ValueError("份额调整记录待核对")
+                for lot in lots_by_symbol.get(fill["symbol"], []):
+                    lot["qty"] = round(lot["qty"] * factor, 6)
+                continue
+            fill_ts = datetime.fromisoformat(fill["ts"])
+            fill_ts = fill_ts.replace(tzinfo=CN_TZ) if fill_ts.tzinfo is None else fill_ts.astimezone(CN_TZ)
+            if fill.get("date") != fill_ts.date().isoformat() or (previous_ts is not None and fill_ts < previous_ts):
+                raise ValueError("成交日期或先后顺序待核对")
+            previous_ts = fill_ts
+            oid = fill["order_id"]
+            order = orders[oid]
+            if (oid in committed or any(fill[k] != order[k] for k in ("symbol", "side", "qty", "asset_type"))
+                    or fill.get("kind", "fill") != "fill" or fill["side"] not in ("buy", "sell")
+                    or fill["asset_type"] != "etf" or not isinstance(fill["qty"], int) or fill["qty"] <= 0
+                    or not math.isfinite(fill["price"]) or fill["price"] <= 0
+                    or not math.isfinite(fill["fee"]) or fill["fee"] < 0):
+                raise ValueError("成交记录重复或与订单不一致")
+            qty, price, fee = fill["qty"], fill["price"], fill["fee"]
+            lots = lots_by_symbol.setdefault(fill["symbol"], [])
+            if fill["side"] == "buy":
+                ledger_cash = round(ledger_cash - qty * price - fee, 2)
+                if ledger_cash < 0:
+                    raise ValueError("成交记录透支现金")
+                lots.append({"date": fill["date"], "qty": qty})
+            else:
+                position = {"symbol": fill["symbol"], "asset_type": "etf", "lots": lots}
+                if _available_of(position, fill["date"]) < qty:
+                    raise ValueError("成交记录透支可卖份额")
+                ledger_cash = round(ledger_cash + qty * price - fee, 2)
+                remaining = qty
+                for lot in lots:
+                    take = min(lot["qty"], remaining)
+                    lot["qty"] -= take
+                    remaining -= take
+                lots[:] = [lot for lot in lots if lot["qty"] > 1e-9]
+            committed[oid] = fill
+        if any(o["status"] == "filled" and oid not in committed for oid, o in orders.items()):
+            raise ValueError("已成交订单缺少成交记录")
+        for oid, fill in committed.items():
+            order = orders[oid]
+            if (order["status"], order.get("fill_price"), order.get("fees")) != ("filled", fill["price"], fill["fee"]):
+                order.update(status="filled", filled_at=fill["ts"], fill_price=fill["price"], fees=fill["fee"])
+                save_order(data_dir, order, account_id)
+        positions, cash = replay_positions(data_dir, fills, account_id)
+        if cash != acc["cash"]:
+            acc["cash"] = cash
+            save_account(data_dir, acc, account_id)
+        if positions != load_positions(data_dir, account_id):
+            _materialize(data_dir, account_id)
+    except (ValueError, KeyError, TypeError) as exc:
+        acc.update(status="frozen", ledger_error="短线成交账本待核对，账户已冻结")
+        save_account(data_dir, acc, account_id)
+        logger.error("ETF短线账本恢复失败 account=%s: %s", account_id, type(exc).__name__)
+        return False
+    return True
+
+
+def evaluate_etf_intraday(data_dir: Path, quotes: dict, now: datetime,
+                          account_id: str) -> list[dict]:
+    """ETF opt-in orders: a strictly later source quote, never a daily close fallback."""
+    from app.market_time import in_continuous_session
+
+    events = []
+    with PAPER_LOCK:
+        acc = get_account(data_dir, account_id)
+        if not acc or not acc.get("etf_shortterm"):
+            return events
+        if not _recover_etf_intraday(data_dir, account_id):
+            return events
+        acc = get_account(data_dir, account_id)
+        now_ms = now.timestamp() * 1000
+        for order in sorted(load_orders(data_dir, account_id), key=_order_sort_key):
+            if order["status"] != "pending" or not order.get("intraday_only"):
+                continue
+            if not order.get("expires_at_ms") or now_ms >= order["expires_at_ms"]:
+                _expire(data_dir, order, "日内单超时或时间信息缺失，未模拟成交", account_id)
+                continue
+            if not in_continuous_session(now) or acc["status"] != "active":
+                continue
+            quote = quotes.get(order["symbol"]) or {}
+            try:
+                price, ts = float(quote["last_price"]), float(quote["timestamp"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not math.isfinite(price) or not math.isfinite(ts) or price <= 0:
+                continue
+            if not 0 <= now_ms - ts <= 90_000:
+                continue
+            if ts <= max(order.get("signal_quote_ts", now_ms), order.get("signal_at_ms", now_ms)):
+                continue
+            if abs(price / order["ref_price"] - 1) > .01:
+                _expire(data_dir, order, "报价较信号价偏移超过1%，本次不追价", account_id)
+                continue
+            if _prev_close(data_dir, order["symbol"], "etf", now.date().isoformat()) is None:
+                continue  # no raw previous close => cannot check price limits
+            fill = _fill_order(data_dir, order, price, now.date().isoformat(), account_id)
+            if fill:
                 events.append(_fill_event(fill, account_id))
     return events
 
@@ -820,7 +986,11 @@ def read_daily_bar(data_dir: Path, symbol: str, asset_type: str, day: str) -> di
         return None
     try:
         df = (
-            pl.scan_parquet((base / "**" / "*.parquet").as_posix())
+            pl.scan_parquet(
+                (base / "**" / "*.parquet").as_posix(),
+                schema={"symbol": pl.String, "date": pl.Date, "open": pl.Float64, "close": pl.Float64},
+                extra_columns="ignore",
+            )
             .filter((pl.col("symbol") == symbol) & (pl.col("date") == _date.fromisoformat(day)))
             .select(["open", "close"])
             .collect()
@@ -840,7 +1010,14 @@ def _prev_close(data_dir: Path, symbol: str, asset_type: str, day: str) -> float
         return None
     try:
         df = (
-            pl.scan_parquet((base / "**" / "*.parquet").as_posix())
+            # Live partitions add quote metadata and may store volume as Int64.
+            # Only the required price columns participate in the scan schema;
+            # missing or incompatible required columns still fail closed.
+            pl.scan_parquet(
+                (base / "**" / "*.parquet").as_posix(),
+                schema={"symbol": pl.String, "date": pl.Date, "close": pl.Float64},
+                extra_columns="ignore",
+            )
             .filter((pl.col("symbol") == symbol) & (pl.col("date") < _date.fromisoformat(day)))
             .sort("date")
             .select(pl.col("close").last())
@@ -939,6 +1116,11 @@ def settle_day(data_dir: Path, day: str, account_id: str = DEFAULT_ACCOUNT_ID) -
             key=_order_sort_key,
         )
         for order in pending_orders:
+            if order.get("intraday_only"):
+                # Never manufacture an intraday trade from a later daily bar.
+                _expire(data_dir, order, "日内单未取得后续有效报价，盘后过期", account_id)
+                summary["expired"] += 1
+                continue
             bar = read_daily_bar(data_dir, order["symbol"], order.get("asset_type", "stock"), day)
             if bar is None:
                 order["postponed"] = int(order.get("postponed", 0)) + 1

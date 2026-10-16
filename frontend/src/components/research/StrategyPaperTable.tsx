@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import type { PaperCompareRow, StrategyDetail } from '@/lib/api'
+import { PaperAccountDetails } from '@/components/research/PaperAccountDetails'
 import { priceColorClass } from '@/lib/format'
 
 type PaperAssetType = 'stock' | 'etf'
@@ -25,6 +26,7 @@ interface Props {
   onSelect: (accountId: string) => void
   onToggle: (accountId: string, enabled: boolean) => void
   togglePending: boolean
+  selectedAccount?: string
 }
 
 const FILTERS: Array<{ id: AssetFilter; label: string }> = [
@@ -77,11 +79,6 @@ function getSortValue(row: PaperCompareRow, key: SortKey): number | null {
   return finite(value) ? value : null
 }
 
-function fmtFees(row: PaperCompareRow): string {
-  const { commission_pct, stamp_tax_pct, slippage_bps } = row.fees
-  return `${(commission_pct * 10000).toFixed(1)}‱ 佣金 · ${(stamp_tax_pct * 1000).toFixed(1)}‰ 印花税 · ${slippage_bps}bps 滑点`
-}
-
 function navDate(row: StrategyPaperRow): string {
   return row.nav_date ?? '—'
 }
@@ -114,50 +111,12 @@ function fmtSettledTotal(row: StrategyPaperRow): string {
   return finite(row.settled_total) ? fmtMoney(row.settled_total) : '—'
 }
 
-function fmtClosedRounds(rounds: number | null | undefined): string {
-  if (!finite(rounds) || rounds < 0) return '未知'
-  return String(rounds)
-}
-
-function StrategyDetails({ row }: { row: PaperCompareRow }) {
-  const data = rowData(row)
-  const rounds = finite(row.rounds) && row.rounds >= 0 ? row.rounds : null
-  const wins = finite(data.wins) && data.wins >= 0 ? String(data.wins) : '—'
-  const holdings = finite(data.holdings_count) ? String(data.holdings_count) : '—'
-  const roundSample = rounds == null
-    ? '已平仓回合数未知，无法确认胜率样本量'
-    : rounds > 0
-      ? `${wins}/${rounds} 个 FIFO 配对的已平仓回合`
-      : '暂无已平仓回合，样本为 0/0'
-
-  return (
-    <div className="grid gap-3 rounded-btn border border-border/60 bg-base/70 p-3 text-[11px] leading-5 text-secondary md:grid-cols-3">
-      <div>
-        <div className="font-medium text-foreground">胜率样本</div>
-        <div>{roundSample}</div>
-        <div className="text-muted">未平仓持仓不计入；零盈亏计为未胜。部分卖出按实际配对数量统计。</div>
-      </div>
-      <div>
-        <div className="font-medium text-foreground">持仓与净值</div>
-        <div>当前持仓标的 {holdings} 个 · 定版权益 {fmtSettledTotal(data)}</div>
-        <div className="text-muted">只有行情完整的已保存收盘净值可用于累计收益；不完整或历史质量未知的净值数值会隐藏。净值日 {navDate(data)}。</div>
-        <div className="text-muted">平均持有 {finite(row.avg_holding_days) ? `${row.avg_holding_days} 天` : '—'}（按已平仓回合的自然日）。</div>
-      </div>
-      <div>
-        <div className="font-medium text-foreground">成本与已实现盈亏</div>
-        <div>{fmtFees(row)}</div>
-        <div className="text-muted">已实现盈亏 {fmtMoney(row.realized_pnl)}，按 FIFO 已平仓回合扣除买卖费用。</div>
-        <div className="text-muted">历史模拟结果不代表未来收益。</div>
-      </div>
-    </div>
-  )
-}
-
-export function StrategyPaperTable({ rows, strategies, onSelect, onToggle, togglePending }: Props) {
+export function StrategyPaperTable({ rows, strategies, onSelect, onToggle, togglePending, selectedAccount }: Props) {
   const [assetFilter, setAssetFilter] = useState<AssetFilter>('all')
   const [sortKey, setSortKey] = useState<SortKey>('pnl_pct')
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc')
   const [expandedAccount, setExpandedAccount] = useState<string | null>(null)
+  const tableScrollerRef = useRef<HTMLDivElement>(null)
 
   const strategyNames = useMemo(
     () => new Map(strategies.map(strategy => [strategy.id, strategy.name])),
@@ -198,13 +157,11 @@ export function StrategyPaperTable({ rows, strategies, onSelect, onToggle, toggl
   }))
 
   return (
-    <section aria-label="策略模拟仓对比" className="min-w-0 rounded-card border border-border bg-surface p-4">
+    <section aria-label="策略模拟仓对比" className="[container-type:inline-size] min-w-0 rounded-card border border-border bg-surface p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <h2 className="text-sm font-semibold text-foreground">策略模拟仓对比</h2>
-          <p className="mt-1 text-[11px] leading-5 text-muted">
-            虚拟资金 · 只有行情完整的已保存收盘净值可用于累计收益与权益；缺行情或历史质量未知时隐藏数值并待核对，无定版净值时显示“待盘后定版”。历史模拟结果不代表未来收益。
-          </p>
+          <h2 className="text-sm font-semibold text-foreground">账户排行</h2>
+          <p className="mt-1 text-[11px] leading-5 text-muted">盘后定版 · 仅统计实际模拟成交</p>
         </div>
         <div className="flex flex-wrap gap-1 rounded-btn border border-border bg-base p-0.5" aria-label="按资产类型筛选">
           {filters.map(filter => (
@@ -225,11 +182,15 @@ export function StrategyPaperTable({ rows, strategies, onSelect, onToggle, toggl
         </div>
       </div>
 
-      <p className="mt-2 text-[11px] leading-5 text-muted">
-        暂停只阻止新的策略信号订单，已经生成的待成交订单仍按原模拟规则处理。
-      </p>
+      <details className="mt-2 text-[11px] leading-5 text-muted">
+        <summary className="w-fit cursor-pointer select-none hover:text-foreground">统计口径</summary>
+        <div className="mt-1 space-y-1">
+          <p>虚拟资金 · 只有行情完整的已保存收盘净值可用于累计收益与权益；缺行情或历史质量未知时隐藏数值并待核对，无定版净值时显示“待盘后定版”。历史模拟结果不代表未来收益。</p>
+          <p>暂停只阻止新的策略信号订单，已经生成的待成交订单仍按原模拟规则处理。</p>
+        </div>
+      </details>
 
-      <div className="mt-3 min-w-0 overflow-x-auto">
+      <div ref={tableScrollerRef} className="mt-3 min-w-0 overflow-x-auto">
         {visibleRows.length === 0 ? (
           <div className="rounded-btn border border-dashed border-border p-6 text-center text-xs text-muted">
             {rows.some(row => row.strategy_id) ? '当前筛选下没有策略模拟仓。' : '暂无策略模拟仓。创建后可在此比较模拟结果。'}
@@ -252,7 +213,7 @@ export function StrategyPaperTable({ rows, strategies, onSelect, onToggle, toggl
                     </button>
                   </th>
                 ))}
-                <th scope="col" className="px-2 py-2 text-right font-medium">已平仓回合</th>
+        <th scope="col" className="px-2 py-2 text-right font-medium">已平仓回合</th>
                 <th scope="col" className="px-2 py-2 text-right font-medium">定版权益 / 净值日</th>
                 <th scope="col" className="px-2 py-2 text-right font-medium">持仓标的</th>
                 <th
@@ -264,7 +225,7 @@ export function StrategyPaperTable({ rows, strategies, onSelect, onToggle, toggl
                     最大回撤 <span aria-hidden="true">{sortKey === 'max_drawdown' ? (sortDirection === 'asc' ? '↑' : '↓') : '↕'}</span>
                   </button>
                 </th>
-                <th scope="col" className="px-2 py-2 text-right font-medium">自动跟单</th>
+                <th scope="col" className="px-2 py-2 text-right font-medium">自动模拟</th>
                 <th scope="col" className="px-2 py-2 text-right font-medium">查看</th>
               </tr>
             </thead>
@@ -289,13 +250,17 @@ export function StrategyPaperTable({ rows, strategies, onSelect, onToggle, toggl
                     rounds={rounds}
                     isExpanded={isExpanded}
                     isEnabled={isEnabled}
+                    isSelected={row.account === selectedAccount}
                     autoStateKnown={autoStateKnown}
                     isFrozen={isFrozen}
                     canToggle={canToggle}
                     accountLabel={accountLabel}
                     onSelect={onSelect}
                     onToggle={onToggle}
-                    onExpand={() => setExpandedAccount(current => current === row.account ? null : row.account)}
+                    onExpand={() => {
+                      if (!isExpanded && tableScrollerRef.current) tableScrollerRef.current.scrollLeft = 0
+                      setExpandedAccount(current => current === row.account ? null : row.account)
+                    }}
                   />
                 )
               })}
@@ -314,6 +279,7 @@ function FragmentRow({
   rounds,
   isExpanded,
   isEnabled,
+  isSelected,
   autoStateKnown,
   isFrozen,
   canToggle,
@@ -328,6 +294,7 @@ function FragmentRow({
   rounds: number | null
   isExpanded: boolean
   isEnabled: boolean
+  isSelected: boolean
   autoStateKnown: boolean
   isFrozen: boolean
   canToggle: boolean
@@ -348,12 +315,14 @@ function FragmentRow({
 
   return (
     <>
-      <tr className="border-b border-border/50 align-middle hover:bg-elevated/30">
+      <tr className={cn('border-b border-border/50 align-middle hover:bg-elevated/30', isSelected && 'bg-accent/10')}>
         <td className="px-2 py-2">
           <div className="max-w-52 truncate font-medium text-foreground" title={strategyName}>{strategyName}</div>
+          {isSelected && <span className="mt-1 inline-flex rounded border border-accent/40 px-1.5 py-0.5 text-xs font-medium text-foreground">当前账户</span>}
           <div className="mt-0.5 truncate font-mono text-[10px] text-muted" title={`策略 ${row.strategy_id} · 账户 ${row.account}`}>
             {row.strategy_id} · {row.account}
           </div>
+          <div className="mt-0.5 whitespace-nowrap text-[10px] text-muted">初始本金 {fmtMoney(row.initial_cash)} · 最低佣金 ¥5/单</div>
           {isFrozen && <span className="mt-1 inline-flex rounded bg-warning/10 px-1.5 py-0.5 text-[10px] text-warning">已冻结</span>}
         </td>
         <td className="px-2 py-2 text-secondary">{assetLabel}</td>
@@ -361,16 +330,25 @@ function FragmentRow({
           {returnLabel}
         </td>
         <td className="px-2 py-2 text-right font-mono text-foreground">{fmtWinRate(row)}</td>
-        <td className="px-2 py-2 text-right font-mono text-secondary">{fmtClosedRounds(rounds)}</td>
+        <td className="px-2 py-2 text-right font-mono text-secondary">{rounds == null ? '未知' : String(rounds)}</td>
         <td className="px-2 py-2 text-right">
           <div className="font-mono text-foreground">{totalLabel}</div>
           <div className="mt-0.5 text-[10px] text-muted">净值日 {date}</div>
         </td>
-        <td className="px-2 py-2 text-right font-mono text-secondary">{holdings == null ? '—' : holdings}</td>
+        <td className="px-2 py-2 text-right font-mono text-secondary">{holdings == null ? '—' : holdings}{row.max_positions ? ` / ${row.max_positions}` : ''}</td>
         <td className="px-2 py-2 text-right font-mono text-secondary">
           {finite(drawdown) ? `-${Math.abs(drawdown).toFixed(2)}%` : '—'}
         </td>
         <td className="px-2 py-2 text-right">
+          <div className="inline-flex items-center gap-2">
+          <span
+            aria-label={`自动模拟状态：${!autoStateKnown ? '未知' : isEnabled ? '已启用' : '已暂停'}`}
+            className={cn('inline-flex items-center gap-1.5 whitespace-nowrap rounded-btn border px-2 py-1.5 text-xs font-semibold',
+              isEnabled ? 'border-accent/50 bg-accent/20 text-foreground' : 'border-border bg-elevated text-secondary')}
+          >
+            <span aria-hidden="true" className={cn('h-1.5 w-1.5 rounded-full', isEnabled ? 'bg-accent' : 'bg-muted')} />
+            {!autoStateKnown ? '状态未知' : isEnabled ? '已启用' : '已暂停'}
+          </span>
           <button
             type="button"
             aria-label={toggleLabel}
@@ -378,30 +356,31 @@ function FragmentRow({
             disabled={!canToggle}
             onClick={() => onToggle(row.account, !isEnabled)}
             className={cn(
-              'whitespace-nowrap rounded-btn px-2 py-1 text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-40',
-              isEnabled ? 'bg-accent/10 text-accent hover:bg-accent/15' : 'bg-elevated text-muted hover:text-foreground',
+              'min-h-8 whitespace-nowrap rounded-btn border border-border px-2 py-1.5 text-xs text-foreground transition-colors hover:border-accent/50 hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40',
             )}
           >
-            {!autoStateKnown ? '状态未知' : isEnabled ? '已启用 · 暂停' : '已暂停 · 启用'}
+            {!autoStateKnown ? '不可操作' : isEnabled ? '暂停' : '启用'}
           </button>
+          </div>
         </td>
         <td className="px-2 py-2 text-right">
           <div className="inline-flex items-center gap-1">
             <button
               type="button"
-              aria-label={isExpanded ? `收起${strategyName}统计口径` : `展开${strategyName}统计口径`}
+              aria-label={isExpanded ? `收起${strategyName}统计详情` : `展开${strategyName}统计详情`}
               aria-expanded={isExpanded}
               onClick={onExpand}
               className="rounded-btn border border-border px-2 py-1 text-[10px] text-secondary hover:border-accent/40 hover:text-accent"
             >
               {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-              <span className="sr-only">{isExpanded ? '收起说明' : '统计口径'}</span>
+              <span className="sr-only">{isExpanded ? '收起统计详情' : '统计详情'}</span>
             </button>
             <button
               type="button"
               aria-label={accountLabel}
+              aria-current={isSelected ? 'true' : undefined}
               onClick={() => onSelect(row.account)}
-              className="whitespace-nowrap rounded-btn border border-border px-2 py-1 text-[10px] text-accent hover:border-accent/40"
+              className="min-h-8 whitespace-nowrap rounded-btn border border-border px-2 py-1.5 text-xs text-foreground hover:border-accent/40 hover:bg-accent/10"
             >
               查看账户
             </button>
@@ -411,7 +390,9 @@ function FragmentRow({
       {isExpanded && (
         <tr className="border-b border-border/50 bg-elevated/10">
           <td colSpan={10} className="p-2">
-            <StrategyDetails row={row} />
+            <div className="w-[calc(100cqw-16px)] min-w-0">
+              <PaperAccountDetails row={row} />
+            </div>
           </td>
         </tr>
       )}

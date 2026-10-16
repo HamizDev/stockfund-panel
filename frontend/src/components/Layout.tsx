@@ -59,6 +59,8 @@ import {
   PanelLeftOpen,
 } from 'lucide-react'
 import { Logo } from './Logo'
+import { GroupedNavigation } from './GroupedNavigation'
+import { navigationGroupForPath, type NavigationGroupId } from '@/lib/navigationGroups'
 import { api, type CapabilityMatrix, type IndexQuote } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { useIsDesktop } from '@/lib/useMediaQuery'
@@ -92,7 +94,7 @@ const nav = [
   { to: '/screener',   label: '策略',   icon: ScanSearch },
   { to: '/factors',    label: '因子', icon: Sigma },
   { to: '/backtest',   label: '回测', icon: History },
-  { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },
+  { to: '/stock-analysis',    label: '股票 / ETF 分析', icon: TrendingUp },
   { to: '/limit-ladder', label: '连板梯队', icon: Flame },
   { to: '/concept-analysis', label: '概念分析', icon: Layers3 },
   { to: '/industry-analysis', label: '行业分析', icon: Landmark },
@@ -376,6 +378,8 @@ export function Layout() {
   // 自选分组 — 仅当用户开启「显示在侧边栏」时拉取
   const groupsInNav = prefs?.watchlist_groups_in_nav ?? false
   const location = useLocation()
+  const [openNavigationGroup, setOpenNavigationGroup] = useState<NavigationGroupId | null>(() => navigationGroupForPath(location.pathname))
+  useEffect(() => { setOpenNavigationGroup(navigationGroupForPath(location.pathname)) }, [location.pathname])
   const { data: watchlistGroupsData } = useQuery({
     queryKey: QK.watchlistGroups,
     queryFn: api.watchlistGroups,
@@ -420,7 +424,7 @@ export function Layout() {
   // 盘中随 SSE 刷新)。可见性门控: 子菜单实际可见(桌面展开 + 二级菜单展开, 或
   // 移动端抽屉打开) 时才拉取, 收起/隐藏/抽屉关闭下不为隐藏 UI 发请求。
   const sidebarFullyVisible = navState === 'expanded' && (isDesktop || drawerOpen)
-  const navGroupPctVisible = groupsInNav && sidebarFullyVisible && watchlistNavExpanded
+  const navGroupPctVisible = groupsInNav && sidebarFullyVisible && watchlistNavExpanded && openNavigationGroup === 'holdings'
   const { data: navWatchlist } = useQuery({
     queryKey: QK.watchlist,
     queryFn: api.watchlistList,
@@ -745,7 +749,14 @@ export function Layout() {
         </div>
 
         <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
-          {visibleNavItems.map(({ to, label, icon: Icon, badge }) => {
+          <GroupedNavigation
+            items={visibleNavItems}
+            pathname={location.pathname}
+            openGroup={openNavigationGroup}
+            onGroupChange={setOpenNavigationGroup}
+            railMode={railMode}
+            onExpandRail={() => setNavStatePersist('expanded')}
+            renderItem={({ to, label, icon: Icon, badge }) => {
             // 「自选」项 — 开启分组侧栏且未整体收起时, 渲染为可展开父项 + 二级分组
             const isWatchlistExpandable = to === '/watchlist' && groupsInNav && !railMode && watchlistGroups.length > 0
             return (
@@ -872,7 +883,7 @@ export function Layout() {
                 )}
               </div>
             )
-          })}
+          }} />
           <ExtensionSlot
             name="layout.navigation.extra"
             context={{ collapsed: railMode, pathname: location.pathname }}

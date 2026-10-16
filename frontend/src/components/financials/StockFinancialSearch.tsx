@@ -10,6 +10,10 @@ interface Props {
   onSelect: (symbol: string, name: string) => void
   /** 搜索资产类型, 逗号分隔 (默认 'stock')。如 'stock,index' */
   assetTypes?: string
+  placeholder?: string
+  value?: string
+  onValueChange?: (value: string) => void
+  clearOnSelect?: boolean
 }
 
 /**
@@ -17,8 +21,10 @@ interface Props {
  * 复用 instrumentSearch 后端(代码 / 名称模糊匹配),单选即跳转该股财务详情。
  * 模式对齐 Watchlist.StockSearchBox:useQuery + 外部点击关闭 + 键盘导航。
  */
-export function StockFinancialSearch({ onSelect, assetTypes }: Props) {
-  const [query, setQuery] = useState('')
+export function StockFinancialSearch({ onSelect, assetTypes, placeholder = '输入股票代码或名称，如 600000 / 浦发', value, onValueChange, clearOnSelect = true }: Props) {
+  const [localQuery, setLocalQuery] = useState('')
+  const query = value ?? localQuery
+  const setQuery = (next: string) => { setLocalQuery(next); onValueChange?.(next) }
   const [open, setOpen] = useState(false)
   const [activeIdx, setActiveIdx] = useState(-1)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -46,7 +52,7 @@ export function StockFinancialSearch({ onSelect, assetTypes }: Props) {
 
   function handleSelect(r: { symbol: string; name: string }) {
     onSelect(r.symbol, r.name)
-    setQuery('')
+    if (clearOnSelect) setQuery('')
     setOpen(false)
     setActiveIdx(-1)
   }
@@ -76,7 +82,8 @@ export function StockFinancialSearch({ onSelect, assetTypes }: Props) {
         <input
           ref={inputRef}
           type="text"
-          placeholder="输入股票代码或名称，如 600000 / 浦发"
+          aria-label="搜索股票代码或名称"
+          placeholder={placeholder}
           value={query}
           onChange={(e) => { setQuery(e.target.value); setOpen(true); setActiveIdx(-1) }}
           onFocus={() => { if (trimmed) setOpen(true) }}
@@ -103,9 +110,11 @@ export function StockFinancialSearch({ onSelect, assetTypes }: Props) {
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 搜索中…
               </div>
+            ) : search.isError ? (
+              <div role="alert" className="px-4 py-4 text-xs text-danger">搜索暂不可用，请重试。<button type="button" onClick={() => void search.refetch()} className="ml-2 underline">重试</button></div>
             ) : results.length === 0 ? (
               <div className="px-4 py-6 text-center text-xs text-muted">
-                未找到匹配的股票
+                未找到匹配的标的
               </div>
             ) : (
               results.map((r, i) => (
@@ -117,18 +126,18 @@ export function StockFinancialSearch({ onSelect, assetTypes }: Props) {
                     i === activeIdx ? 'bg-accent/10 text-accent' : 'hover:bg-elevated text-foreground'
                   }`}
                 >
-                  <span className="font-mono shrink-0 text-xs w-[88px]">{r.symbol}</span>
-                  <span className="truncate text-sm flex-1">{r.name}</span>
+                  <span className="truncate text-sm font-medium flex-1">{r.name}</span>
+                  <span className="font-mono shrink-0 text-[10px] text-muted">{r.symbol}</span>
                   {(() => {
                     const b = boardTag(r.symbol)
                     return b && (
                       <span className={`shrink-0 px-1 py-0.5 rounded text-[10px] leading-none border ${b.color}`}>{b.label}</span>
                     )
                   })()}
+                  {r.asset_type === 'etf' && <span className="shrink-0 rounded bg-accent/10 px-1 py-0.5 text-[10px] text-accent">ETF</span>}
                   {r.asset_type === 'index' && (
                     <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-sky-500/10 text-sky-400">指数</span>
                   )}
-                  {r.code && <span className="text-[10px] text-muted font-mono shrink-0">{r.code}</span>}
                 </button>
               ))
             )}

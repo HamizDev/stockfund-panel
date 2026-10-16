@@ -31,7 +31,7 @@ describe('normalizeMarketBars', () => {
     expect(bars[1].volume).toBe(0)
   })
 
-  it('discards invalid numeric values and impossible OHLC ranges instead of coercing them to zero', () => {
+  it('discards invalid prices and impossible OHLC but retains valid prices with unknown volume', () => {
     const bars = normalizeMarketBars([
       bar(0, { close: 'NaN' }),
       bar(60_000, { volume: 'Infinity' }),
@@ -42,7 +42,21 @@ describe('normalizeMarketBars', () => {
       bar(300_000),
     ])
 
-    expect(bars.map(item => item.openTimeMs)).toEqual([300_000])
+    expect(bars.map(item => item.openTimeMs)).toEqual([60_000, 300_000])
+    expect(bars[0].volume).toBeNull()
+    expect(bars[1].volume).toBe(12.5)
+  })
+
+  it('does not invent zero volume for missing or invalid volume inputs', () => {
+    const bars = normalizeMarketBars([
+      { ...bar(0), volume: null },
+      { ...bar(60_000), volume: undefined },
+      bar(120_000, { volume: '-1' }),
+      bar(180_000, { volume: '' }),
+    ])
+    expect(bars).toHaveLength(4)
+    expect(bars.map(item => item.volume)).toEqual([null, null, null, null])
+    expect(bars.map(item => item.close)).toEqual([105, 105, 105, 105])
   })
 
   it('rejects every candle when an open timestamp is duplicated', () => {

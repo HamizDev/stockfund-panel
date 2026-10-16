@@ -1,3 +1,4 @@
+import { chartPrice } from '@/lib/chartPrice'
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
@@ -8,9 +9,13 @@ import { StockFinancialSearch } from '@/components/financials/StockFinancialSear
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { LastStockChip } from '@/components/LastStockChip'
 import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/stock-analysis/AnalysisKChart'
+import { AnalysisMinutePanel } from '@/components/stock-analysis/AnalysisMinutePanel'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
+import { TechnicalSummary } from '@/components/research/TechnicalSummary'
 import { api } from '@/lib/api'
 import { useLastStock } from '@/lib/useLastStock'
+import { usePageState } from '@/lib/usePageState'
+import { usePaperInstrumentNames } from '@/lib/usePaperInstrumentNames'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
 import {
@@ -27,7 +32,7 @@ import {
  *  - 报告胶囊用蓝色系,与财务分析(紫色)并存
  */
 export function StockAnalysis() {
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [symbol, setSymbol] = useState<string>('')
   const [name, setName] = useState<string>('')
   const [checking, setChecking] = useState(false)
@@ -39,14 +44,18 @@ export function StockAnalysis() {
   // 进入页面立即加载历史报告(供右侧常驻列表)。store 内部有 historyLoaded 去重, 重复调用安全。
   useEffect(() => { loadHistory() }, [])
 
+  const linkedSymbol = searchParams.get('symbol')
+  const linkedName = searchParams.get('name')
+  const names = usePaperInstrumentNames(symbol ? [symbol] : [])
+  const resolvedName = names.data?.names?.[symbol] || name || symbol
+
   // 自动恢复上次选中的股票(切走再回来不丢)。useLastStock 的 last 来自 localStorage, 同步可用。
   useEffect(() => {
-    const linkedSymbol = searchParams.get('symbol')
     if (linkedSymbol && /^\d{6}\.(SH|SZ|BJ)$/.test(linkedSymbol)) {
-      const linkedName = searchParams.get('name') || linkedSymbol
+      const nextName = linkedName || linkedSymbol
       setSymbol(linkedSymbol)
-      setName(linkedName)
-      rememberStock(linkedSymbol, linkedName)
+      setName(nextName)
+      rememberStock(linkedSymbol, nextName)
       return
     }
     if (!symbol && lastStock) {
@@ -54,7 +63,7 @@ export function StockAnalysis() {
       setName(lastStock.name)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [linkedSymbol, linkedName, rememberStock])
 
   const onSelect = (sym: string, nm: string) => {
     setSymbol(sym)
@@ -62,6 +71,12 @@ export function StockAnalysis() {
     setConfirmReport(null)
     setShowPriceAlerts(false)
     rememberStock(sym, nm)
+    setSearchParams(previous => {
+      const next = new URLSearchParams(previous)
+      next.set('symbol', sym)
+      next.set('name', nm)
+      return next
+    })
   }
 
   const handleAnalyze = async () => {
@@ -83,36 +98,37 @@ export function StockAnalysis() {
   }
 
   const doAnalysis = async () => {
-    const r = await startAnalysis(symbol, name)
+    const r = await startAnalysis(symbol, resolvedName)
     if (r.error) toast(r.error, 'error')
   }
 
   return (
     <>
       <PageHeader
-        title="个股分析"
-        subtitle="日 K · 关键价位 · AI 四维分析(技术 / 基本面 / 财务 / 消息面)"
+        title="股票 / ETF 分析"
+        className="flex-wrap gap-2 pl-14 pr-3 md:px-5 [&>div:first-child]:flex-wrap [&>div:first-child]:min-w-0"
+        subtitle="日K · 分时 / 分钟K · 关键价位 · AI研究解读"
         right={
           <div className="flex items-center gap-2">
-            <LastStockChip stock={lastStock} onSelect={onSelect} />
+            <LastStockChip stock={lastStock?.symbol === symbol ? { symbol, name: resolvedName } : lastStock} onSelect={onSelect} />
           </div>
         }
       />
 
-      <div className="w-full px-8 py-6 space-y-6">
+      <div className="w-full px-3 py-4 md:px-8 md:py-6 space-y-6">
         {/* 搜索栏 */}
-        <div className="flex items-center gap-3">
-          <div className="w-72">
-            <StockFinancialSearch onSelect={onSelect} assetTypes="stock,index" />
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="w-full sm:w-72">
+            <StockFinancialSearch onSelect={onSelect} assetTypes="stock,etf,index" placeholder="搜索股票、ETF或指数代码 / 名称" />
           </div>
           {symbol && (
             <>
               <button
                 onClick={() => setPreviewSymbol(symbol)}
-                title="查看个股日 K 详情"
+                title="查看日K详情"
                 className="group flex items-center gap-2 text-sm rounded-md px-1.5 py-0.5 -mx-1.5 hover:bg-elevated transition-colors"
               >
-                <span className="text-foreground font-medium group-hover:text-sky-300 transition-colors">{name || symbol}</span>
+                <span className="text-foreground font-medium group-hover:text-sky-300 transition-colors">{resolvedName}</span>
                 <span className="text-[10px] font-mono text-muted">{symbol}</span>
                 <ExternalLink className="h-3 w-3 text-muted opacity-0 group-hover:opacity-100 transition-opacity" />
               </button>
@@ -122,7 +138,7 @@ export function StockAnalysis() {
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-gradient-to-r from-sky-500/25 to-blue-500/15 border border-sky-400/30 text-sky-300 text-xs font-medium hover:from-sky-500/35 hover:to-blue-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                AI 个股分析
+                AI 研究分析
               </button>
               <button
                 onClick={() => setShowPriceAlerts(true)}
@@ -137,16 +153,16 @@ export function StockAnalysis() {
         </div>
 
         {/* 主体:左侧当前个股看板 + 右侧常驻历史报告 */}
-        <div className="grid grid-cols-[1fr_288px] gap-6 items-start">
+        <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_288px] gap-6 items-start">
           <div className="min-w-0">
             {!symbol ? (
               <EmptyState
                 icon={LineChart}
-                title="选择一只股票开始分析"
-                hint="搜索代码或名称,查看日 K 与关键价位,并可让 AI 进行技术面 / 基本面 / 财务面 / 消息面四维综合分析。"
+                title="选择股票或ETF开始分析"
+                hint="搜索代码或名称，查看日 K、分时 / 分钟 K 与关键价位，并可让 AI 进行研究分析。"
               />
             ) : (
-              <StockAnalysisBoard symbol={symbol} />
+              <StockAnalysisBoard key={symbol} symbol={symbol} />
             )}
           </div>
           <HistorySidebar />
@@ -166,7 +182,7 @@ export function StockAnalysis() {
       {/* 个股日 K 详情对话框(点击名称/代码打开) */}
       <StockPreviewDialog
         symbol={previewSymbol}
-        name={previewSymbol === symbol ? name : undefined}
+        name={previewSymbol === symbol ? resolvedName : undefined}
         triggerInfo={null}
         onClose={() => setPreviewSymbol(null)}
       />
@@ -175,7 +191,7 @@ export function StockAnalysis() {
         <PriceAlertDialog
           key={symbol}
           symbol={symbol}
-          name={name}
+          name={resolvedName}
           onClose={() => setShowPriceAlerts(false)}
         />
       )}
@@ -183,17 +199,55 @@ export function StockAnalysis() {
   )
 }
 
-// ===== 分析看板:日 K + 关键价位 =====
-function StockAnalysisBoard({ symbol }: { symbol: string }) {
+type AnalysisView = { symbol: string; date: string | null; view: 'intraday' | 'candles' }
+function isAnalysisView(value: unknown): value is AnalysisView {
+  if (!value || typeof value !== 'object') return false
+  const item = value as AnalysisView
+  const validDate = item.date === null || (typeof item.date === 'string'
+    && /^\d{4}-\d{2}-\d{2}$/.test(item.date) && Number.isFinite(Date.parse(item.date))
+    && new Date(item.date).toISOString().slice(0, 10) === item.date)
+  return typeof item.symbol === 'string' && /^\d{6}\.(SH|SZ|BJ)$/.test(item.symbol)
+    && validDate && (item.view === 'intraday' || item.view === 'candles')
+}
+
+// 日线和分钟数据独立加载，缺少日线也能查看最新日内行情。
+export function StockAnalysisBoard({ symbol }: { symbol: string }) {
+  const [view, setView] = usePageState<AnalysisView>('stockAnalysis', () => ({ symbol, date: null, view: 'intraday' }), isAnalysisView)
+  const selectedDate = view.symbol === symbol ? view.date : null
+  const metadata = useQuery({
+    queryKey: QK.instrumentSearch(symbol.slice(0, 6), 'stock,etf,index'),
+    queryFn: () => api.instrumentSearch(symbol.slice(0, 6), 20, 'stock,etf,index'),
+    enabled: !!symbol,
+    staleTime: 300_000,
+    retry: false,
+  })
+  const foundType = metadata.data?.results.find(item => item.symbol === symbol)?.asset_type
+  const assetType = foundType === 'stock' || foundType === 'etf' || foundType === 'index' ? foundType : undefined
+  const selectDate = (date: string | null) => setView(previous => ({ ...previous, symbol, date }))
+  const selectView = (next: 'intraday' | 'candles') => setView({ symbol, date: selectedDate, view: next })
+  return <div className="grid min-w-0 grid-cols-1 items-start gap-4 min-[1800px]:grid-cols-2">
+    <DailyAnalysisCard symbol={symbol} onDateClick={selectDate} />
+    {!assetType && (metadata.isError || metadata.isSuccess) ? <section className="rounded-card border border-border bg-surface p-4" aria-label="日内行情">
+      <p role="alert" className="text-xs text-danger">暂时无法识别标的类型，分钟行情未发起。请刷新重试。</p>
+      <button type="button" onClick={() => { void metadata.refetch() }} className="mt-3 rounded-btn border border-border px-3 py-2 text-xs text-accent">重新识别标的</button>
+    </section> : <AnalysisMinutePanel
+      symbol={symbol} assetType={assetType} date={selectedDate} onDateChange={selectDate}
+      view={assetType === 'index' ? 'intraday' : view.view} onViewChange={selectView} height={480}
+    />}
+  </div>
+}
+
+// ===== 日 K + 关键价位 =====
+function DailyAnalysisCard({ symbol, onDateClick }: { symbol: string; onDateClick: (date: string) => void }) {
   const kline = useQuery({
-    queryKey: ['kline', symbol, ''],
+    queryKey: QK.stockAnalysisDaily(symbol, 250),
     queryFn: () => api.klineDaily(symbol, 250),
     enabled: !!symbol,
     staleTime: 60_000,
   })
 
   const levelsQ = useQuery({
-    queryKey: QK.stockLevels(symbol),
+    queryKey: QK.stockLevels(symbol, 250),
     queryFn: () => api.stockAnalysisLevels(symbol, 250),
     enabled: !!symbol,
     staleTime: 60_000,
@@ -217,13 +271,21 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
   if (rows.length === 0) {
     return <EmptyState icon={LineChart} title="暂无日 K 数据" hint="该标的尚未同步日 K,请先在数据页或自选页同步。" />
   }
+  const summaryRows = rows.map(row => ({
+    time: row.date,
+    open: row.open,
+    high: row.high,
+    low: row.low,
+    close: row.close,
+    volume: row.volume ?? null,
+  }))
 
   const levels = (levelsQ.data?.levels ?? {}) as Record<LevelType, PriceLevel[]>
 
   // 涨跌色:最后一根 K 线收 vs 前一根收(无前日则按开收判断)
   const last = rows[rows.length - 1]
   const prev = rows[rows.length - 2]
-  const curClose = levelsQ.data?.close
+  const curClose = levelsQ.data?.close ?? last.close
   const isUp = prev ? (last.close >= prev.close) : (last.close >= last.open)
 
   return (
@@ -239,20 +301,24 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
             <span className="text-[10px] text-muted/60">·</span>
             <span className="text-[10px] text-muted">当前价</span>
             <span className={`text-[16px] leading-6 font-mono font-bold ${isUp ? 'text-bull' : 'text-bear'}`}>
-              {curClose?.toFixed(2) ?? '—'}
+              {chartPrice(curClose, symbol)}
             </span>
           </div>
         </div>
       </div>
       <div className="p-3">
         <AnalysisKChart
+          key={symbol}
           rows={rows}
           levels={levels}
           series={levelsQ.data?.series}
           seriesDates={levelsQ.data?.dates}
           defaultLevelTypes={['sr', 'pivot', 'keltner_s']}
           height={480}
+          onDateClick={onDateClick}
         />
+        <TechnicalSummary rows={summaryRows} contextLabel="当前日线研究快照" symbol={symbol} />
+        <p className="mt-2 text-[11px] text-muted">点击某根日 K，可查看对应日期的分时 / 分钟 K；默认展示最新日内行情。</p>
       </div>
     </div>
   )
@@ -279,8 +345,8 @@ function HistorySidebar() {
           </div>
         ) : reports.length === 0 ? (
           <div className="px-3 py-10 text-center">
-            <p className="text-xs text-muted">还没有任何个股分析报告</p>
-            <p className="text-[10px] text-muted/60 mt-1">选一只股票,点「AI 个股分析」生成</p>
+            <p className="text-xs text-muted">还没有研究分析报告</p>
+            <p className="text-[10px] text-muted/60 mt-1">选股票或ETF，点「AI 研究分析」生成</p>
           </div>
         ) : (
           <div className="max-h-[calc(100vh-220px)] overflow-y-auto p-2 space-y-1.5">
@@ -300,7 +366,7 @@ function HistorySidebar() {
                     </div>
                     <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted">
                       <span>{fmtRelative(r.created_at)}</span>
-                      {r.close != null && <span className="font-mono">价 {r.close.toFixed(2)}</span>}
+                      {r.close != null && <span className="font-mono">价 {chartPrice(r.close, r.symbol)}</span>}
                       {r.focus && <span className="text-sky-300/70 truncate">关注: {r.focus}</span>}
                     </div>
                     {r.summary && (

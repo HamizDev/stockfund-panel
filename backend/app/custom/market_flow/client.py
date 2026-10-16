@@ -22,6 +22,9 @@ _cache_lock = threading.Lock()
 
 def _fetch(endpoint: str) -> list[dict]:
     """拉取单个接口, 带 30 分钟缓存。失败返回 []。"""
+    if endpoint in {'ths-concepts', 'ths-industries'}:
+        from app.services.board_membership import cached_rows
+        return cached_rows('concept' if endpoint == 'ths-concepts' else 'industry')
     now = time.time()
     with _cache_lock:
         hit = _cache.get(endpoint)

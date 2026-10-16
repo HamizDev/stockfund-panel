@@ -1,3 +1,4 @@
+import { usePaperInstrumentNames } from '@/lib/usePaperInstrumentNames'
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -372,11 +373,15 @@ export function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, 
     }
   }
 
-  const events = (alertsQuery.data as any)?.alerts ?? []
+  const rawEvents: AlertEvent[] = (alertsQuery.data as any)?.alerts ?? []
+  const eventNames = usePaperInstrumentNames(rawEvents.filter(ev => ev.symbol && ev.source !== 'sector').map(ev => ev.symbol!))
+  const events: AlertEvent[] = rawEvents.map(ev => ({ ...ev, name: ev.symbol && ev.source !== 'sector'
+    ? (ev.name && !/^\d{6}(\.(SH|SZ|BJ))?$/.test(ev.name) ? ev.name : eventNames.data?.names[ev.symbol])
+    : ev.name }))
 
   // 切股导航列表: 有 symbol 的触发记录 (按展示顺序)
   const alertsNavItems = useMemo(
-    () => toNavItems(events.filter((ev: AlertEvent) => ev.symbol && ev.asset_type !== 'index' && ev.sector_kind !== 'index')),
+    () => toNavItems(events.filter((ev): ev is AlertEvent & { symbol: string } => !!ev.symbol && ev.asset_type !== 'index' && ev.sector_kind !== 'index')),
     [events],
   )
   const handlePreviewEvent = useCallback((ev: AlertEvent) => {
@@ -464,13 +469,13 @@ export function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, 
                                 className="inline-flex items-center gap-1.5 rounded hover:bg-elevated/50 px-1 -mx-1 transition-colors cursor-pointer"
                                 title="点击查看日K"
                               >
-                                <span className="font-mono text-xs font-medium text-foreground hover:text-accent">{ev.symbol}</span>
+                                <span className="text-xs font-medium text-foreground truncate max-w-[10rem]">{ev.name || (eventNames.isPending ? '名称读取中…' : '名称暂缺')}</span>
                                 {board && (
                                   <span className={`inline-flex items-center justify-center h-3.5 w-3.5 rounded text-[8px] font-bold leading-none border ${board.color}`}>
                                     {board.label}
                                   </span>
                                 )}
-                                {ev.name && <span className="text-xs text-secondary truncate max-w-[8rem] hover:text-foreground">{ev.name}</span>}
+                                <span className="font-mono text-[10px] text-muted">{ev.symbol}</span>
                               </button>
                             )
                           })()}
@@ -543,13 +548,13 @@ export function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, 
                               className="inline-flex items-center gap-1.5 rounded hover:bg-elevated/50 px-1 -mx-1 transition-colors cursor-pointer"
                               title="点击查看日K"
                             >
-                              <span className="font-mono text-xs font-medium text-foreground hover:text-accent">{ev.symbol}</span>
+                              <span className="text-xs font-medium text-foreground truncate max-w-[10rem]">{ev.name || (eventNames.isPending ? '名称读取中…' : '名称暂缺')}</span>
                               {board && (
                                 <span className={`inline-flex items-center justify-center h-3.5 w-3.5 rounded text-[8px] font-bold leading-none border ${board.color}`}>
                                   {board.label}
                                 </span>
                               )}
-                              {ev.name && <span className="text-xs text-secondary truncate max-w-[8rem] hover:text-foreground">{ev.name}</span>}
+                              <span className="font-mono text-[10px] text-muted">{ev.symbol}</span>
                             </button>
                           )
                         })()}

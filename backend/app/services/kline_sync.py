@@ -1614,6 +1614,40 @@ def fetch_minute_single(
     return _normalize_minute(_compact_klines_to_df(raw, default_symbol=symbol))
 
 
+def fetch_etf_paper_minutes(symbols: list[str], capset: CapabilitySet | None,
+                            now: datetime) -> tuple[pl.DataFrame, str | None, str | None]:
+    """Bounded, no-disk raw ETF minute boundary for forward paper observation."""
+    from app.strategy.etf_presets import POOL
+
+    allowed = {item[0] for item in POOL}
+    if not symbols or len(set(symbols)) > 15 or not set(symbols).issubset(allowed):
+        return pl.DataFrame(), None, "分钟请求超出已核对ETF候选池"
+    name = preferences.get_minute_data_provider()
+    provider, fallback, error = _resolve_minute_provider(name, asset_type="etf")
+    start = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    def bounded(frame):
+        frame = _normalize_minute(_enforce_minute_beijing_wallclock(frame, source=name))
+        if frame.is_empty():
+            return frame
+        return frame.filter(pl.col("symbol").is_in(symbols) & (pl.col("datetime").dt.date() == now.date())
+                            & (pl.col("datetime") <= now.replace(tzinfo=None))).unique(["symbol", "datetime"]).sort(["symbol", "datetime"])
+    if not fallback:
+        # stock-sdk v2.2.2 cnMinute(period=1) uses Eastmoney trends2, which has
+        # no adjustment parameter. 5m+ is adjusted by default: do not mark the
+        # whole provider raw or generalize this exception to another frequency.
+        if getattr(provider, "minute_price_basis", None) != "raw" and getattr(provider, "name", name) != "stocksdk":
+            return pl.DataFrame(), getattr(provider, "name", name), "分钟源未确认原始价基，短线模拟等待"
+        frame = provider.get_minute(symbols, start_time=start, end_time=now,
+                                    asset_type="etf", freq="1m")
+        frame = bounded(frame)
+        return frame, getattr(provider, "name", name), None
+    if capset is None or not capset.has(Cap.KLINE_MINUTE_BY_SYMBOL):
+        return pl.DataFrame(), name, str(error or "没有可用的原始ETF分钟能力")
+    frames = [fetch_minute_single(s, now.date(), "etf", capset=capset, raw_basis=True) for s in symbols]
+    frames = [f for f in frames if not f.is_empty()]
+    return bounded(pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()), "tickflow", None
+
+
 def fetch_adj_factor_single(symbol: str) -> pl.DataFrame:
     """从 TickFlow 实时拉取单股除权因子(不写入本地), 用于单股 K 线即时前复权。
 

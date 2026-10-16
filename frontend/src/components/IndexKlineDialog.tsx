@@ -36,7 +36,13 @@ export function IndexKlineDialog({ code, name, onClose }: Props) {
         </div>
         {isLoading && <div className="py-8 text-center text-xs text-muted">加载中...</div>}
         {error && <div className="py-8 text-center text-xs text-bear">加载失败</div>}
-        {ohlc.length > 0 && <CandlestickChart data={ohlc} height={300} />}
+        {ohlc.length > 0 && <CandlestickChart
+          data={ohlc}
+          height={300}
+          symbol={code}
+          title={`${name}指数走势`}
+          contextKey={`${code}:${name}`}
+        />}
       </div>
     </Modal>
   )

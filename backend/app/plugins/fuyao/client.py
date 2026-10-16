@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -136,6 +137,51 @@ class FuyaoClient:
         if not isinstance(rows, list):
             rows = []
         return rows, server_ts
+
+    @staticmethod
+    def _index_list(data: object, required_fields: tuple[str, ...], path: str) -> tuple[list[dict], int]:
+        """Validate an index catalog/constituent list without accepting partial data."""
+        if not isinstance(data, dict):
+            raise FuyaoError(f"指数列表响应结构错误: {path}")
+        rows = data.get("item")
+        if not isinstance(rows, list):
+            raise FuyaoError(f"指数列表未返回有效 item 列表: {path}")
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict) or any(
+                not isinstance(row.get(field), str) or not row[field].strip()
+                for field in required_fields
+            ):
+                raise FuyaoError(f"指数列表第 {index + 1} 项缺少必要字段: {path}")
+        try:
+            server_ts = int(data.get("timestamp") or 0)
+        except (TypeError, ValueError) as exc:
+            raise FuyaoError(f"指数列表时间戳无效: {path}") from exc
+        return rows, server_ts
+
+    def _get_index_list(
+        self, path: str, params: dict, required_fields: tuple[str, ...]
+    ) -> tuple[list[dict], int]:
+        try:
+            data = self._get(path, params)
+        except FuyaoError:
+            raise
+        except (AttributeError, TypeError) as exc:
+            raise FuyaoError(f"指数列表响应信封结构错误: {path}") from exc
+        return self._index_list(data, required_fields, path)
+
+    def index_catalog(self, tag: str) -> tuple[list[dict], int]:
+        """Fetch one supported THS index catalog: cn_concept or industry."""
+        if tag not in ("cn_concept", "industry"):
+            raise FuyaoError("指数目录分类仅支持 cn_concept 或 industry")
+        path = "/api/a-share-index/catalog/ths-index-list"
+        return self._get_index_list(path, {"tag": tag}, ("thscode", "name"))
+
+    def index_members(self, thscode: str) -> tuple[list[dict], int]:
+        """Fetch constituents for one six-digit THS index code."""
+        if not isinstance(thscode, str) or re.fullmatch(r"[0-9]{6}\.TI", thscode) is None:
+            raise FuyaoError("指数代码必须是六位数字并以 .TI 结尾")
+        path = "/api/a-share-index/constituents/ths-stock-list"
+        return self._get_index_list(path, {"thscode": thscode}, ("thscode", "ticker", "name"))
 
     def fund_snapshot(self, thscode: str) -> dict | None:
         """单只场内基金(ETF/LOF)实时快照 (/api/fund/market/snapshot)。

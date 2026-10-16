@@ -298,6 +298,13 @@ _CATALOG: tuple[FactorSpec, ...] = (
         "KDJ K值 - D值, 正值代表快线在慢线上方",
         deps=frozenset({"kdj_k", "kdj_d"}),
     ),
+    # Append rather than reorder the existing mining catalog.
+    _base("adx_14", "ADX(14)趋势强度", "趋势",
+          "Wilder平滑+SMA种子, 28根连续有效日K预热; 只表示趋势强度, 不表示涨跌方向", warmup_bars=28),
+    _base("adx_plus_di_14", "ADX +DI(14)", "趋势",
+          "正向动向/真实波幅的Wilder平滑比值*100, 15根连续有效日K预热", warmup_bars=15),
+    _base("adx_minus_di_14", "ADX -DI(14)", "趋势",
+          "负向动向/真实波幅的Wilder平滑比值*100, 15根连续有效日K预热", warmup_bars=15),
 )
 
 _REGISTRY: dict[str, FactorSpec] = {}

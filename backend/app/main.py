@@ -360,9 +360,20 @@ async def _application_lifespan(app: FastAPI):
         extension_registry,
     )
 
+    app.state.etf_shortterm_service = None
+    try:
+        from app.services.etf_shortterm_service import EtfShortTermService
+        service = EtfShortTermService(app.state)
+        service.start()
+        app.state.etf_shortterm_service = service
+    except Exception:
+        logger.exception("ETF短线服务启动失败，相关账户不能启用")
+
     try:
         yield
     finally:
+        if app.state.etf_shortterm_service:
+            app.state.etf_shortterm_service.stop()
         stop_backend_extensions(
             current_extension_context(data_dir=store.data_dir, repository=repo),
             extension_registry,

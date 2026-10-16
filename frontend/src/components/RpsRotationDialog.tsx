@@ -13,6 +13,7 @@ interface Props {
   onClose: () => void
   /** 维度: concept 概念(默认) / industry 行业 */
   kind?: 'concept' | 'industry'
+  flatIndustry?: boolean
 }
 
 const DEFAULT_DAYS = 12
@@ -47,7 +48,7 @@ function rankColorClass(rank: number, total: number): string {
   return 'text-accent'
 }
 
-export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
+export function RpsRotationDialog({ onClose, kind = 'concept', flatIndustry = false }: Props) {
   // 维度文案: concept→概念, industry→行业
   const dimLabel = kind === 'industry' ? '行业' : '概念'
   const [days, setDays] = useState(DEFAULT_DAYS)
@@ -69,7 +70,7 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
     setAnalysisError('')
     setAnalysisMeta(null)
     try {
-      const lv = kind === 'industry' ? level : undefined
+      const lv = kind === 'industry' && !flatIndustry ? level : undefined
       for await (const ev of api.rotationAnalyzeStream(daysParam, focusParam, kind, lv)) {
         if (ev.type === 'meta') setAnalysisMeta({ summary: ev.summary })
         else if (ev.type === 'delta') setAnalysis(a => a + (ev.content ?? ''))
@@ -81,10 +82,10 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
     } finally {
       setAnalyzing(false)
     }
-  }, [kind, level])
+  }, [kind, level, flatIndustry])
 
   // 数据请求: React Query 缓存, 同 (kind, level, days) 5 分钟内重开秒开
-  const lvParam = kind === 'industry' ? level : undefined
+  const lvParam = kind === 'industry' && !flatIndustry ? level : undefined
   const { data, isLoading, error } = useQuery({
     queryKey: [...QK.rpsRotation(days), kind, lvParam],
     queryFn: () => api.rpsRotation(days, kind, lvParam),
@@ -222,7 +223,7 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
                 {conceptCount > 0 ? `${dates.length} 天 · ${conceptCount} 个${dimLabel}` : '暂无数据'}
               </span>
               {/* 行业层级选择器: 1/2/3 级, 默认 2 级。仅 kind=industry 显示 */}
-              {kind === 'industry' && (
+              {kind === 'industry' && !flatIndustry && (
                 <div className="ml-1 flex items-center rounded-btn border border-border bg-base/60 p-0.5">
                   {[1, 2, 3].map(lv => (
                     <button
@@ -238,6 +239,7 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
                   ))}
                 </div>
               )}
+              {kind === 'industry' && flatIndustry && <span className="text-[10px] text-muted">归属列表 · 层级未确认</span>}
             </div>
             <button aria-label="关闭" onClick={onClose} className="p-1 rounded hover:bg-elevated transition-colors cursor-pointer">
               <X className="h-4 w-4 text-muted" />

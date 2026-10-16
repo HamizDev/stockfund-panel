@@ -78,9 +78,12 @@ function saveConfig(c: AnalysisFieldConfig) {
 
 // ===== 自动选取最佳数据源 =====
 
-function pickBestConfig(
+export function pickBestConfig(
   configs: { id: string; label: string; description?: string; fields: { name: string; label: string }[] }[],
 ): string {
+  // Explicit saved selections are handled by the caller; automatic selection
+  // prefers the managed industry table over free-form keyword matches.
+  if (configs.some(c => c.id === 'ext_hy_ths')) return 'ext_hy_ths'
   let best = '', bestScore = 0
   for (const c of configs) {
     const haystack = [c.id, c.label, c.description ?? '', ...c.fields.flatMap(f => [f.name, f.label])].join(' ').toLowerCase()
@@ -329,7 +332,8 @@ export function IndustryAnalysis() {
   )
 
   const industryLevel = fieldConfig.hierarchyLevel ?? 2
-  const groups = useMemo(() => groupByIndustryLevel(resolved.groups, industryLevel), [resolved.groups, industryLevel])
+  const flatFuyaoIndustry = activeConfigId === 'ext_hy_ths' && !!activeConfig?.pull?.url?.startsWith('https://fuyao.aicubes.cn/')
+  const groups = useMemo(() => flatFuyaoIndustry ? resolved.groups : groupByIndustryLevel(resolved.groups, industryLevel), [resolved.groups, industryLevel, flatFuyaoIndustry])
 
   const stats = useMemo(() => {
     return groups
@@ -413,7 +417,7 @@ export function IndustryAnalysis() {
     )
   }
 
-  const industryLevelLabel = `${industryLevel}级行业`
+  const industryLevelLabel = flatFuyaoIndustry ? '同花顺行业归属（层级未确认）' : `${industryLevel}级行业`
 
   return (
     <>
@@ -501,7 +505,7 @@ export function IndustryAnalysis() {
       </div>
 
       <AnimatePresence>
-        {showConfig && <AnalysisConfigDialog currentConfig={fieldConfig} onSave={handleSaveConfig} onClose={() => setShowConfig(false)} showHierarchyLevel />}
+        {showConfig && <AnalysisConfigDialog currentConfig={fieldConfig} onSave={handleSaveConfig} onClose={() => setShowConfig(false)} showHierarchyLevel={!flatFuyaoIndustry} />}
       </AnimatePresence>
 
       {previewSymbol && (
@@ -513,7 +517,7 @@ export function IndustryAnalysis() {
           onNavigate={(sym, n) => { setPreviewSymbol(sym); setPreviewName(n ?? '') }}
         />
       )}
-      {showRps && <RpsRotationDialog onClose={() => setShowRps(false)} kind="industry" />}
+      {showRps && <RpsRotationDialog onClose={() => setShowRps(false)} kind="industry" flatIndustry={flatFuyaoIndustry} />}
     </>
   )
 }

@@ -8,12 +8,22 @@
 // ===== Query Key 工厂 =====
 
 export const QK = {
+  marketMembershipStatus: ['market-membership-status'] as const,
   newsFeed: ['news-feed'] as const,
   newsAnalysis: (id: string) => ['news-analysis', id] as const,
   newsDirectionJob: (id: string) => ['news-direction-job', id] as const,
   cryptoMarketQuote: (symbol: string) => ['crypto-market-quote', 'bitget', 'usdm', symbol] as const,
   cryptoCandles: (symbol: string, interval: string) => ['crypto-candles', 'bitget', 'usdm', symbol, interval] as const,
   cryptoAccountDetail: (id: string) => ['crypto-strategy-account-detail', id] as const,
+  demoAccounts: ['crypto-demo', 'accounts'] as const,
+  demoTrading: (exchange: string) => ['crypto-demo', 'trading', exchange] as const,
+  demoBots: (exchange: string) => ['crypto-demo', 'bots', exchange] as const,
+  demoSnapshots: (exchange: string) => ['crypto-demo', 'snapshot', exchange] as const,
+  demoSnapshot: (exchange: string, site: string) => ['crypto-demo', 'snapshot', exchange, site] as const,
+  demoMarketQuote: (exchange: string, site: string, symbol: string) =>
+    ['crypto-demo', 'market-quote', exchange, site, symbol] as const,
+  demoCandles: (exchange: string, site: string, symbol: string, interval: string) =>
+    ['crypto-demo', 'candles', exchange, site, symbol, interval] as const,
   cryptoLegacyAccount: ['crypto-legacy-account'] as const,
   // 全局 / 共享 (Layout 预取)
   capabilities:   ['capabilities'] as const,
@@ -91,6 +101,7 @@ export const QK = {
                            ['kline', symbol, start, end, extColumns ?? ''] as const,
   klineLatest:          (symbol: string) => ['kline-latest', symbol] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
+  stockAnalysisDaily:   (symbol: string, days: number) => ['stock-analysis-daily', symbol, days] as const,
   klineMinute:          (symbol: string, date: string) =>
                              ['kline-minute', symbol, date] as const,
   klineMinuteRange:     (symbol: string, days: number) =>
@@ -119,6 +130,7 @@ export const QK = {
   // 模拟盘 (多账户: 键按账户隔离; paperAll 作账户无关失效前缀)
   paperAll:             ['paper'] as const,
   paperAccounts:        ['paper', 'accounts'] as const,
+  paperReplays:         ['paper', 'replays'] as const,
   paperOverview:        (acc: string) => ['paper', 'overview', acc] as const,
   paperOrders:          (acc: string) => ['paper', 'orders', acc] as const,
   paperTrades:          (acc: string) => ['paper', 'trades', acc] as const,

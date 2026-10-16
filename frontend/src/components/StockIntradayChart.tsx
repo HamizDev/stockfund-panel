@@ -126,6 +126,7 @@ export function StockIntradayChart({
       )}
       {minuteRows.length > 0 && (
         <EChartsIntraday
+          key={`${symbol}:${date}`}
           data={minuteRows}
           height={height}
           prevClose={minute.data?.prev_close ?? prevClose}

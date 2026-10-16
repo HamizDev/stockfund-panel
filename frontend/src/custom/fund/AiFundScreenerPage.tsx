@@ -10,6 +10,7 @@ import { FundCandidateCard } from './FundCandidateCard'
 import { FundResearchPanel, rememberFundResearch } from './FundResearchPanel'
 import { DEFAULT_CANDIDATE_PREVIEW_LIMIT, previewCandidates } from '../candidatePreview'
 import { fundRankingBasis, mergeFundRankingCandidates, rankFundCandidates } from './candidateRanking'
+import { usePageState } from '@/lib/usePageState'
 
 const FUND_TYPES: Array<{ value: AiFundType; label: string }> = [
   { value: 'all', label: '全部类型' },
@@ -30,6 +31,8 @@ const RESULT_STORAGE_KEY = 'stockfund.ai-fund-screener.result.v1'
 const MAX_SAVED_FUND_ANALYSES = 24
 const MAX_SAVED_FUND_ANALYSIS_CHARS = 30_000
 const FUND_RANKING_LOOKUP_LIMIT = 50
+const MAX_CANDIDATE_SEARCH_LENGTH = 120
+const MAX_VISIBLE_CANDIDATES = 1000
 
 function isAiFundType(value: string): value is AiFundType {
   return FUND_TYPES.some((option) => option.value === value)
@@ -55,9 +58,56 @@ type SavedResult = {
   resultFundType?: AiFundType
   resultShare?: string
   fundAnalyses?: Record<string, PersistedFundAnalysis>
+  candidateSearch?: string
+  detailTab?: DetailTab
+  visibleCandidateLimit?: number
 }
 
 type DetailTab = 'profile' | 'analysis' | 'compare'
+
+type AiFundViewState = {
+  candidateSearch: string
+  detailTab: DetailTab
+  visibleCandidateLimit: number
+}
+
+const DEFAULT_AI_FUND_VIEW: AiFundViewState = {
+  candidateSearch: '',
+  detailTab: 'compare',
+  visibleCandidateLimit: DEFAULT_CANDIDATE_PREVIEW_LIMIT,
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isDetailTab(value: unknown): value is DetailTab {
+  return value === 'profile' || value === 'analysis' || value === 'compare'
+}
+
+function isCandidateSearch(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= MAX_CANDIDATE_SEARCH_LENGTH
+}
+
+function isVisibleCandidateLimit(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) &&
+    value >= DEFAULT_CANDIDATE_PREVIEW_LIMIT && value <= MAX_VISIBLE_CANDIDATES
+}
+
+function isAiFundViewState(value: unknown): value is AiFundViewState {
+  return isRecord(value) && isCandidateSearch(value.candidateSearch) && isDetailTab(value.detailTab) &&
+    isVisibleCandidateLimit(value.visibleCandidateLimit)
+}
+
+function savedAiFundView(value: SavedResult): AiFundViewState {
+  return {
+    candidateSearch: isCandidateSearch(value.candidateSearch) ? value.candidateSearch : DEFAULT_AI_FUND_VIEW.candidateSearch,
+    detailTab: isDetailTab(value.detailTab) ? value.detailTab : DEFAULT_AI_FUND_VIEW.detailTab,
+    visibleCandidateLimit: isVisibleCandidateLimit(value.visibleCandidateLimit)
+      ? value.visibleCandidateLimit
+      : DEFAULT_AI_FUND_VIEW.visibleCandidateLimit,
+  }
+}
 
 type FundAiAnalysis = {
   status: 'idle' | 'loading' | 'done' | 'error' | 'cancelled'
@@ -93,10 +143,10 @@ function loadSavedResult(): SavedResult | null {
         (value.aiComparedCandidateCount !== undefined && (!Number.isInteger(value.aiComparedCandidateCount) || value.aiComparedCandidateCount < 0)) ||
         (value.unavailableTypes !== undefined && (!Array.isArray(value.unavailableTypes) ||
           !value.unavailableTypes.every((item) => typeof item === 'string' && isAiFundCategory(item)))) ||
-        (value.selectedCode !== null && typeof value.selectedCode !== 'string') ||
+        (value.selectedCode !== null && (typeof value.selectedCode !== 'string' || value.selectedCode.length > 32)) ||
         (value.retrievedAt !== null && typeof value.retrievedAt !== 'number')) return null
     const fundAnalyses = saveableFundAnalyses(value.fundAnalyses ?? {})
-    return { ...value, fundAnalyses }
+    return { ...value, ...savedAiFundView(value), fundAnalyses }
   } catch {
     return null
   }
@@ -169,6 +219,7 @@ function sameFundCode(candidateCode: string, eventCode: string): boolean {
 
 export function AiFundScreenerPage() {
   const [saved] = useState(loadSavedResult)
+  const [view, setView] = usePageState('aiFund', saved ? savedAiFundView(saved) : DEFAULT_AI_FUND_VIEW, isAiFundViewState)
   const [fundType, setFundType] = useState<AiFundType>(() =>
     saved && isAiFundType(saved.fundType) ? saved.fundType : 'all',
   )
@@ -180,7 +231,7 @@ export function AiFundScreenerPage() {
     (saved?.unavailableTypes ?? []).filter(isAiFundCategory),
   )
   const [selectedCode, setSelectedCode] = useState<string | null>(saved?.selectedCode ?? null)
-  const [candidateSearch, setCandidateSearch] = useState('')
+  const { candidateSearch, detailTab, visibleCandidateLimit } = view
   const [report, setReport] = useState(saved?.report ?? '')
   const [aiComparedCandidateCount, setAiComparedCandidateCount] = useState(saved?.aiComparedCandidateCount ?? saved?.candidates.length ?? 0)
   const [error, setError] = useState('')
@@ -191,9 +242,7 @@ export function AiFundScreenerPage() {
   )
   const [resultShare, setResultShare] = useState(saved?.resultShare ?? saved?.share ?? 'all')
   const [researchProgress, setResearchProgress] = useState<{ completed: number; total: number; code?: string } | null>(null)
-  const [detailTab, setDetailTab] = useState<DetailTab>('compare')
   const [fundAnalysisByCode, setFundAnalysisByCode] = useState<Record<string, FundAiAnalysis>>(() => saved?.fundAnalyses ?? {})
-  const [visibleCandidateLimit, setVisibleCandidateLimit] = useState(DEFAULT_CANDIDATE_PREVIEW_LIMIT)
   const [rankingGeneration, setRankingGeneration] = useState(0)
   const controllerRef = useRef<AbortController | null>(null)
   const analysisControllerRef = useRef<{ code: string; controller: AbortController } | null>(null)
@@ -259,13 +308,14 @@ export function AiFundScreenerPage() {
     const result: SavedResult = {
       fundType, horizon, share, unavailableTypes, candidates, selectedCode, report, aiComparedCandidateCount, retrievedAt,
       resultHorizon, resultFundType, resultShare, fundAnalyses: saveableFundAnalyses(fundAnalysisByCode),
+      candidateSearch, detailTab, visibleCandidateLimit,
     }
     try {
       window.sessionStorage.setItem(RESULT_STORAGE_KEY, JSON.stringify(result))
     } catch {
       // Storage may be disabled; the page remains usable without persistence.
     }
-  }, [phase, fundType, horizon, share, unavailableTypes, candidates, selectedCode, report, aiComparedCandidateCount, retrievedAt, resultHorizon, resultFundType, resultShare, fundAnalysisByCode])
+  }, [phase, fundType, horizon, share, unavailableTypes, candidates, selectedCode, report, aiComparedCandidateCount, retrievedAt, resultHorizon, resultFundType, resultShare, fundAnalysisByCode, candidateSearch, detailTab, visibleCandidateLimit])
   const selected = useMemo(
     () => candidates.find((candidate) => candidate.code === selectedCode) ?? candidates[0] ?? null,
     [candidates, selectedCode],
@@ -409,12 +459,12 @@ export function AiFundScreenerPage() {
 
   function openCandidateAnalysis(code: string) {
     selectCandidate(code)
-    setDetailTab('analysis')
+    setView(current => ({ ...current, detailTab: 'analysis' }))
   }
 
   function startCandidateAnalysis(code: string) {
     selectCandidate(code)
-    setDetailTab('analysis')
+    setView(current => ({ ...current, detailTab: 'analysis' }))
     void generateSelectedAnalysis(code)
   }
 
@@ -449,9 +499,11 @@ export function AiFundScreenerPage() {
       setResultHorizon(previousResult.resultHorizon)
       setResultFundType(previousResult.resultFundType)
       setResultShare(previousResult.resultShare)
-      setCandidateSearch(previousResult.candidateSearch)
-      setVisibleCandidateLimit(previousResult.visibleCandidateLimit)
-      setDetailTab(previousResult.detailTab)
+      setView(current => ({ ...current,
+        candidateSearch: previousResult.candidateSearch,
+        visibleCandidateLimit: previousResult.visibleCandidateLimit,
+        detailTab: previousResult.detailTab,
+      }))
       setPhase('done')
     }
     controllerRef.current?.abort()
@@ -466,13 +518,15 @@ export function AiFundScreenerPage() {
       })
     }
     analysisControllerRef.current = null
-    setDetailTab('compare')
+    setView(current => ({ ...current, detailTab: 'compare' }))
     const controller = new AbortController()
     controllerRef.current = controller
     setCandidates([])
     setRankingGeneration((current) => current + 1)
-    setCandidateSearch('')
-    setVisibleCandidateLimit(DEFAULT_CANDIDATE_PREVIEW_LIMIT)
+    setView(current => ({ ...current,
+      candidateSearch: '',
+      visibleCandidateLimit: DEFAULT_CANDIDATE_PREVIEW_LIMIT,
+    }))
     setUnavailableTypes([])
     setSelectedCode(null)
     setReport('')
@@ -574,7 +628,7 @@ export function AiFundScreenerPage() {
         <section ref={candidateListRef} className="min-w-0 rounded-xl border border-border bg-surface">
           <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
             <div className="text-sm font-semibold">历史榜单候选 <span className="text-xs font-normal text-muted">显示 {visibleCandidates.length} / 匹配 {matchingCandidates.length} · 已加载 {candidates.length} 只</span></div>
-            <label className="ml-auto flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-secondary"><Search className="h-3.5 w-3.5" /><input aria-label="搜索基金候选" value={candidateSearch} onChange={event => setCandidateSearch(event.target.value)} placeholder="代码 / 名称 / 类型" className="w-28 bg-transparent text-foreground outline-none placeholder:text-muted md:w-40" /></label>
+            <label className="ml-auto flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-secondary"><Search className="h-3.5 w-3.5" /><input aria-label="搜索基金候选" value={candidateSearch} onChange={event => setView(current => ({ ...current, candidateSearch: event.target.value.slice(0, MAX_CANDIDATE_SEARCH_LENGTH) }))} placeholder="代码 / 名称 / 类型" className="w-28 bg-transparent text-foreground outline-none placeholder:text-muted md:w-40" /></label>
             <div className="flex items-center gap-1 text-[11px] text-muted"><Database className="h-3.5 w-3.5" />东方财富公开基金排名</div>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 px-4 py-2 text-[11px] text-muted">
@@ -609,11 +663,11 @@ export function AiFundScreenerPage() {
           {extraRankingQuery.isError && <div role="alert" className="border-t border-border px-4 py-2 text-center text-xs text-warning">额外公开榜单暂不可用；仍可查看和搜索已加载的候选。</div>}
           {extraRankingQuery.isFetching && <div role="status" className="border-t border-border px-4 py-2 text-center text-xs text-muted">正在读取公开排名，以查找前 10 名以外的候选…</div>}
           {!searchActive && <div className="flex flex-wrap justify-center gap-2 border-t border-border px-4 py-2">
-            {visibleCandidateLimit < matchingCandidates.length && <button type="button" onClick={() => setVisibleCandidateLimit(value => Math.min(value + DEFAULT_CANDIDATE_PREVIEW_LIMIT, matchingCandidates.length))} className="min-h-9 rounded-md px-3 text-xs text-accent hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+            {visibleCandidateLimit < matchingCandidates.length && <button type="button" onClick={() => setView(current => ({ ...current, visibleCandidateLimit: Math.min(current.visibleCandidateLimit + DEFAULT_CANDIDATE_PREVIEW_LIMIT, MAX_VISIBLE_CANDIDATES, matchingCandidates.length) }))} className="min-h-9 rounded-md px-3 text-xs text-accent hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
               再显示 10 只（当前 {visibleCandidates.length}/{matchingCandidates.length}）
             </button>}
-            {visibleCandidateLimit > DEFAULT_CANDIDATE_PREVIEW_LIMIT && <button type="button" onClick={() => setVisibleCandidateLimit(DEFAULT_CANDIDATE_PREVIEW_LIMIT)} className="min-h-9 rounded-md px-3 text-xs text-secondary hover:bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">收起至前 10 只</button>}
-            {visibleCandidateLimit >= matchingCandidates.length && candidates.length <= DEFAULT_CANDIDATE_PREVIEW_LIMIT && !extraRankingQuery.isFetching && (!extraRankingQuery.isSuccess || hasAdditionalRankingCandidates) && <button type="button" onClick={() => extraRankingQuery.isError ? void extraRankingQuery.refetch() : setVisibleCandidateLimit(DEFAULT_CANDIDATE_PREVIEW_LIMIT + 1)} className="min-h-9 rounded-md px-3 text-xs text-accent hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+            {visibleCandidateLimit > DEFAULT_CANDIDATE_PREVIEW_LIMIT && <button type="button" onClick={() => setView(current => ({ ...current, visibleCandidateLimit: DEFAULT_CANDIDATE_PREVIEW_LIMIT }))} className="min-h-9 rounded-md px-3 text-xs text-secondary hover:bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">收起至前 10 只</button>}
+            {visibleCandidateLimit >= matchingCandidates.length && candidates.length <= DEFAULT_CANDIDATE_PREVIEW_LIMIT && !extraRankingQuery.isFetching && (!extraRankingQuery.isSuccess || hasAdditionalRankingCandidates) && <button type="button" onClick={() => extraRankingQuery.isError ? void extraRankingQuery.refetch() : setView(current => ({ ...current, visibleCandidateLimit: DEFAULT_CANDIDATE_PREVIEW_LIMIT + 1 }))} className="min-h-9 rounded-md px-3 text-xs text-accent hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
               {extraRankingQuery.isError ? '重试加载榜单' : extraRankingQuery.data ? '显示更多公开榜单候选' : '加载更多公开榜单候选'}
             </button>}
           </div>}
@@ -651,7 +705,7 @@ export function AiFundScreenerPage() {
                 role="tab"
                 aria-selected={detailTab === tab.value}
                 aria-controls="fund-detail-panel"
-                onClick={() => setDetailTab(tab.value)}
+                onClick={() => setView(current => ({ ...current, detailTab: tab.value }))}
                 tabIndex={detailTab === tab.value ? 0 : -1}
                 onKeyDown={(event) => {
                   if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return
@@ -659,7 +713,7 @@ export function AiFundScreenerPage() {
                   const currentIndex = DETAIL_TABS.findIndex((item) => item.value === tab.value)
                   const offset = event.key === 'ArrowRight' ? 1 : -1
                   const next = DETAIL_TABS[(currentIndex + offset + DETAIL_TABS.length) % DETAIL_TABS.length]
-                  setDetailTab(next.value)
+                  setView(current => ({ ...current, detailTab: next.value }))
                   document.getElementById(`fund-detail-tab-${next.value}`)?.focus()
                 }}
                 className={`min-h-11 rounded-md px-1.5 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${detailTab === tab.value ? 'bg-elevated text-foreground shadow-sm' : 'text-muted hover:text-secondary'}`}

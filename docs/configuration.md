@@ -33,8 +33,6 @@ TickFlow 是内置默认数据源;同时支持插件化接入第三方数据源(
 
 ### 全量分钟 (full_minute)
 
-免费逐标的分钟接口不等于全市场分钟数据；来源范围、历史窗口和校验要求见 [免费分钟数据说明](./free-minute-data.md)。
-
 「全量分钟」是一项**独立能力**(能力键 `full_minute`,探测名 `intraday.universe`),与其他能力同样**可路由**:盘中把全市场当日 1 分钟 K 持续增量落盘到本地 `data/kline_minute/` 当日分区,分钟策略(`minute_filter`)与分时视图即可读到新鲜数据。接入方式二选一:
 
 - **TickFlow Expert**:配置 Expert 档 Key,零配置即用(修复轮 `intraday.batch` + 稳态 `intraday.universe` 单请求增量)
@@ -78,14 +76,12 @@ AI_DAILY_TOKEN_BUDGET=500000           # 每日 token 预算上限
 ## 服务
 
 ```ini
-HOST=127.0.0.1       # 本机开发服务监听地址
-BIND_HOST=127.0.0.1  # Docker 在宿主机发布端口的地址
-PORT=3018            # 开发后端端口 / Docker 主机映射端口
+HOST=0.0.0.0          # 开发服务监听地址 / Docker 主机绑定地址
+PORT=3018             # 开发后端端口 / Docker 主机映射端口
 LOG_LEVEL=INFO        # DEBUG | INFO | WARNING | ERROR
 ```
 
-- `HOST`: 本地开发服务的监听地址；Docker 内部由 Compose 覆盖为 `0.0.0.0`
-- `BIND_HOST`: Docker 发布到宿主机的地址，默认 `127.0.0.1`；对外开放前先配置密码和网络保护
+- `HOST`:`0.0.0.0` 监听所有网卡(容器/公网部署需要);仅本机用可设 `127.0.0.1`
 - `PORT`:默认 `3018`;开发模式兼容显式的 `BACKEND_PORT` 覆盖,改端口后 SSH 转发命令也要同步改
 - `LOG_LEVEL`:排查问题时改 `DEBUG`
 
@@ -112,7 +108,7 @@ AUTH_PASSWORD='你的密码'  # 至少 6 位;仅首次生效,已设过则不覆�
 面板首次设置访问密码时,出于安全考虑**仅允许本机或内网访问**(防公网陌生人抢先设置锁死面板)。公网服务器部署可通过此环境变量预置首个密码。
 密码建议使用单引号包裹，Docker 启动时会把整个原始 `.env` 只读挂载到容器内 `/app/.env`，兼容已有的未加引号配置。容器可以读取其中的密钥但不能修改该文件，请保持主机文件权限为 `600` 并仅运行可信镜像。
 
-公开访问前的配置见 [deployment.md → 访问密码设置](./deployment.md#访问密码设置公网部署必读)；SSH 转发和重置方法见 [deploy-password.md](./deploy-password.md)。
+详细步骤、SSH 转发方案、重置密码方法见 [deployment.md → 访问密码设置](./deployment.md#访问密码设置公网部署必读)。
 
 ---
 

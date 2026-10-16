@@ -21,6 +21,14 @@ import { ResearchFlow } from '@/components/research/ResearchFlow'
 import { ResearchAIButton } from '@/components/research/ResearchAIButton'
 import { paperResearchPrompt } from '@/components/research/researchContext'
 import { StrategyPaperTable } from '@/components/research/StrategyPaperTable'
+import { EtfShortTermSetup } from '@/components/research/EtfShortTermSetup'
+import { EtfPaperSetup } from '@/components/research/EtfPaperSetup'
+import { PaperReplayPanel, PaperViewSwitch } from '@/components/research/PaperReplayPanel'
+import { PaperNavChart as NavChart } from '@/components/research/PaperNavChart'
+import { PaperInstrumentLabel } from '@/components/research/PaperInstrumentLabel'
+import { verifiedPaperPerformance } from '@/lib/paperNavChartData'
+import { usePaperInstrumentNames } from '@/lib/usePaperInstrumentNames'
+import { PaperSignalDiagnostics } from '@/components/research/PaperSignalDiagnostics'
 
 const ACC_STORAGE_KEY = 'paper.account'
 const PAPER_HEADER_CLASS_NAME = [
@@ -51,95 +59,6 @@ function fmtMoney(v: number | null | undefined, digits = 2) {
 /** 账户 id: 字母数字开头短横线/下划线, 与后端校验一致 */
 function genAccountId() {
   return `acc_${Date.now().toString(36)}${Math.floor(Math.random() * 36).toString(36)}`
-}
-
-/** 归一化到首日=100 (基准对比); 空洞(缺行情日)保留 null 不连线 */
-function normalizeBase(values: Array<number | null | undefined>): Array<number | null> {
-  const first = values.find((v): v is number => v != null && v > 0)
-  if (!first) return values.map(() => null)
-  return values.map(v => (v != null && v > 0 ? Number(((v / first) * 100).toFixed(2)) : null))
-}
-
-/** 净值曲线 (echarts line, 跟随主题色): 账户归一化 vs 沪深300 归一化 (首日=100) */
-function NavChart({ nav }: { nav: Array<{ date: string; nav: number; benchmark_close?: number }> }) {
-  const elRef = useRef<HTMLDivElement>(null)
-  const chartRef = useRef<echarts.ECharts | null>(null)
-
-  useEffect(() => {
-    if (!elRef.current) return
-    chartRef.current = echarts.init(elRef.current, undefined, { renderer: 'canvas' })
-    const onResize = () => chartRef.current?.resize()
-    window.addEventListener('resize', onResize)
-    // 跟随亮暗主题切换重设坐标轴配色
-    const observer = new MutationObserver(() => {
-      const darkNow = document.documentElement.classList.contains('dark')
-      const axisColor = darkNow ? '#8E8E96' : '#52525B'
-      const splitColor = darkNow ? '#353539' : '#E4E4E7'
-      chartRef.current?.setOption({
-        xAxis: { axisLine: { lineStyle: { color: splitColor } }, axisLabel: { color: axisColor } },
-        yAxis: { axisLabel: { color: axisColor }, splitLine: { lineStyle: { color: splitColor } } },
-      })
-    })
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
-    return () => {
-      window.removeEventListener('resize', onResize)
-      observer.disconnect()
-      chartRef.current?.dispose()
-      chartRef.current = null
-    }
-  }, [])
-
-  useEffect(() => {
-    const chart = chartRef.current
-    if (!chart) return
-    const dark = document.documentElement.classList.contains('dark')
-    const axisColor = dark ? '#8E8E96' : '#52525B'
-    const splitColor = dark ? '#353539' : '#E4E4E7'
-    chart.setOption({
-      grid: { left: 56, right: 16, top: 16, bottom: 28 },
-      tooltip: {
-        trigger: 'axis',
-        valueFormatter: (v: number) => fmtMoney(v),
-      },
-      xAxis: {
-        type: 'category',
-        data: nav.map(n => n.date),
-        axisLine: { lineStyle: { color: splitColor } },
-        axisLabel: { color: axisColor, fontSize: 10 },
-      },
-      yAxis: {
-        type: 'value',
-        scale: true,
-        axisLabel: { color: axisColor, fontSize: 10, formatter: (v: number) => fmtMoney(v, 0) },
-        splitLine: { lineStyle: { color: splitColor } },
-      },
-      series: [
-        {
-          name: '虚拟账户',
-          type: 'line',
-          data: normalizeBase(nav.map(n => n.nav)),
-          showSymbol: false,
-          lineStyle: { color: '#8B5CF6', width: 2 },
-          areaStyle: { color: 'rgba(139, 92, 246, 0.08)' },
-        },
-        ...(nav.some(n => n.benchmark_close) ? [{
-          name: '沪深300',
-          type: 'line' as const,
-          data: normalizeBase(nav.map(n => n.benchmark_close)),
-          showSymbol: false,
-          lineStyle: { color: dark ? '#8E8E96' : '#52525B', width: 1.5, type: 'dashed' as const },
-        }] : []),
-      ],
-      legend: {
-        top: 0,
-        right: 0,
-        textStyle: { color: axisColor, fontSize: 10 },
-        itemWidth: 14,
-      },
-    })
-  }, [nav])
-
-  return <div ref={elRef} className="h-48 w-full" />
 }
 
 function StatCard({ label, value, sub, valueClass, icon: Icon, iconCls }: {
@@ -214,7 +133,7 @@ function SetupCard({ accId, onDone, onCancel }: { accId: string; onDone: (create
         <h2 className="text-[16px] leading-6 font-semibold">创建虚拟账户</h2>
       </div>
       <p className="mt-2 text-xs leading-relaxed text-muted">
-        虚拟资金 + 真实行情价格模拟撮合, 不涉及任何真实资金。费用口径与回测一致,
+        虚拟资金 + 真实行情价格模拟撮合, 不涉及任何真实资金。模拟成交含最低 5 元佣金，历史回测费用需另行核对；
         创建后仍可在「费用」里调整; 本次取值会记住, 作为下次新建的默认。
       </p>
       <label className="mt-4 block text-xs text-secondary">账户名称 (可选)</label>
@@ -849,6 +768,14 @@ function AccountCompareModal({ onClose }: { onClose: () => void }) {
   )
 }
 
+export function LazyPaperSetup({ title, children, className }: { title: string; children: ReactNode; className: string }) {
+  const [open, setOpen] = useState(false)
+  return <details className={className} onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary className="cursor-pointer text-xs text-secondary">{title}</summary>
+    {open && <div className="mt-3">{children}</div>}
+  </details>
+}
+
 function StrategyAccountsPanel({ onSelect, selectedAccount }: { onSelect: (accountId: string) => void; selectedAccount: string }) {
   const qc = useQueryClient()
   const [researchParams] = useSearchParams()
@@ -901,17 +828,29 @@ function StrategyAccountsPanel({ onSelect, selectedAccount }: { onSelect: (accou
   })
   const autoM = useMutation({
     mutationFn: ({ account, enabled }: { account: string; enabled: boolean }) => api.paperSetStrategyAccountEnabled(account, enabled),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: QK.paperCompare }); setError('') },
+    onSuccess: (_result, { account }) => {
+      qc.invalidateQueries({ queryKey: QK.paperCompare })
+      qc.invalidateQueries({ queryKey: QK.paperAutoRules(account) })
+      setError('')
+    },
     onError: cause => setError(cause instanceof Error ? cause.message : '切换自动跟单失败'),
   })
   const valid = options.some(strategy => strategy.id === strategyId) && Number.isFinite(Number(cash)) && Number(cash) > 0 && Number.isFinite(Number(entryPct)) && Number(entryPct) > 0 && Number(entryPct) <= 100
 
   return <section className="mb-4 min-w-0 max-w-full rounded-card border border-border bg-surface p-4">
-    <div className="mb-3"><ResearchFlow active="paper" strategyId={flowStrategy} assetType={flowAsset} /></div>
     <div className="flex flex-wrap items-center justify-between gap-2">
       <div><h2 className="text-sm font-semibold">策略模拟仓</h2><p className="mt-1 text-[11px] text-muted">每个策略使用独立虚拟账户；收益、胜率和净值仅按该账户实际成交计算。</p></div>
       <div className="flex flex-wrap gap-2"><ResearchAIButton label="AI 解读全部策略仓" disabled={!rows.length || compareQ.isError} prompt={paperResearchPrompt(rows)} /><button onClick={() => setCreating(value => !value)} className="inline-flex items-center gap-1 rounded-btn border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs text-accent"><Plus className="h-3.5 w-3.5" />新建策略仓</button></div>
     </div>
+    {error && <div role="alert" className="mt-2 text-xs text-danger">{error}</div>}
+    {compareQ.isError && <div role="alert" className="mt-2 text-xs text-danger">策略账本读取失败，请稍后重试。</div>}
+    {compareQ.isLoading ? <div className="py-5 text-center text-xs text-muted">正在读取策略账本…</div> : rows.length === 0 && !compareQ.isError ? <div className="py-5 text-center text-xs text-muted">暂无策略模拟仓。先选择策略、历史回测，再创建暂停账户；现有手动账户仍可在上方切换。</div> : <StrategyPaperTable rows={rows} strategies={strategiesQ.data?.presets ?? []} selectedAccount={selectedAccount} onSelect={onSelect} onToggle={(account, enabled) => autoM.mutate({ account, enabled })} togglePending={autoM.isPending} />}
+
+    <div className="mt-3">{selectedRow?.shortterm && !creating ? <div className="rounded-card border border-border bg-base/40 p-3 text-xs leading-6 text-secondary" aria-label="短线策略验证">
+      <h3 className="font-medium text-foreground">短线策略验证 · 从新成交开始观察</h3>
+      <p>使用下方两套固定规则；尚未提供这两套规则的分钟历史回测。启用后比较费后做T价差、账户净值和底仓回撤，统计只来自实际模拟成交。</p>
+    </div> : <ResearchFlow active="paper" strategyId={flowStrategy} assetType={flowAsset} />}</div>
+    {selectedRow?.shortterm && !creating && <div className="mt-3"><PaperSignalDiagnostics key={selectedRow.account} row={selectedRow} /></div>}
     {creating && <div className="mt-3 grid gap-2 rounded-btn border border-border bg-base/40 p-3 lg:grid-cols-[90px_minmax(0,1fr)_120px_110px_auto]">
       <label className="space-y-1 text-[11px] text-muted">市场<select aria-label="策略仓市场" value={assetType} onChange={event => { setAssetType(event.target.value as 'stock' | 'etf'); setStrategyId('') }} className="h-9 w-full rounded-btn border border-border bg-base px-2 text-xs text-foreground"><option value="stock">股票</option><option value="etf">ETF</option></select></label>
       <label className="space-y-1 text-[11px] text-muted">策略<select aria-label="模拟仓策略" value={strategyId} onChange={event => setStrategyId(event.target.value)} className="h-9 w-full rounded-btn border border-border bg-base px-2 text-xs text-foreground"><option value="">选择策略</option>{options.map(strategy => <option key={strategy.id} value={strategy.id}>{strategy.name} · {strategy.id}</option>)}</select></label>
@@ -921,10 +860,13 @@ function StrategyAccountsPanel({ onSelect, selectedAccount }: { onSelect: (accou
       <p className="text-[11px] leading-5 text-muted lg:col-span-5">仅支持已保存的日线股票/ETF策略。每个策略在每个市场独立记账；重复创建会返回已有账户，保留其资金与启用状态。回测临时参数和费用不会自动复制。</p>
       {strategyId && !options.some(strategy => strategy.id === strategyId) && !strategiesQ.isLoading && <p role="alert" className="text-[11px] text-warning lg:col-span-5">带入的策略不在所选市场的可模拟日线策略中，请重新选择。</p>}
     </div>}
-    {error && <div role="alert" className="mt-2 text-xs text-danger">{error}</div>}
-    {compareQ.isError && <div role="alert" className="mt-2 text-xs text-danger">策略账本读取失败，请稍后重试。</div>}
-    <p className="mt-2 text-[11px] leading-5 text-muted">买入信号按下一交易日开盘模拟下单；卖出信号仅对已有持仓下单。暂停只阻止新信号下单，已有待成交订单仍按原规则处理。策略监控、行情和撮合均需正常运行。</p>
-    {compareQ.isLoading ? <div className="py-5 text-center text-xs text-muted">正在读取策略账本…</div> : rows.length === 0 && !compareQ.isError ? <div className="py-5 text-center text-xs text-muted">暂无策略模拟仓。先选择策略、历史回测，再创建暂停账户；现有手动账户仍可在上方切换。</div> : <StrategyPaperTable rows={rows} strategies={strategiesQ.data?.presets ?? []} onSelect={onSelect} onToggle={(account, enabled) => autoM.mutate({ account, enabled })} togglePending={autoM.isPending} />}
+    <p className="mt-2 text-[11px] leading-5 text-muted">日线账户按下一交易日开盘模拟；专属短线账户按后续更新的来源行情快照加滑点估算，未模拟盘口排队与部分成交。暂停只阻止新信号，已有单可在有效期内成交；行情、规则和撮合均需正常运行。</p>
+    <LazyPaperSetup title="ETF 短线新建方案" className="mt-3 rounded-card border border-border p-3">
+      <EtfShortTermSetup onSelect={onSelect} />
+    </LazyPaperSetup>
+    <LazyPaperSetup title="日线趋势模拟 · 原有宽基/行业账户方案" className="mt-2 rounded-card border border-border p-3">
+      <EtfPaperSetup onSelect={onSelect} />
+    </LazyPaperSetup>
   </section>
 }
 
@@ -1146,6 +1088,15 @@ function AutoRuleForm({ acc, onDone, onCancel }: { acc: string; onDone: () => vo
 
 export function Paper() {
   const qc = useQueryClient()
+  const [viewParams, setViewParams] = useSearchParams()
+  const showReplay = viewParams.get('view') === 'replay'
+  const setView = (view: 'live' | 'replay') => {
+    const next = new URLSearchParams(viewParams)
+    if (view === 'replay') next.set('view', 'replay')
+    else next.delete('view')
+    setViewParams(next)
+  }
+  const viewSwitch = <PaperViewSwitch active={showReplay ? 'replay' : 'live'} onChange={setView} />
   const [tab, setTab] = useState<'orders' | 'trades'>('orders')
   const [accId, setAccIdState] = useState(() => localStorage.getItem(ACC_STORAGE_KEY) || 'default')
   // 新建账户草稿 id: 非空 = 正在创建。点「+」只进入草稿态, 不动 accId / localStorage,
@@ -1153,17 +1104,45 @@ export function Paper() {
   const [draftId, setDraftId] = useState<string | null>(null)
   const [feeOpen, setFeeOpen] = useState(false)
   const [compareOpen, setCompareOpen] = useState(false)
+  const accountContentRef = useRef<HTMLElement>(null)
+  const [accountViewRequest, setAccountViewRequest] = useState(0)
   const setAccId = (id: string) => {
     localStorage.setItem(ACC_STORAGE_KEY, id)
     setAccIdState(id)
   }
+  const viewAccount = (id: string) => {
+    setDraftId(null)
+    setAccId(id)
+    setAccountViewRequest(request => request + 1)
+  }
 
-  const accountsQ = useQuery({ queryKey: QK.paperAccounts, queryFn: api.paperAccounts })
-  const overviewQ = useQuery({ queryKey: QK.paperOverview(accId), queryFn: () => api.paperOverview(accId) })
-  const ordersQ = useQuery({ queryKey: QK.paperOrders(accId), queryFn: () => api.paperOrders(undefined, accId) })
-  const tradesQ = useQuery({ queryKey: QK.paperTrades(accId), queryFn: () => api.paperTrades(accId) })
-  const navQ = useQuery({ queryKey: QK.paperNav(accId), queryFn: () => api.paperNav(accId) })
-  const statsQ = useQuery({ queryKey: QK.paperStats(accId), queryFn: () => api.paperStats(accId) })
+  const accountsQ = useQuery({ queryKey: QK.paperAccounts, queryFn: api.paperAccounts, enabled: !showReplay })
+  const overviewQ = useQuery({ queryKey: QK.paperOverview(accId), queryFn: () => api.paperOverview(accId),
+    enabled: !showReplay,
+    refetchInterval: query => query.state.data?.etf_shortterm ? 5000 : false })
+  const ordersQ = useQuery({ queryKey: QK.paperOrders(accId), queryFn: () => api.paperOrders(undefined, accId),
+    enabled: !showReplay,
+    refetchInterval: overviewQ.data?.etf_shortterm ? 5000 : false })
+  const tradesQ = useQuery({ queryKey: QK.paperTrades(accId), queryFn: () => api.paperTrades(accId),
+    enabled: !showReplay,
+    refetchInterval: overviewQ.data?.etf_shortterm ? 5000 : false })
+  const navQ = useQuery({ queryKey: QK.paperNav(accId), queryFn: () => api.paperNav(accId), enabled: !showReplay })
+  const statsQ = useQuery({ queryKey: QK.paperStats(accId), queryFn: () => api.paperStats(accId), enabled: !showReplay })
+  const namesQ = usePaperInstrumentNames(showReplay ? [] : [
+    ...(overviewQ.data?.holdings ?? []).map(holding => holding.symbol),
+    ...(ordersQ.data?.orders ?? []).map(order => order.symbol),
+    ...(tradesQ.data?.fills ?? []).map(fill => fill.symbol),
+  ])
+
+  useEffect(() => {
+    if (!accountViewRequest || showReplay || overviewQ.isLoading || !overviewQ.data?.initialized || draftId !== null) return
+    const content = accountContentRef.current
+    if (!content) return
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    content.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' })
+    content.focus({ preventScroll: true })
+    setAccountViewRequest(0)
+  }, [accountViewRequest, accId, showReplay, overviewQ.isLoading, overviewQ.data?.initialized, draftId])
 
   // 'paper' 前缀兜底失效: 覆盖全部账户的全部查询 (订单变动可能影响净值/统计)
   const invalidateAll = () => qc.invalidateQueries({ queryKey: QK.paperAll })
@@ -1176,6 +1155,13 @@ export function Paper() {
     mutationFn: (on: boolean) => api.paperSettings({ queue_limit_orders: on }, accId),
     onSuccess: invalidateAll,
   })
+
+  if (showReplay) {
+    return <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <PageHeader title="模拟盘" subtitle="历史重放 · 分钟级近似研究记录" className={PAPER_HEADER_CLASS_NAME} right={viewSwitch} />
+      <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-3 md:p-5"><PaperReplayPanel /></div>
+    </div>
+  }
 
   if (overviewQ.isLoading) {
     return <div className="p-5 text-sm text-muted">加载中…</div>
@@ -1197,8 +1183,10 @@ export function Paper() {
           title="模拟盘"
           subtitle="虚拟账户 · 用假钱验证你的策略"
           className={PAPER_HEADER_CLASS_NAME}
-          right={cancellable ? (
+          right={(
             <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
+              {viewSwitch}
+              {cancellable && <>
               <select
                 value={selectedId}
                 onChange={e => { setDraftId(null); setAccId(e.target.value) }}
@@ -1216,11 +1204,12 @@ export function Paper() {
               >
                 取消创建
               </button>
+              </>}
             </div>
-          ) : undefined}
+          )}
         />
         <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
-          <div className="min-w-0 max-w-full space-y-3 px-3 pt-4 md:px-5"><StrategyAccountsPanel selectedAccount={selectedId} onSelect={createdId => { setDraftId(null); setAccId(createdId) }} /></div>
+          <div className="min-w-0 max-w-full space-y-3 px-3 pt-4 md:px-5"><StrategyAccountsPanel selectedAccount={selectedId} onSelect={viewAccount} /></div>
           <SetupCard
             accId={draftId ?? accId}
             onDone={createdId => {
@@ -1236,7 +1225,9 @@ export function Paper() {
   }
 
   const holdings = ov.holdings ?? []
-  const orders = (ordersQ.data?.orders ?? []).filter(o => o.status === 'pending' || o.status === 'expired' || o.status === 'cancelled').slice(0, 20)
+  const valuationReady = ov.valuation_complete !== false
+  const orders = [...(ordersQ.data?.orders ?? [])]
+    .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id)).slice(0, 20)
   const trades: PaperFill[] = (tradesQ.data?.fills ?? []).slice(0, 30)
   const allFills: PaperFill[] = tradesQ.data?.fills ?? []
   const nav = navQ.data?.nav ?? []
@@ -1286,6 +1277,7 @@ export function Paper() {
         }
         right={
           <div className="flex min-w-0 max-w-full flex-wrap items-center justify-start gap-2 md:justify-end">
+            {viewSwitch}
             <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
               <select
                 value={accId}
@@ -1307,8 +1299,9 @@ export function Paper() {
             </div>
             <button
               onClick={() => setFeeOpen(true)}
+              disabled={Boolean(ov.etf_shortterm)}
               className="flex max-w-full flex-wrap items-center gap-1 whitespace-normal rounded-btn border border-border px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-accent/40 hover:text-accent"
-              title={`佣金 ${((ov.fees?.commission_pct ?? 0) * 10000).toFixed(1)}‱ (最低5元) · 印花税 ${((ov.fees?.stamp_tax_pct ?? 0) * 1000).toFixed(1)}‰ 仅卖出 · 滑点 ${ov.fees?.slippage_bps ?? 0}bps — 点击调整`}
+              title={`佣金 ${((ov.fees?.commission_pct ?? 0) * 10000).toFixed(1)}‱ (最低5元) · 印花税 ${((ov.fees?.stamp_tax_pct ?? 0) * 1000).toFixed(1)}‰ 仅卖出 · 滑点 ${ov.fees?.slippage_bps ?? 0}bps — ${ov.etf_shortterm ? '专属短线账户采用固定费率' : '点击调整'}`}
             >
               <Settings className="h-3 w-3" />
               佣金 {((ov.fees?.commission_pct ?? 0) * 10000).toFixed(1)}‱ · 印花税 {((ov.fees?.stamp_tax_pct ?? 0) * 1000).toFixed(1)}‰ · 滑点 {ov.fees?.slippage_bps ?? 0}bps
@@ -1331,15 +1324,22 @@ export function Paper() {
         }
       />
       <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-3 md:p-5">
-        <StrategyAccountsPanel selectedAccount={accId} onSelect={setAccId} />
+        <StrategyAccountsPanel selectedAccount={accId} onSelect={viewAccount} />
+        <section ref={accountContentRef} tabIndex={-1} aria-label="当前虚拟账户详情" className="scroll-mt-3 focus:outline-none">
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-card border border-accent/30 bg-accent/10 py-3 pl-14 pr-4 md:px-4">
+          <span className="rounded bg-accent px-2 py-1 text-xs font-medium text-white">当前查看</span>
+          <h2 className="text-sm font-semibold text-foreground">{ov.account_name || accounts.find(account => account.id === accId)?.name || accId}</h2>
+          <span className="text-xs text-secondary">初始本金 ¥{fmtMoney(ov.initial_cash)}</span>
+        </div>
+        {ov.valuation_note && <p className="mb-2 text-[11px] text-muted">{ov.valuation_note}</p>}
         {/* 总览卡片 */}
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <StatCard label="总资产 (虚拟)" value={fmtMoney(ov.total)} icon={Wallet} iconCls="text-accent" />
+          <StatCard label="总资产 (虚拟)" value={valuationReady ? fmtMoney(ov.total) : '行情待核对'} icon={Wallet} iconCls="text-accent" />
           <StatCard label="现金" value={fmtMoney(ov.cash)} icon={Banknote} iconCls="text-muted" />
-          <StatCard label="持仓市值" value={fmtMoney(ov.market_value)} icon={PieChart} iconCls="text-muted" />
+          <StatCard label="持仓市值" value={valuationReady ? fmtMoney(ov.market_value) : '—'} icon={PieChart} iconCls="text-muted" />
           <StatCard
             label="累计盈亏"
-            value={`${(ov.total_pnl ?? 0) >= 0 ? '+' : ''}${fmtMoney(ov.total_pnl)} (${fmtPct(pnlPct / 100)})`}
+            value={valuationReady ? `${(ov.total_pnl ?? 0) >= 0 ? '+' : ''}${fmtMoney(ov.total_pnl)} (${fmtPct(pnlPct / 100)})` : '—'}
             valueClass={priceColorClass((ov.total_pnl ?? 0) / (ov.initial_cash || 1))}
             icon={TrendingUp}
             iconCls={priceColorClass((ov.total_pnl ?? 0) / (ov.initial_cash || 1))}
@@ -1357,15 +1357,15 @@ export function Paper() {
             <div className="rounded-card border border-border bg-surface p-4">
               <div className="text-sm font-medium">当前持仓</div>
               {holdings.length === 0 ? (
-                <div className="py-8 text-center text-xs text-muted">暂无持仓 — 右侧下单或等自动跟单触发</div>
+                <div className="py-8 text-center text-xs text-muted">{ov.etf_shortterm ? '暂无持仓 — 启用后等待短线规则触发' : '暂无持仓 — 右侧下单或等自动跟单触发'}</div>
               ) : (
                 <div className="mt-2 min-w-0 max-w-full overflow-x-auto">
                   <table className="w-full min-w-[560px] text-xs">
                     <thead className="sticky top-0 bg-surface">
                       <tr className="text-left text-[10px] text-muted">
-                        <th className="py-1.5 font-normal">代码</th>
+                        <th className="py-1.5 font-normal">名称 / 代码</th>
                         <th className="py-1.5 text-right font-normal">数量</th>
-                        <th className="py-1.5 text-right font-normal">可卖(T+1)</th>
+                        <th className="py-1.5 text-right font-normal">当前可卖</th>
                         <th className="py-1.5 text-right font-normal">成本</th>
                         <th className="py-1.5 text-right font-normal">现价</th>
                         <th className="py-1.5 text-right font-normal">市值</th>
@@ -1375,14 +1375,14 @@ export function Paper() {
                     <tbody className="font-mono">
                       {holdings.map(h => (
                         <tr key={h.symbol} className="border-t border-border/50 transition-colors hover:bg-elevated/40">
-                          <td className="py-1.5 font-sans">{h.symbol}</td>
+                          <td className="py-1.5 font-sans"><PaperInstrumentLabel symbol={h.symbol} name={namesQ.data?.names[h.symbol]} pending={namesQ.isPending} className="max-w-44" /></td>
                           <td className="py-1.5 text-right">{h.qty}</td>
                           <td className="py-1.5 text-right text-muted">{h.available_qty}</td>
                           <td className="py-1.5 text-right">{fmtMoney(h.avg_cost, 3)}</td>
-                          <td className="py-1.5 text-right">{fmtMoney(h.last_price, 3)}</td>
-                          <td className="py-1.5 text-right">{fmtMoney(h.market_value, 0)}</td>
+                          <td className="py-1.5 text-right">{valuationReady ? fmtMoney(h.last_price, 3) : '—'}</td>
+                          <td className="py-1.5 text-right">{valuationReady ? fmtMoney(h.market_value, 0) : '—'}</td>
                           <td className={cn('py-1.5 text-right', priceColorClass(h.pnl))}>
-                            {(h.pnl >= 0 ? '+' : '') + fmtMoney(h.pnl, 0)} ({fmtPct(h.pnl_pct / 100)})
+                            {valuationReady ? `${(h.pnl >= 0 ? '+' : '') + fmtMoney(h.pnl, 0)} (${fmtPct(h.pnl_pct / 100)})` : '—'}
                           </td>
                         </tr>
                       ))}
@@ -1432,7 +1432,7 @@ export function Paper() {
                       <span className={cn('w-8 shrink-0 font-medium', o.side === 'buy' ? 'text-bull' : 'text-bear')}>
                         {o.side === 'buy' ? '买入' : '卖出'}
                       </span>
-                      <span className="w-24 shrink-0 font-mono">{o.symbol}</span>
+                      <PaperInstrumentLabel symbol={o.symbol} name={namesQ.data?.names[o.symbol]} pending={namesQ.isPending} className="w-40 shrink-0" />
                       <span className="w-16 shrink-0 font-mono text-right">{o.qty}</span>
                       <span className="w-16 shrink-0 text-muted">{ORDER_TYPE_LABEL[o.order_type]}</span>
                       <span className={cn(
@@ -1467,13 +1467,13 @@ export function Paper() {
                     <div key={`${f.seq}-${f.order_id ?? 'corp'}`} className="flex min-w-max items-center gap-2 rounded-btn px-2 py-1.5 font-mono text-xs hover:bg-elevated/50">
                       <span className="w-14 shrink-0 text-muted">{f.date}</span>
                       {f.kind === 'corp_action' ? (
-                        <span className="text-accent">除权 ×{f.factor} ({f.symbol}: {f.qty_before} → )</span>
+                        <><PaperInstrumentLabel symbol={f.symbol} name={namesQ.data?.names[f.symbol]} pending={namesQ.isPending} className="w-40 shrink-0" /><span className="text-accent">除权 ×{f.factor} ({f.qty_before} → )</span></>
                       ) : (
                         <>
                           <span className={cn('w-8 shrink-0 font-sans font-medium', f.side === 'buy' ? 'text-bull' : 'text-bear')}>
                             {f.side === 'buy' ? '买入' : '卖出'}
                           </span>
-                          <span className="w-24 shrink-0">{f.symbol}</span>
+                          <PaperInstrumentLabel symbol={f.symbol} name={namesQ.data?.names[f.symbol]} pending={namesQ.isPending} className="w-40 shrink-0" />
                           <span className="w-16 shrink-0 text-right">{f.qty}</span>
                           <span className="w-20 shrink-0 text-right">@ {fmtMoney(f.price, 3)}</span>
                           <span className="w-16 shrink-0 text-right text-muted">费 {fmtMoney(f.fee)}</span>
@@ -1488,14 +1488,14 @@ export function Paper() {
 
           {/* 右列: 下单 + 自动跟单 + 策略对比 */}
           <div className="min-w-0 space-y-4">
-            <OrderForm acc={accId} onDone={invalidateAll} />
-            <AutoRulesPanel acc={accId} />
+            {ov.etf_shortterm ? <div className="rounded-card border border-border bg-surface p-4 text-xs leading-6 text-secondary">
+              <div className="font-medium text-foreground">专属短线自动模拟</div>
+              <p>在上方账户表启用或暂停。只由短线规则建单，多持仓上限 {ov.etf_shortterm.max_positions} 只；手动交易请切换其他账户。</p>
+              <p>暂停只阻止新信号，已有90秒订单仍可能成交，可在订单列表取消。冻结账户会阻止成交。</p>
+              <p>按推进的来源报价加5bps滑点估算整单成交，未模拟盘口排队和部分成交。</p>
+            </div> : <><OrderForm acc={accId} onDone={invalidateAll} /><AutoRulesPanel acc={accId} /></>}
             <CandidateCompareCard paper={{
-              total_return_pct: nav.length >= 2 && nav[0].nav > 0 ? (nav[nav.length - 1].nav / nav[0].nav - 1) * 100 : null,
-              annual_pct: nav.length >= 2 && nav[0].nav > 0
-                ? (Math.pow(nav[nav.length - 1].nav / nav[0].nav, 252 / nav.length) - 1) * 100
-                : null,
-              max_drawdown: stats?.max_drawdown ?? null,
+              ...verifiedPaperPerformance(nav),
               win_rate: stats?.win_rate ?? null,
               n_trades: allFills.filter(f => f.kind !== 'corp_action').length,
               profit_loss_ratio: stats?.profit_loss_ratio ?? null,
@@ -1504,7 +1504,7 @@ export function Paper() {
               <div className="font-medium text-secondary">撮合口径</div>
               <div className="mt-1">· 即时单: 交易时段按最新快照价 + 滑点成交</div>
               <div>· 次日开盘 / 当日收盘单: 盘后管道按真实开盘/收盘价成交</div>
-              <div>· T+1: 当日买入次一交易日可卖</div>
+              <div>· 股票与股票 ETF 为 T+1；已核对的候选池债券、黄金 ETF 可当日卖出，未知 ETF 按 T+1 模拟</div>
               <div>· 停牌顺延 3 日自动过期；仅有独立送转股数因子时调整股数与成本</div>
               <div className="mt-2 flex items-center justify-between border-t border-border/40 pt-2">
                 <span title="开启后, 触及涨停的买入/触及跌停的卖出不再直接过期, 转次日开盘重试 (最多顺延 3 日)">
@@ -1512,7 +1512,7 @@ export function Paper() {
                 </span>
                 <button
                   onClick={() => queueM.mutate(!ov.queue_limit_orders)}
-                  disabled={queueM.isPending}
+                  disabled={queueM.isPending || Boolean(ov.etf_shortterm)}
                   className={cn(
                     'relative h-4 w-8 shrink-0 rounded-full transition-colors',
                     ov.queue_limit_orders ? 'bg-accent' : 'bg-border',
@@ -1528,6 +1528,7 @@ export function Paper() {
             </div>
           </div>
         </div>
+        </section>
       </div>
       {feeOpen && ov.fees && (
         <FeeSettingsModal

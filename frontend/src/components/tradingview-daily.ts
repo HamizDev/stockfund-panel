@@ -1,10 +1,4 @@
-import type {
-  CandlestickData,
-  HistogramData,
-  LineData,
-  SeriesMarker,
-  Time,
-} from 'lightweight-charts'
+import { chartPrice } from '@/lib/chartPrice'
 import type { ChartMarker } from '@/components/EChartsCandlestick'
 
 export const MOVING_AVERAGE_KEYS = ['ma5', 'ma10', 'ma20', 'ma60'] as const
@@ -21,6 +15,9 @@ export interface DailyKlineInput {
   ma10?: unknown
   ma20?: unknown
   ma60?: unknown
+  boll_upper?: unknown
+  boll_lower?: unknown
+  atr_14?: unknown
 }
 
 export interface TradingViewDailyBar {
@@ -34,7 +31,40 @@ export interface TradingViewDailyBar {
   ma10: number | null
   ma20: number | null
   ma60: number | null
+  bollUpper: number | null
+  bollLower: number | null
+  atr14: number | null
 }
+
+export interface DailyCanvasCandle {
+  time: string
+  open: number
+  high: number
+  low: number
+  close: number
+}
+
+export interface DailyCanvasVolume {
+  time: string
+  value: number
+  color: string
+}
+
+export interface DailyCanvasPoint {
+  time: string
+  value: number
+}
+
+export interface DailyCanvasMarker {
+  time: string
+  position: 'aboveBar' | 'belowBar'
+  shape: 'circle' | 'arrowUp' | 'arrowDown'
+  color: string
+  text: string
+  size: number
+}
+
+const MOVING_AND_RESEARCH_KEYS = ['ma5', 'ma10', 'ma20', 'ma60', 'bollUpper', 'bollLower', 'atr14'] as const
 
 export interface TradingViewDailyValidation {
   bars: TradingViewDailyBar[]
@@ -78,6 +108,10 @@ function optionalAverage(value: unknown): number | null {
   return finitePositive(value) ? value : null
 }
 
+function optionalNonnegative(value: unknown): number | null {
+  return finiteNonnegative(value) ? value : null
+}
+
 function sameCoreBar(a: TradingViewDailyBar, b: TradingViewDailyBar): boolean {
   return a.open === b.open
     && a.high === b.high
@@ -94,7 +128,7 @@ function mergeDuplicateBar(
 
   const next = { ...current }
   if (next.volume == null) next.volume = incoming.volume
-  for (const key of MOVING_AVERAGE_KEYS) {
+  for (const key of MOVING_AND_RESEARCH_KEYS) {
     const oldValue = next[key]
     const newValue = incoming[key]
     if (oldValue != null && newValue != null && oldValue !== newValue) {
@@ -136,6 +170,9 @@ export function normalizeTradingViewDailyRows(
       ma10: optionalAverage(row.ma10),
       ma20: optionalAverage(row.ma20),
       ma60: optionalAverage(row.ma60),
+      bollUpper: optionalAverage(row.boll_upper),
+      bollLower: optionalAverage(row.boll_lower),
+      atr14: optionalNonnegative(row.atr_14),
     }
     const previous = byDate.get(next.date)
     if (!previous) {
@@ -164,7 +201,7 @@ export function normalizeTradingViewDailyRows(
   }
 }
 
-export function toTradingViewCandles(bars: readonly TradingViewDailyBar[]): CandlestickData<Time>[] {
+export function toTradingViewCandles(bars: readonly TradingViewDailyBar[]): DailyCanvasCandle[] {
   return bars.map(bar => ({
     time: bar.date,
     open: bar.open,
@@ -174,7 +211,7 @@ export function toTradingViewCandles(bars: readonly TradingViewDailyBar[]): Cand
   }))
 }
 
-export function toTradingViewVolume(bars: readonly TradingViewDailyBar[]): HistogramData<Time>[] {
+export function toTradingViewVolume(bars: readonly TradingViewDailyBar[]): DailyCanvasVolume[] {
   return bars.flatMap(bar => bar.volume == null ? [] : [{
     time: bar.date,
     value: bar.volume,
@@ -185,7 +222,7 @@ export function toTradingViewVolume(bars: readonly TradingViewDailyBar[]): Histo
 export function toTradingViewMovingAverage(
   bars: readonly TradingViewDailyBar[],
   key: MovingAverageKey,
-): LineData<Time>[] {
+): DailyCanvasPoint[] {
   return bars.flatMap(bar => {
     const value = bar[key]
     return value == null ? [] : [{ time: bar.date, value }]
@@ -223,11 +260,11 @@ export function dailyChartDateFromTime(time: unknown): string | null {
 export function toTradingViewMarkers(
   markers: readonly ChartMarker[] | undefined,
   availableDates: ReadonlySet<string>,
-): SeriesMarker<Time>[] {
+): DailyCanvasMarker[] {
   if (!markers?.length) return []
   return markers
     .filter(marker => isDailyChartDate(marker.date) && availableDates.has(marker.date))
-    .map((marker): SeriesMarker<Time> => ({
+    .map((marker): DailyCanvasMarker => ({
       time: marker.date,
       position: marker.above || marker.kind === 'sell' ? 'aboveBar' : 'belowBar',
       shape: marker.above
@@ -282,12 +319,12 @@ export function resolveDailyViewport(input: {
   return { kind: 'fit' }
 }
 
-export function formatTradingViewPriceSummary(bar: TradingViewDailyBar): string {
+export function formatTradingViewPriceSummary(bar: TradingViewDailyBar, symbol?: string): string {
   const volume = bar.volume == null ? '成交量缺失' : '成交量 ' + bar.volume.toLocaleString('zh-CN')
   return bar.date
-    + '，开 ' + bar.open.toFixed(2)
-    + '，高 ' + bar.high.toFixed(2)
-    + '，低 ' + bar.low.toFixed(2)
-    + '，收 ' + bar.close.toFixed(2)
+    + '，开 ' + chartPrice(bar.open, symbol)
+    + '，高 ' + chartPrice(bar.high, symbol)
+    + '，低 ' + chartPrice(bar.low, symbol)
+    + '，收 ' + chartPrice(bar.close, symbol)
     + '，' + volume
 }

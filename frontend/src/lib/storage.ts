@@ -24,20 +24,20 @@ export interface StrategyBuilderDraft {
   iterateSavedCode?: string
 }
 
-function kv<T>(key: string) {
+function kv<T>(key: string, area: 'local' | 'session' = 'local') {
   return {
     get(fallback: T): T {
       try {
-        const raw = localStorage.getItem(key)
+        const raw = (area === 'session' ? sessionStorage : localStorage).getItem(key)
         if (raw !== null) return JSON.parse(raw) as T
       } catch { /* ignore */ }
       return fallback
     },
     set(val: T) {
-      try { localStorage.setItem(key, JSON.stringify(val)) } catch { /* ignore */ }
+      try { (area === 'session' ? sessionStorage : localStorage).setItem(key, JSON.stringify(val)) } catch { /* ignore */ }
     },
     remove() {
-      try { localStorage.removeItem(key) } catch { /* ignore */ }
+      try { (area === 'session' ? sessionStorage : localStorage).removeItem(key) } catch { /* ignore */ }
     },
   }
 }
@@ -57,6 +57,17 @@ export interface DefaultStrategyBasicFilter {
 }
 
 export const storage = {
+  /** 只读页面的选择/筛选；按标签页保存，不包含账户操作表单或实时行情快照。 */
+  pageView: {
+    indices: kv<unknown>('page-view:indices', 'session'),
+    stockAnalysis: kv<unknown>('page-view:stock-analysis', 'session'),
+    cryptoMarket: kv<unknown>('page-view:crypto-market', 'session'),
+    cryptoExpandedAccount: kv<unknown>('page-view:crypto-expanded-account', 'session'),
+    aiScreener: kv<unknown>('page-view:ai-screener', 'session'),
+    aiFund: kv<unknown>('page-view:ai-fund', 'session'),
+    auction: kv<unknown>('page-view:auction', 'session'),
+    abnormalTab: kv<unknown>('page-view:abnormal-tab', 'session'),
+  },
   /** 查询轮询 / SSE 配置 */
   queryConfig:          kv<unknown>('tf-stocks-query-config'),
 

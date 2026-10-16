@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { Activity, ArrowUpRight, Clock3, Database, RefreshCw, Search, ShieldAlert, Sparkles } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
+import { chartPrice } from '@/lib/chartPrice'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { getCandidates, formatMoney, formatPct, type Candidate, type CandidateMetrics } from './client'
 import { CandidateAnalysisPanel } from './CandidateAnalysisPanel'
@@ -11,6 +12,55 @@ import { researchKey, useCandidateResearch } from './useCandidateResearch'
 import { candidatePriceLabel } from './candidateDisplay'
 import { fetchAssistantStatus } from '../assistant/client'
 import { DEFAULT_CANDIDATE_PREVIEW_LIMIT, previewCandidates } from '../candidatePreview'
+import { usePageState } from '@/lib/usePageState'
+
+type AssetType = 'stock' | 'etf'
+
+type AiScreenerViewState = {
+  search: string
+  multiOnly: boolean
+  selectedByAsset: Record<AssetType, string | null>
+  visibleLimitByAsset: Record<AssetType, number>
+  lastAssetType: AssetType
+}
+
+const MAX_VIEW_SEARCH_LENGTH = 120
+const MAX_VISIBLE_CANDIDATES = 1000
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isAssetType(value: unknown): value is AssetType {
+  return value === 'stock' || value === 'etf'
+}
+
+function isCandidateSymbol(value: unknown): value is string | null {
+  return value === null || (typeof value === 'string' && value.length <= 32 && /^[a-zA-Z0-9._-]+$/.test(value))
+}
+
+function isVisibleLimit(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= DEFAULT_CANDIDATE_PREVIEW_LIMIT && value <= MAX_VISIBLE_CANDIDATES
+}
+
+function isAiScreenerViewState(value: unknown): value is AiScreenerViewState {
+  if (!isRecord(value) || typeof value.search !== 'string' || value.search.length > MAX_VIEW_SEARCH_LENGTH ||
+      typeof value.multiOnly !== 'boolean' || !isRecord(value.selectedByAsset) || !isRecord(value.visibleLimitByAsset) ||
+      !isAssetType(value.lastAssetType)) return false
+  const selectedByAsset = value.selectedByAsset as Record<string, unknown>
+  const visibleLimitByAsset = value.visibleLimitByAsset as Record<string, unknown>
+  return (['stock', 'etf'] as const).every((assetType) =>
+    isCandidateSymbol(selectedByAsset[assetType]) && isVisibleLimit(visibleLimitByAsset[assetType]),
+  )
+}
+
+const DEFAULT_AI_SCREENER_VIEW: AiScreenerViewState = {
+  search: '',
+  multiOnly: false,
+  selectedByAsset: { stock: null, etf: null },
+  visibleLimitByAsset: { stock: DEFAULT_CANDIDATE_PREVIEW_LIMIT, etf: DEFAULT_CANDIDATE_PREVIEW_LIMIT },
+  lastAssetType: 'stock',
+}
 
 function formatNumber(value: number | null, digits = 2): string {
   return value == null || !Number.isFinite(value) ? '—' : value.toFixed(digits)
@@ -26,8 +76,8 @@ function metricRows(metrics: CandidateMetrics, assetType: 'stock' | 'etf'): { la
     { label: '成交额', value: formatMoney(metrics.amount) },
     { label: '换手率', value: metrics.turnover_rate == null ? '—' : `${formatNumber(metrics.turnover_rate)}%` },
     ...(assetType === 'stock' ? [{ label: '市盈率 TTM', value: formatNumber(metrics.pe_ttm) }, { label: '市净率', value: formatNumber(metrics.pb) }] : []),
-    { label: 'MA5 / MA20', value: `${formatNumber(metrics.ma5)} / ${formatNumber(metrics.ma20)}` },
-    { label: 'MA60', value: formatNumber(metrics.ma60) },
+    { label: 'MA5 / MA20', value: `${formatNumber(metrics.ma5, assetType === 'etf' ? 3 : 2)} / ${formatNumber(metrics.ma20, assetType === 'etf' ? 3 : 2)}` },
+    { label: 'MA60', value: formatNumber(metrics.ma60, assetType === 'etf' ? 3 : 2) },
   ]
 }
 
@@ -44,13 +94,20 @@ function riskNotes(item: Candidate, assetType: 'stock' | 'etf'): string[] {
 }
 
 export function AiScreenerPage() {
-  type AssetType = 'stock' | 'etf'
   const research = useCandidateResearch()
-  const [assetType, setAssetType] = useState<AssetType>('stock')
-  const [search, setSearch] = useState('')
-  const [multiOnly, setMultiOnly] = useState(false)
-  const [selectedByAsset, setSelectedByAsset] = useState<Record<AssetType, string | null>>({ stock: null, etf: null })
-  const [visibleLimitByAsset, setVisibleLimitByAsset] = useState<Record<AssetType, number>>({ stock: DEFAULT_CANDIDATE_PREVIEW_LIMIT, etf: DEFAULT_CANDIDATE_PREVIEW_LIMIT })
+  const [searchParams, setSearchParams] = useSearchParams()
+  const requestedAssetType = searchParams.get('asset_type')
+  const explicitAssetType = isAssetType(requestedAssetType) ? requestedAssetType : null
+  const [view, setView] = usePageState('aiScreener', DEFAULT_AI_SCREENER_VIEW, isAiScreenerViewState)
+  const assetType = explicitAssetType ?? view.lastAssetType
+  const setAssetType = (type: AssetType) => {
+    if (type === assetType) return
+    const next = new URLSearchParams(searchParams)
+    next.set('asset_type', type)
+    setSearchParams(next)
+    setView(current => ({ ...current, lastAssetType: type }))
+  }
+  const { search, multiOnly, selectedByAsset, visibleLimitByAsset } = view
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
   const candidateListRef = useRef<HTMLElement | null>(null)
   const selectedCandidateRef = useRef<HTMLElement | null>(null)
@@ -61,6 +118,11 @@ export function AiScreenerPage() {
     staleTime: 30_000,
     refetchInterval: 60_000,
   })
+  useEffect(() => {
+    if (explicitAssetType && explicitAssetType !== view.lastAssetType) {
+      setView(current => ({ ...current, lastAssetType: explicitAssetType }))
+    }
+  }, [explicitAssetType, setView, view.lastAssetType])
   const aiStatus = useQuery({ queryKey: ['ai-screener-model-status'], queryFn: fetchAssistantStatus, staleTime: 60_000 })
   const data = query.data
   const selectedSymbol = selectedByAsset[assetType]
@@ -74,11 +136,12 @@ export function AiScreenerPage() {
   const visibleLimit = visibleLimitByAsset[assetType]
   const visible = useMemo(() => previewCandidates(matching, { expanded: visibleLimit >= matching.length, searchActive, limit: visibleLimit }), [matching, visibleLimit, searchActive])
   useEffect(() => {
+    if (!data) return
     if (selectedSymbol && data?.items.some(item => item.symbol === selectedSymbol)) return
     const fallback = matching[0]?.item.symbol ?? null
     if (selectedSymbol === fallback) return
-    setSelectedByAsset(current => ({ ...current, [assetType]: fallback }))
-  }, [assetType, data?.items, matching, selectedSymbol])
+    setView(current => ({ ...current, selectedByAsset: { ...current.selectedByAsset, [assetType]: fallback } }))
+  }, [assetType, data, matching, selectedSymbol, setView])
   const selectedRanked = ranked.find(({ item }) => item.symbol === selectedSymbol) ?? null
   const selected = selectedRanked?.item ?? null
   const liveCount = data?.items.filter(item => item.price_source === 'live').length ?? 0
@@ -91,7 +154,7 @@ export function AiScreenerPage() {
     (selectedCandidateRef.current ?? candidateListRef.current)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
   const selectCandidate = (symbol: string) => {
-    setSelectedByAsset(current => ({ ...current, [assetType]: symbol }))
+    setView(current => ({ ...current, selectedByAsset: { ...current.selectedByAsset, [assetType]: symbol } }))
     scrollToDetail()
   }
 
@@ -129,8 +192,8 @@ export function AiScreenerPage() {
           <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-3">
             <div className="flex flex-wrap items-center gap-x-2 text-sm font-semibold text-foreground">候选观察 <span className="text-xs font-normal text-muted">显示 {visible.length} / 匹配 {matching.length} 只</span></div>
             <div className="ml-auto flex items-center gap-2">
-              <label className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-secondary"><Search className="h-3.5 w-3.5" /><input aria-label="搜索候选" value={search} onChange={e => setSearch(e.target.value)} placeholder="代码 / 名称" className="w-24 bg-transparent text-foreground outline-none placeholder:text-muted md:w-32" /></label>
-              <button onClick={() => setMultiOnly(value => !value)} className={`rounded-md border px-2.5 py-1.5 text-xs ${multiOnly ? 'border-accent/50 bg-accent/15 text-accent' : 'border-border text-secondary hover:text-foreground'}`}>多策略</button>
+              <label className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-secondary"><Search className="h-3.5 w-3.5" /><input aria-label="搜索候选" value={search} onChange={e => setView(current => ({ ...current, search: e.target.value.slice(0, MAX_VIEW_SEARCH_LENGTH) }))} placeholder="代码 / 名称" className="w-24 bg-transparent text-foreground outline-none placeholder:text-muted md:w-32" /></label>
+              <button onClick={() => setView(current => ({ ...current, multiOnly: !current.multiOnly }))} className={`rounded-md border px-2.5 py-1.5 text-xs ${multiOnly ? 'border-accent/50 bg-accent/15 text-accent' : 'border-border text-secondary hover:text-foreground'}`}>多策略</button>
             </div>
           </div>
           <div className="grid gap-3 p-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr))]">
@@ -147,10 +210,10 @@ export function AiScreenerPage() {
           {!visible.length && <div className="p-8 text-center text-sm text-muted">没有符合当前过滤条件的候选</div>}
           {matching.length > DEFAULT_CANDIDATE_PREVIEW_LIMIT && searchActive && <div role="status" className="border-t border-border px-4 py-2 text-center text-[11px] text-muted">搜索结果已显示全部 {matching.length} 只，包含前 {DEFAULT_CANDIDATE_PREVIEW_LIMIT} 名以外的候选。</div>}
           {!searchActive && matching.length > DEFAULT_CANDIDATE_PREVIEW_LIMIT && <div className="flex flex-wrap justify-center gap-2 border-t border-border px-4 py-2">
-            {visibleLimit < matching.length && <button type="button" onClick={() => setVisibleLimitByAsset(current => ({ ...current, [assetType]: Math.min(current[assetType] + DEFAULT_CANDIDATE_PREVIEW_LIMIT, matching.length) }))} className="min-h-9 rounded-md px-3 text-xs text-accent hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+            {visibleLimit < matching.length && <button type="button" onClick={() => setView(current => ({ ...current, visibleLimitByAsset: { ...current.visibleLimitByAsset, [assetType]: Math.min(current.visibleLimitByAsset[assetType] + DEFAULT_CANDIDATE_PREVIEW_LIMIT, MAX_VISIBLE_CANDIDATES, matching.length) } }))} className="min-h-9 rounded-md px-3 text-xs text-accent hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
               再显示 10 名（当前 {visible.length}/{matching.length}）
             </button>}
-            {visibleLimit > DEFAULT_CANDIDATE_PREVIEW_LIMIT && <button type="button" onClick={() => setVisibleLimitByAsset(current => ({ ...current, [assetType]: DEFAULT_CANDIDATE_PREVIEW_LIMIT }))} className="min-h-9 rounded-md px-3 text-xs text-secondary hover:bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">收起至前 10 名</button>}
+            {visibleLimit > DEFAULT_CANDIDATE_PREVIEW_LIMIT && <button type="button" onClick={() => setView(current => ({ ...current, visibleLimitByAsset: { ...current.visibleLimitByAsset, [assetType]: DEFAULT_CANDIDATE_PREVIEW_LIMIT } }))} className="min-h-9 rounded-md px-3 py-1 text-xs text-secondary hover:bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">收起至前 10 名</button>}
           </div>}
         </section>
 
@@ -159,7 +222,7 @@ export function AiScreenerPage() {
             <button type="button" onClick={scrollToCandidates} className="mb-3 inline-flex min-h-11 items-center rounded-btn border border-border px-3 text-xs text-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent xl:hidden">返回候选</button>
             {!matching.some(({ item }) => item.symbol === selected.symbol) && <div role="status" className="mb-3 rounded-md border border-border bg-background/40 px-2.5 py-2 text-[11px] text-muted">当前查看的候选不在列表过滤结果中；清除搜索或筛选可返回其卡片。</div>}
             <div className="flex items-start justify-between gap-2"><div><div className="text-lg font-semibold text-foreground">{selected.name}</div><div className="font-mono text-xs text-muted">{selected.symbol} · 排名 #{selectedRanked?.rank ?? '—'}</div></div><span className="rounded-full border border-accent/30 bg-accent/10 px-2 py-1 text-xs text-accent">{selected.hit_count} 条策略</span></div>
-            <div className="mt-4 rounded-lg border border-border bg-background/50 p-3"><div className="flex items-end justify-between"><span className="font-mono text-2xl text-foreground">{formatNumber(selected.metrics.close)}</span><span className={`font-mono ${selected.metrics.change_pct != null && selected.metrics.change_pct >= 0 ? 'text-bull' : 'text-bear'}`}>{formatPct(selected.metrics.change_pct)}</span></div><div className="mt-1 text-[11px] text-muted">{quoteLabel(selected, data.as_of, data.quote.provider)}</div></div>
+            <div className="mt-4 rounded-lg border border-border bg-background/50 p-3"><div className="flex items-end justify-between"><span className="font-mono text-2xl text-foreground">{chartPrice(selected.metrics.close, selected.symbol)}</span><span className={`font-mono ${selected.metrics.change_pct != null && selected.metrics.change_pct >= 0 ? 'text-bull' : 'text-bear'}`}>{formatPct(selected.metrics.change_pct)}</span></div><div className="mt-1 text-[11px] text-muted">{quoteLabel(selected, data.as_of, data.quote.provider)}</div></div>
             <CandidateAnalysisPanel candidate={selected} assetType={assetType} configured={!!aiStatus.data?.configured} model={aiStatus.data?.model} research={research} />
             <div className="mt-4 text-xs font-semibold text-foreground">数据指标</div><div className="mt-2 grid grid-cols-2 gap-2">{metricRows(selected.metrics, assetType).map(row => <div key={row.label} className="rounded-md border border-border bg-background/30 p-2"><div className="text-[10px] text-muted">{row.label}</div><div className="mt-1 font-mono text-xs text-foreground">{row.value}</div></div>)}</div>
             <div className="mt-5 text-xs font-semibold text-foreground">策略命中依据</div><div className="mt-2 space-y-2">{selected.strategies.map(strategy => <div key={strategy.id} className="rounded-md border border-border bg-background/30 p-2"><div className="text-xs font-medium text-accent">{strategy.name}</div><div className="mt-1 text-[11px] leading-4 text-muted">{strategy.description || '策略未提供说明，请在选股页查看完整条件。'}</div></div>)}</div>
@@ -169,7 +232,7 @@ export function AiScreenerPage() {
         </aside>
       </div>}
     </div>
-    <StockPreviewDialog symbol={previewSymbol} name={selected?.name} onClose={() => setPreviewSymbol(null)} navList={visible.map(({ item }) => ({ symbol: item.symbol, name: item.name }))} onNavigate={(symbol) => { setSelectedByAsset(current => ({ ...current, [assetType]: symbol })); setPreviewSymbol(symbol) }} />
+    <StockPreviewDialog symbol={previewSymbol} name={selected?.name} onClose={() => setPreviewSymbol(null)} navList={visible.map(({ item }) => ({ symbol: item.symbol, name: item.name }))} onNavigate={(symbol) => { setView(current => ({ ...current, selectedByAsset: { ...current.selectedByAsset, [assetType]: symbol } })); setPreviewSymbol(symbol) }} />
   </>
 }
 

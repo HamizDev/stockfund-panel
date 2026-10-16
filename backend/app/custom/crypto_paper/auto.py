@@ -14,7 +14,7 @@ from pathlib import Path
 
 import httpx
 
-from app.custom.crypto_paper import bitget, client, ledger, rules
+from app.custom.crypto_paper import bitget, client, ledger, pine_research, research_log, rules
 from app.services.fs_utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,7 @@ POLL_SECONDS = 30
 STRATEGIES = [
     {"id": "ema_trend", "name": "均线趋势", "description": "已收盘 K 线 EMA 趋势，默认20/60，周期可调；现货只做多，合约可多空。"},
     {"id": "channel_breakout", "name": "通道突破", "description": "收盘突破此前高低区间，默认回看20根，周期可调；区间内保持持仓，止盈止损退出。"},
+    *pine_research.DEFINITIONS,
 ]
 MODEL = {"maintenance_margin_rate": str(ledger.MAINTENANCE_RATE),
          "liquidation_fee_rate": str(ledger.LIQUIDATION_FEE), "slippage_bps": 5,
@@ -243,6 +244,9 @@ def signal(strategy_id: str, bars: list[dict], market: str, strategy_params: dic
     required = rules.minimum_bars(strategy_id, params)
     if len(bars) < required:
         raise ValueError(f"已收盘 K 线不足 {required} 根")
+    if strategy_id in pine_research.IDS:
+        target = pine_research.analyse(strategy_id, bars, params)["target"]
+        return "flat" if market == "spot" and target == "short" else target
     closes = [ledger._num(bar["close"], positive=True) for bar in bars]
     if strategy_id == "ema_trend":
         def ema(period: int) -> Decimal:
@@ -422,6 +426,14 @@ def _bars(market: str, symbol: str, interval: str, exchange: str = "binance") ->
     return bars
 
 
+def _record_decision(account, now_ms, bars, before, *, error=None):
+    try:
+        research_log.record(account, now_ms, bars, before, error=error)
+    except (ValueError, KeyError, TypeError, IndexError):
+        # Evidence formatting cannot undo an already valid ledger transition.
+        logger.warning("Local paper decision evidence unavailable")
+
+
 def run_once(data_dir: Path, account_id: str | None = None, *, stop: threading.Event | None = None) -> dict:
     """Fetch outside the store lock, then reload settings before committing."""
     if not _RUN_LOCK.acquire(blocking=False):
@@ -497,8 +509,10 @@ def run_once(data_dir: Path, account_id: str | None = None, *, stop: threading.E
                     current.update(status="error", last_error=outcome, last_check_ms=now_ms)
                     if current["ledger"][current["market"]]["positions"]:
                         current["equity"] = None
+                    _record_decision(current, now_ms, [], len(current['ledger']['trades']), error=outcome)
                     continue
                 candidate = copy.deepcopy(current)
+                trades_before = len(current['ledger']['trades'])
                 quote, bars, funding, observed_ms, through, signal_error = outcome
                 # A paused account may have been enabled during the fetch; it
                 # must wait for the next poll to obtain its strategy bars.
@@ -513,7 +527,9 @@ def run_once(data_dir: Path, account_id: str | None = None, *, stop: threading.E
                     current.update(status="error", last_error=str(exc), last_check_ms=now_ms)
                     if current["ledger"][current["market"]]["positions"]:
                         current["equity"] = None
+                    _record_decision(current, now_ms, [], trades_before, error=str(exc))
                 else:
+                    _record_decision(candidate, observed_ms, bars, trades_before)
                     state["accounts"][aid] = candidate
             if results:
                 if stop and stop.is_set():
@@ -576,6 +592,25 @@ class Runner:
                 run_once(self.data_dir, stop=self.stop_event)
             except Exception:
                 logger.exception("数字资产自动模拟本轮失败")
+            try:
+                from .research_service import maybe_daily
+
+                maybe_daily(self.data_dir)
+            except Exception:
+                logger.warning("Local paper daily review unavailable; existing records retained")
+            try:
+                from .demo_trading import tick
+
+                tick(self.data_dir)
+            except Exception:
+                logger.warning("Official demo cycle unavailable; no fallback to live trading")
+            if not self.stop_event.is_set():
+                try:
+                    from .demo_bots import tick as tick_bots
+
+                    tick_bots(self.data_dir)
+                except Exception:
+                    logger.warning("Official demo strategy budgets unavailable; existing records retained")
             self.stop_event.wait(POLL_SECONDS)
 
     def start(self) -> None:

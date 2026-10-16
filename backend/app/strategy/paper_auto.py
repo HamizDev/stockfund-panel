@@ -209,9 +209,9 @@ def _sizing_qty(data_dir: Path, rule: dict, symbol: str, ref_price: float, accou
 
 
 def _estimated_buy_cost(qty: int, price: float, account: dict) -> float:
-    slip = float(account["slippage_bps"]) / 10000
+    fill_price = paper.apply_slippage(price, "buy", float(account["slippage_bps"]))
     commission = float(account["commission_pct"])
-    return qty * price * (1 + slip) + paper.buy_fee(qty, price, commission)
+    return round(qty * fill_price + paper.buy_fee(qty, fill_price, commission), 2)
 
 
 def _cash_after_pending_buys(data_dir: Path, account_id: str, account: dict) -> float:
@@ -269,9 +269,22 @@ def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.D
                     continue
                 if not _matches(rule, ev):
                     continue
+                if rule["side"] == "buy" and account.get("etf_plan"):
+                    # Count held and pending symbols, not filled orders; repeated quote
+                    # ticks must not add leverage or pyramid the same ETF position.
+                    occupied = {s for s, pos in paper.load_positions(data_dir, account_id).items() if pos.get("qty", 0) > 0}
+                    occupied.update(o["symbol"] for o in paper.load_orders(data_dir, account_id)
+                                    if o["status"] == "pending" and o["side"] == "buy")
+                    if symbol in occupied or len(occupied) >= int(account.get("max_positions", 1)):
+                        continue
                 if _in_cooldown(data_dir, rule, symbol, int(rule.get("cooldown_days", 0)), account_id):
                     continue
                 qty = _sizing_qty(data_dir, rule, symbol, price, account_id)
+                if rule["side"] == "buy" and account.get("etf_plan"):
+                    # Keep fee + slippage inside the budget, including the last lot.
+                    budget = min(buy_cash, float(account["initial_cash"]) * float(rule["size_value"]) / 100)
+                    while qty > 0 and _estimated_buy_cost(qty, price, account) > budget:
+                        qty -= paper.LOT_SIZE
                 if qty <= 0:
                     logger.info("paper auto %s: %s 金额不足以一手 (价 %s)", rule["name"], symbol, price)
                     continue

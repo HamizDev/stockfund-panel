@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { Clock3, Database, Loader2, Sparkles } from 'lucide-react'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import { api } from '@/lib/api'
+import { describeStrategyParameters, STRATEGY_NAMES, validDraftParameters } from './strategy-research'
 import {
   cryptoApi,
   type CryptoStrategyDraft,
@@ -62,9 +63,7 @@ function isDraftResult(value: unknown): value is CryptoStrategyDraftResult {
   if (!isRecord(value) || !isRecord(value.draft) || !isRecord(value.evidence) || !isRecord(value.diagnostics)) return false
   const draft = value.draft
   const params = draft.strategy_params
-  const validParams = isRecord(params) && (draft.strategy_id === 'ema_trend'
-    ? isFiniteNumber(params.fast_period) && isFiniteNumber(params.slow_period)
-    : draft.strategy_id === 'channel_breakout' && isFiniteNumber(params.lookback))
+  const validParams = validDraftParameters(draft.strategy_id, params)
   const evidence = value.evidence
   const diagnostics = value.diagnostics
   const signalCountsValid = isRecord(diagnostics.signal_counts) &&
@@ -75,7 +74,7 @@ function isDraftResult(value: unknown): value is CryptoStrategyDraftResult {
     !(draft.market === 'spot' && draft.exchange !== 'binance') &&
     (draft.symbol === 'BTCUSDT' || draft.symbol === 'ETHUSDT' || draft.symbol === 'SOLUSDT') &&
     (draft.interval === '1h' || draft.interval === '4h') &&
-    (draft.strategy_id === 'ema_trend' || draft.strategy_id === 'channel_breakout') &&
+    validDraftParameters(draft.strategy_id, params) &&
     validParams &&
     isFiniteNumber(draft.leverage) && draft.leverage >= 1 && draft.leverage <= 20 &&
     isFiniteNumber(draft.initial_cash) && draft.initial_cash > 0 &&
@@ -142,9 +141,7 @@ function formatRate(value: string | null | undefined) {
 }
 
 function strategyParamsLabel(draft: CryptoStrategyDraft) {
-  return 'fast_period' in draft.strategy_params
-    ? `EMA ${draft.strategy_params.fast_period} / ${draft.strategy_params.slow_period}`
-    : `通道回看 ${draft.strategy_params.lookback} 根 K 线`
+  return describeStrategyParameters(draft.strategy_id, draft.strategy_params)
 }
 
 function requestError(cause: unknown) {
@@ -290,7 +287,7 @@ export function AiStrategyDraftPanel({ onApply }: { onApply: (draft: CryptoStrat
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-sm font-semibold text-foreground">{draft.name}</div>
-          <div className="mt-1 text-xs text-secondary">{draft.exchange === 'bitget' ? 'Bitget' : 'Binance'} · {draft.market === 'spot' ? '现货' : 'U 本位合约'} · {draft.symbol} · {draft.interval} · {draft.strategy_id === 'ema_trend' ? 'EMA 趋势' : '通道突破'}</div>
+          <div className="mt-1 text-xs text-secondary">{draft.exchange === 'bitget' ? 'Bitget' : 'Binance'} · {draft.market === 'spot' ? '现货' : 'U 本位合约'} · {draft.symbol} · {draft.interval} · {STRATEGY_NAMES[draft.strategy_id]}</div>
           <div className="mt-1 text-xs text-muted">{strategyParamsLabel(draft)} · 杠杆 {draft.leverage}x · 仓位 {draft.allocation_pct}% · 初始资金 {draft.initial_cash.toLocaleString()} USDT · 止损 / 止盈 {draft.stop_loss_pct}% / {draft.take_profit_pct}%</div>
         </div>
         <button type="button" onClick={() => { if (!readOnlyDraft) { onApply(draft); setNotice('已将草案填入下方创建表。请核对策略参数后，再手动创建暂停账户。') } }} disabled={readOnlyDraft} title={readOnlyDraft ? 'Binance 历史草案仅供查看，不能用于创建 Bitget 账户。' : undefined} className="shrink-0 rounded-btn border border-accent/50 px-3 py-2 text-xs font-medium text-accent hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-50">填入账户创建表</button>

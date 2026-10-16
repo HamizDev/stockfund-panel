@@ -1,8 +1,10 @@
+import { chartPrice } from '@/lib/chartPrice'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { MinuteKlineRow, MinuteKlineSession } from '@/lib/api'
 import { computeIntradayAverage, formatMinuteTime, FULL_DAY_TIMES } from '@/lib/intraday-chart'
+import { FULL_MULTI_DAY_ZOOM, resolveMultiDayZoomState, type MultiDayZoomRange } from '@/lib/multiDayChartZoom'
 import { useChartTheme } from '@/lib/theme'
 
 const COLORS = {
@@ -151,6 +153,8 @@ export function EChartsMultiDayIntraday({
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
+  const dataZoomRangeRef = useRef<MultiDayZoomRange>(FULL_MULTI_DAY_ZOOM)
+  const tradingDaySetKeyRef = useRef<string | null>(null)
   const priceDoubleClickHandlerRef = useRef<((event: { offsetX: number; offsetY: number }) => void) | null>(null)
   const onPriceDoubleClickRef = useRef(onPriceDoubleClick)
   onPriceDoubleClickRef.current = onPriceDoubleClick
@@ -188,6 +192,13 @@ export function EChartsMultiDayIntraday({
       })
       chart.on('globalout', () => setInfo(modelRef.current.latest))
 
+      chart.on('dataZoom', () => {
+        const zoom = (chart!.getOption() as any).dataZoom?.[0]
+        if (typeof zoom?.start === 'number' && typeof zoom?.end === 'number') {
+          dataZoomRangeRef.current = { start: zoom.start, end: zoom.end }
+        }
+      })
+
       const handlePriceDoubleClick = (event: { offsetX: number; offsetY: number }) => {
         const pixel: [number, number] = [event.offsetX, event.offsetY]
         if (!chart!.containPixel({ gridIndex: 0 }, pixel)) return
@@ -207,6 +218,14 @@ export function EChartsMultiDayIntraday({
       priceDoubleClickHandlerRef.current = handlePriceDoubleClick
       chart.getZr().on('dblclick', handlePriceDoubleClick)
     }
+
+    const zoomState = resolveMultiDayZoomState(
+      tradingDaySetKeyRef.current,
+      model.dayRanges.map(({ session }) => session.date),
+      dataZoomRangeRef.current,
+    )
+    tradingDaySetKeyRef.current = zoomState.tradingDaySetKey
+    dataZoomRangeRef.current = zoomState.range
 
     const monitoredPrices = priceLines
       .map(line => line.value)
@@ -356,7 +375,7 @@ export function EChartsMultiDayIntraday({
             color: theme.text,
             fontFamily: 'JetBrains Mono, monospace',
             fontSize: 10,
-            formatter: (value: number) => value.toFixed(2),
+            formatter: (value: number) => chartPrice(value),
           },
         },
         {
@@ -372,8 +391,8 @@ export function EChartsMultiDayIntraday({
       dataZoom: [{
         type: 'inside',
         xAxisIndex: [0, 1],
-        start: 0,
-        end: 100,
+        start: zoomState.range.start,
+        end: zoomState.range.end,
         minValueSpan: FULL_DAY_TIMES.length,
         filterMode: 'none',
       }],
@@ -390,11 +409,13 @@ export function EChartsMultiDayIntraday({
       ],
     }
     chart.setOption(option, true)
+    chart.dispatchAction({ type: 'dataZoom', ...zoomState.range })
   }, [height, model, priceLines, theme])
 
   useEffect(() => () => {
     chartRef.current?.off('updateAxisPointer')
     chartRef.current?.off('globalout')
+    chartRef.current?.off('dataZoom')
     if (priceDoubleClickHandlerRef.current) {
       chartRef.current?.getZr().off('dblclick', priceDoubleClickHandlerRef.current)
     }
@@ -416,14 +437,14 @@ export function EChartsMultiDayIntraday({
           {info ? (
             <>
               <span className="text-muted">{info.date} {formatMinuteTime(info.row.datetime)}</span>
-              <span className="text-muted">开</span><span style={{ color: infoColor }}>{info.row.open != null ? info.row.open.toFixed(2) : '—'}</span>
-              <span className="text-muted">高</span><span style={{ color: infoColor }}>{info.row.high.toFixed(2)}</span>
-              <span className="text-muted">低</span><span style={{ color: infoColor }}>{info.row.low.toFixed(2)}</span>
-              <span className="text-muted">收</span><span className="font-semibold" style={{ color: infoColor }}>{info.row.close.toFixed(2)}</span>
+              <span className="text-muted">开</span><span style={{ color: infoColor }}>{info.row.open != null ? chartPrice(info.row.open) : '—'}</span>
+              <span className="text-muted">高</span><span style={{ color: infoColor }}>{chartPrice(info.row.high)}</span>
+              <span className="text-muted">低</span><span style={{ color: infoColor }}>{chartPrice(info.row.low)}</span>
+              <span className="text-muted">收</span><span className="font-semibold" style={{ color: infoColor }}>{chartPrice(info.row.close)}</span>
               {changePct != null && (
                 <span style={{ color: infoColor }}>{changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%</span>
               )}
-              <span className="text-muted">均价</span><span style={{ color: COLORS.average }}>{info.average != null ? info.average.toFixed(2) : '—'}</span>
+              <span className="text-muted">均价</span><span style={{ color: COLORS.average }}>{info.average != null ? chartPrice(info.average) : '—'}</span>
               <span className="text-muted">量</span><span className="text-secondary">{info.row.volume.toFixed(0)}</span>
               <span className="text-muted">额</span><span className="text-secondary">{formatAmount(info.row.amount)}</span>
             </>

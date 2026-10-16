@@ -1,187 +1,99 @@
-// @vitest-environment jsdom
-import { act } from 'react'
-import { createRoot } from 'react-dom/client'
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { renderToStaticMarkup } from 'react-dom/server'
+import type { ComponentProps } from 'react'
+import type { CanvasMarketChartProps } from '@/components/CanvasMarketChart'
+import type { ChartMarker, ChartPriceLine } from '@/components/EChartsCandlestick'
 import { TradingViewDailyChart } from './TradingViewDailyChart'
 import type { DailyKlineInput } from './tradingview-daily'
 
-const mocked = vi.hoisted(() => {
-  const makeSeries = () => ({
-    applyOptions: vi.fn(),
-    setData: vi.fn(),
-    setMarkers: vi.fn(),
-    createPriceLine: vi.fn(() => ({})),
-    removePriceLine: vi.fn(),
-    coordinateToPrice: vi.fn(() => 10.5),
-  })
-  const candle = makeSeries()
-  const volume = makeSeries()
-  const movingAverages = [makeSeries(), makeSeries(), makeSeries(), makeSeries()]
-  const timeScale = {
-    fitContent: vi.fn(),
-    getVisibleLogicalRange: vi.fn<() => { from: number; to: number } | null>(() => null),
-    setVisibleLogicalRange: vi.fn(),
+const mocked = vi.hoisted(() => ({ props: null as CanvasMarketChartProps | null }))
+
+vi.mock('@/components/CanvasMarketChart', async () => {
+  const React = await import('react')
+  return {
+    CanvasMarketChart: (props: CanvasMarketChartProps) => {
+      mocked.props = props
+      return React.createElement('div', { 'data-testid': 'canvas-market-chart' })
+    },
   }
-  const chart = {
-    addCandlestickSeries: vi.fn(() => candle),
-    addHistogramSeries: vi.fn(() => volume),
-    addLineSeries: vi.fn()
-      .mockReturnValueOnce(movingAverages[0])
-      .mockReturnValueOnce(movingAverages[1])
-      .mockReturnValueOnce(movingAverages[2])
-      .mockReturnValueOnce(movingAverages[3]),
-    applyOptions: vi.fn(),
-    priceScale: vi.fn(() => ({ applyOptions: vi.fn() })),
-    remove: vi.fn(),
-    subscribeClick: vi.fn(),
-    unsubscribeClick: vi.fn(),
-    subscribeCrosshairMove: vi.fn(),
-    unsubscribeCrosshairMove: vi.fn(),
-    subscribeDblClick: vi.fn(),
-    unsubscribeDblClick: vi.fn(),
-    timeScale: vi.fn(() => timeScale),
-  }
-  return { candle, chart, movingAverages, timeScale, volume }
 })
-
-vi.mock('lightweight-charts', () => ({
-  ColorType: { Solid: 0 },
-  CrosshairMode: { Normal: 0 },
-  LineStyle: { Dashed: 2, Dotted: 1 },
-  createChart: vi.fn(() => mocked.chart),
-}))
-
-vi.mock('@/lib/theme', () => ({
-  chartTheme: () => ({
-    text: '#eeeeee',
-    grid: '#333333',
-    border: '#444444',
-    crosshair: '#555555',
-    crosshairLabelBg: '#222222',
-  }),
-  useTheme: () => 'dark',
-}))
 
 const testRows: DailyKlineInput[] = [
   { date: '2026-09-28', open: 10, high: 12, low: 9, close: 11, volume: null, ma5: 10.5 },
   { date: '2026-09-30', open: 11, high: 13, low: 10, close: 12, volume: 200, ma5: 11 },
 ]
 
-let host: HTMLDivElement
-let root: ReturnType<typeof createRoot>
-let observerDisconnect: ReturnType<typeof vi.fn>
-
-beforeEach(() => {
-  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
-  for (const series of [mocked.candle, mocked.volume, ...mocked.movingAverages]) {
-    series.applyOptions.mockClear()
-    series.setData.mockClear()
-    series.setMarkers.mockClear()
-    series.createPriceLine.mockClear()
-    series.removePriceLine.mockClear()
-    series.coordinateToPrice.mockClear().mockReturnValue(10.5)
-  }
-  mocked.chart.addLineSeries.mockReset()
-    .mockReturnValueOnce(mocked.movingAverages[0])
-    .mockReturnValueOnce(mocked.movingAverages[1])
-    .mockReturnValueOnce(mocked.movingAverages[2])
-    .mockReturnValueOnce(mocked.movingAverages[3])
-  mocked.chart.addCandlestickSeries.mockClear()
-  mocked.chart.addHistogramSeries.mockClear()
-  mocked.chart.applyOptions.mockClear()
-  mocked.chart.priceScale.mockClear()
-  mocked.chart.remove.mockClear()
-  mocked.chart.subscribeClick.mockClear()
-  mocked.chart.unsubscribeClick.mockClear()
-  mocked.chart.subscribeCrosshairMove.mockClear()
-  mocked.chart.unsubscribeCrosshairMove.mockClear()
-  mocked.chart.subscribeDblClick.mockClear()
-  mocked.chart.unsubscribeDblClick.mockClear()
-  mocked.chart.timeScale.mockClear()
-  mocked.timeScale.fitContent.mockClear()
-  mocked.timeScale.getVisibleLogicalRange.mockReset().mockReturnValue(null)
-  mocked.timeScale.setVisibleLogicalRange.mockClear()
-  observerDisconnect = vi.fn()
-  vi.stubGlobal('ResizeObserver', class {
-    observe() {}
-    disconnect() { observerDisconnect() }
-  })
-  host = document.createElement('div')
-  document.body.appendChild(host)
-  root = createRoot(host)
-})
-
-afterEach(async () => {
-  await act(async () => root.unmount())
-  host.remove()
-  vi.unstubAllGlobals()
-})
-
-it('renders validated price data, omits invalid volume bars, and keeps TradingView attribution', async () => {
-  await act(async () => root.render(
+function renderChart(props: Partial<ComponentProps<typeof TradingViewDailyChart>> = {}) {
+  mocked.props = null
+  const html = renderToStaticMarkup(
     <TradingViewDailyChart
-      data={[...testRows, { ...testRows[1], date: '2026-10-01', volume: -1 }]}
+      data={testRows}
       symbol="510300.SH"
       contextKey="510300.SH|2026-09-01|2026-09-30"
+      {...props}
     />,
-  ))
+  )
+  if (!mocked.props) throw new Error('CanvasMarketChart was not rendered')
+  return { html, canvas: mocked.props }
+}
 
-  expect(mocked.candle.setData).toHaveBeenCalledWith([
-    { time: '2026-09-28', open: 10, high: 12, low: 9, close: 11 },
-    { time: '2026-09-30', open: 11, high: 13, low: 10, close: 12 },
-    { time: '2026-10-01', open: 11, high: 13, low: 10, close: 12 },
-  ])
-  expect(mocked.volume.setData).toHaveBeenCalledWith([
-    { time: '2026-09-30', value: 200, color: 'rgba(199,64,64,0.48)' },
-  ])
-  expect(host.textContent).toContain('2 根有效价格K线缺少有效成交量')
-  expect(host.textContent).toContain('开 11.00')
-  expect(host.textContent).toContain('MA5 11.00')
-  expect(host.textContent).toContain('NOTICE：TradingView Lightweight Charts™')
-  expect(host.querySelector('a[href="https://www.tradingview.com/"]')).not.toBeNull()
-  const { createChart } = await import('lightweight-charts')
-  expect(vi.mocked(createChart).mock.calls.at(-1)?.[1]?.layout).toMatchObject({ attributionLogo: true })
-})
+describe('TradingViewDailyChart Canvas adapter', () => {
+  it('validates OHLC, preserves valid candles, and forwards missing volume as null', () => {
+    const { html, canvas } = renderChart({
+      data: [
+        ...testRows,
+        { ...testRows[1], date: '2026-10-01', volume: -1 },
+        { date: '2026-10-02', open: 10, high: 9, low: 11, close: 10 },
+      ],
+    })
 
-it('does not attach a marker to a neighboring day when the exact date is absent', async () => {
-  await act(async () => root.render(
-    <TradingViewDailyChart
-      data={testRows}
-      symbol="510300.SH"
-      contextKey="510300.SH|range"
-      markers={[{ date: '2026-09-29', kind: 'buy', label: '买' }]}
-    />,
-  ))
+    expect(canvas.title).toBe('日K')
+    expect(canvas.contextKey).toBe('510300.SH|2026-09-01|2026-09-30')
+    expect(canvas.bars).toEqual([
+      { time: '2026-09-28', open: 10, high: 12, low: 9, close: 11, volume: null },
+      { time: '2026-09-30', open: 11, high: 13, low: 10, close: 12, volume: 200 },
+      { time: '2026-10-01', open: 11, high: 13, low: 10, close: 12, volume: null },
+    ])
+    expect(canvas.series?.find(series => series.id === 'ma5')?.values).toEqual([10.5, 11, 11])
+    expect(html).toContain('已忽略 1 条日期或OHLC无效的K线')
+    expect(html).toContain('2 根有效价格K线缺少有效成交量')
+    expect(html).not.toContain('Copyright')
+    expect(html).not.toContain('href="https://www.tradingview.com/"')
+  })
 
-  expect(mocked.candle.setMarkers).toHaveBeenCalledWith([])
-})
+  it('keeps markers only on exact available dates', () => {
+    const markers: ChartMarker[] = [
+      { date: '2026-09-29', kind: 'buy', label: '相邻日' },
+      { date: '2026-09-30', kind: 'buy', label: '买入' },
+    ]
+    const { canvas } = renderChart({ markers })
 
-it('forwards chart clicks by exact date and removes chart observers and listeners on cleanup', async () => {
-  const onDateClick = vi.fn()
-  const onPriceDoubleClick = vi.fn()
-  await act(async () => root.render(
-    <TradingViewDailyChart
-      data={testRows}
-      symbol="510300.SH"
-      contextKey="510300.SH|range"
-      onDateClick={onDateClick}
-      onPriceDoubleClick={onPriceDoubleClick}
-    />,
-  ))
+    expect(canvas.markers).toEqual([{
+      time: '2026-09-30', position: 'below', shape: 'arrow', color: '#C74040', label: '买入',
+    }])
+  })
 
-  const clickHandler = mocked.chart.subscribeClick.mock.calls.at(-1)?.[0] as (event: { time: unknown }) => void
-  act(() => clickHandler({ time: { year: 2026, month: 9, day: 30 } }))
-  expect(onDateClick).toHaveBeenCalledWith('2026-09-30')
-  const doubleClickHandler = mocked.chart.subscribeDblClick.mock.calls.at(-1)?.[0] as (
-    event: { point: { x: number; y: number } },
-  ) => void
-  act(() => doubleClickHandler({ point: { x: 50, y: 100 } }))
-  expect(onPriceDoubleClick).toHaveBeenCalledWith(10.5, 12)
+  it('forwards exact-date clicks, double-click prices, levels, and anchored VWAP to Canvas', () => {
+    const onDateClick = vi.fn()
+    const onPriceDoubleClick = vi.fn()
+    const priceLines: ChartPriceLine[] = [{ value: 10.5, label: '支撑', color: '#38bdf8' }]
+    const { canvas } = renderChart({
+      onDateClick,
+      onPriceDoubleClick,
+      priceLines,
+      anchoredVwap: [
+        { date: '2026-09-28', value: 10.5 },
+        { date: '2026-09-30', value: null },
+      ],
+    })
 
-  await act(async () => root.unmount())
-  expect(mocked.chart.unsubscribeClick).toHaveBeenCalledTimes(1)
-  expect(mocked.chart.unsubscribeCrosshairMove).toHaveBeenCalledTimes(1)
-  expect(mocked.chart.unsubscribeDblClick).toHaveBeenCalledTimes(1)
-  expect(observerDisconnect).toHaveBeenCalledTimes(1)
-  expect(mocked.chart.remove).toHaveBeenCalledTimes(1)
+    canvas.onBarClick?.('2026-09-30')
+    canvas.onPriceDoubleClick?.(10.5, 12)
+    expect(onDateClick).toHaveBeenCalledWith('2026-09-30')
+    expect(onPriceDoubleClick).toHaveBeenCalledWith(10.5, 12)
+    expect(canvas.priceLines).toEqual([{
+      value: 10.5, label: '支撑', color: '#38bdf8', start: undefined, end: undefined, dash: 'dashed',
+    }])
+    expect(canvas.series?.find(series => series.id === 'anchored-vwap')?.values).toEqual([10.5, null])
+  })
 })

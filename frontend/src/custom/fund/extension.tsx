@@ -5,16 +5,20 @@
  * 删除本目录即整体卸载。apiVersion: 1。
  */
 import { PiggyBank, Sparkles } from 'lucide-react'
+import { lazy } from 'react'
 import type { FrontendExtension } from '@/extensions/types'
-import { FundPage } from './FundPage'
-import { AiFundScreenerPage } from './AiFundScreenerPage'
+
+const FundPage = lazy(() => import('./FundPage').then(module => ({ default: module.FundPage })))
+const AiFundScreenerPage = lazy(() => import('./AiFundScreenerPage').then(module => ({ default: module.AiFundScreenerPage })))
+const FundRoute = () => <FundPage />
+const AiFundScreenerRoute = () => <AiFundScreenerPage />
 
 const extension: FrontendExtension = {
   id: 'fund.center',
   apiVersion: 1,
   routes: [
-    { id: 'fund-center', path: '/fund', component: FundPage },
-    { id: 'ai-fund-screener', path: '/ai-fund-screener', component: AiFundScreenerPage },
+    { id: 'fund-center', path: '/fund', component: FundRoute },
+    { id: 'ai-fund-screener', path: '/ai-fund-screener', component: AiFundScreenerRoute },
   ],
   navigation: [
     {

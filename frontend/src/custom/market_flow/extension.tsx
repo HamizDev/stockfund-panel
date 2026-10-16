@@ -5,11 +5,14 @@
  * 不修改任何核心文件。删除本目录即整体卸载。apiVersion: 1。
  */
 import { useEffect, useState } from 'react'
+import { lazy } from 'react'
 import { TrendingUp } from 'lucide-react'
 import type { FrontendExtension, FrontendSlotContextMap } from '@/extensions/types'
-import { MarketFlowPage } from './MarketFlowPage'
 import { marketFlowApi, yuanToYi, type MemberItem, type StockFlow } from './client'
 import { toSuffixed } from './symbol'
+
+const MarketFlowPage = lazy(() => import('./MarketFlowPage').then(module => ({ default: module.MarketFlowPage })))
+const MarketFlowRoute = () => <MarketFlowPage />
 
 type AnySlotContext = FrontendSlotContextMap[keyof FrontendSlotContextMap]
 type StockPreviewContext = FrontendSlotContextMap['stock-preview.footer']
@@ -139,7 +142,7 @@ function StockConcepts(props: AnySlotContext) {
 const extension: FrontendExtension = {
   id: 'market.flow',
   apiVersion: 1,
-  routes: [{ id: 'market-flow', path: '/market', component: MarketFlowPage }],
+  routes: [{ id: 'market-flow', path: '/market', component: MarketFlowRoute }],
   navigation: [
     {
       id: 'market-flow',

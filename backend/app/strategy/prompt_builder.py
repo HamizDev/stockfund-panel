@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.services.research_framework import get_research_reference
+
 # 运行时依赖的提示词文档（随 backend/app 打包进 Docker，避免 .dockerignore 排除 docs/ 导致运行时缺失）
 _DOCS_DIR = Path(__file__).resolve().parent / "prompts"
 _cache: dict[str, str] = {}
@@ -58,6 +60,7 @@ def build_step1(
 执行后端：{execution_backend}
 {bf_line}策略规则：
 {rules}
+{get_research_reference("strategy")}
 
 输出要求：
 1. 严格遵循系统提示中的策略文件结构和安全限制。
@@ -81,5 +84,6 @@ def build_step2(current_code: str, instruction: str) -> str:
 
 用户修改指令：
 {instruction}
+{get_research_reference("strategy")}
 
 只输出修改后的完整 Python 代码。"""

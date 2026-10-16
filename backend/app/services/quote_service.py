@@ -24,6 +24,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -193,6 +194,130 @@ def _monitor_name_map(repo) -> dict[str, str]:
     避免每轮监控对 ~7000 行维表 iter_rows 重建。过滤空名称与旧行为一致。
     """
     return {s: n for s, n in repo.get_name_map().items() if n}
+
+
+def _active_etf_plan_realtime_symbols(data_dir) -> list[str]:
+    """返回正在使用的 ETF 计划候选池，不创建账户/规则/订单目录。
+
+    账户 id 通过 paper.list_account_ids 读取；其余状态从已存在的 JSON 文件直接
+    读取，因为 paper.get_account/load_auto_rules/load_orders 等便利函数会 mkdir。
+    行情轮询是读路径，缺失文件应等同于没有启用的计划。
+    """
+    from app.strategy import paper
+    from app.strategy.etf_presets import FAMILIES, POOL, symbols_for
+
+    strategy_families = {
+        value["strategy_id"]: family for family, value in FAMILIES.items()
+    }
+    family_symbols = {family: set(symbols_for(family)) for family in FAMILIES}
+    account_root = paper.accounts_base(data_dir)
+    plan_symbols: set[str] = set()
+
+    def read_json(path):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def has_open_position(account_dir, account_asset_type: str) -> bool:
+        positions = read_json(account_dir / "positions.json")
+        if isinstance(positions, dict):
+            by_symbol = positions.get("positions", {})
+            if isinstance(by_symbol, dict):
+                if any(
+                    isinstance(pos, dict)
+                    and (pos.get("asset_type") or account_asset_type) == "etf"
+                    and _positive_number(pos.get("qty"))
+                    for pos in by_symbol.values()
+                ):
+                    return True
+                # A well-formed positions.json is the materialized authority.
+                return False
+
+        # Older accounts may not have materialized positions yet. A signed fill
+        # quantity is sufficient to tell whether a symbol remains held; split
+        # factors change quantity but cannot turn a positive holding into zero.
+        balances: dict[str, float] = {}
+        fills_path = account_dir / "fills.jsonl"
+        try:
+            for line in fills_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    fill = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if (not isinstance(fill, dict) or fill.get("kind") == "corp_action"
+                        or (fill.get("asset_type") or account_asset_type) != "etf"):
+                    continue
+                symbol = fill.get("symbol")
+                try:
+                    qty = float(fill.get("qty", 0))
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(symbol, str) and qty > 0:
+                    balances[symbol] = balances.get(symbol, 0.0) + (qty if fill.get("side") == "buy" else -qty)
+        except OSError:
+            return False
+        return any(qty > 1e-9 for qty in balances.values())
+
+    def _positive_number(value) -> bool:
+        try:
+            number = float(value)
+            return number > 0 and number < float("inf")
+        except (TypeError, ValueError):
+            return False
+
+    try:
+        account_ids = paper.list_account_ids(data_dir)
+    except Exception:  # noqa: BLE001 - optional demand signal must not break quotes
+        logger.warning("ETF 计划账户清单读取失败", exc_info=True)
+        return []
+
+    for account_id in account_ids:
+        try:
+            safe_id = paper.validate_account_id(account_id)
+        except ValueError:
+            continue
+        account_dir = account_root / safe_id
+        account = read_json(account_dir / "account.json")
+        if not isinstance(account, dict) or account.get("etf_plan") is not True:
+            continue
+        if account.get("asset_type") != "etf":
+            continue
+        strategy_id = account.get("strategy_id")
+        family = strategy_families.get(strategy_id)
+        if family is None:
+            continue
+
+        enabled_auto_rule = False
+        rules_dir = account_dir / "auto_rules"
+        if rules_dir.is_dir():
+            for rule_path in rules_dir.glob("arule_*.json"):
+                rule = read_json(rule_path)
+                if (isinstance(rule, dict) and rule.get("enabled") is True
+                        and rule.get("match_kind") == "strategy"
+                        and rule.get("match_id") == strategy_id
+                        and rule.get("asset_type") in (None, "etf")):
+                    enabled_auto_rule = True
+                    break
+
+        has_pending_buy = False
+        orders_dir = account_dir / "orders"
+        if orders_dir.is_dir():
+            for order_path in orders_dir.glob("order_*.json"):
+                order = read_json(order_path)
+                if (isinstance(order, dict) and order.get("status") == "pending"
+                        and order.get("side") == "buy"
+                        and (order.get("asset_type") or "etf") == "etf"):
+                    has_pending_buy = True
+                    break
+
+        account_asset_type = account.get("asset_type", "etf")
+        if enabled_auto_rule or has_pending_buy or has_open_position(account_dir, account_asset_type):
+            plan_symbols.update(family_symbols[family])
+
+    # Canonical pool order keeps the request deterministic and every requested
+    # plan symbol comes from the explicit 15-ETF allowlist.
+    return [symbol for symbol, *_ in POOL if symbol in plan_symbols]
 
 
 class QuoteService:
@@ -695,8 +820,8 @@ class QuoteService:
                             logger.warning("自定义源指数行情拉取失败: %s", e)
                             replace_index_cache = False
                     # ETF/LOF 补充: 场内基金快照是独立单标的端点 (如 fuyao
-                    # /api/fund/market)。只补自选里的 ETF/LOF (上限 60 只),
-                    # 避免全市场逐只打爆上游。插件可选实现 get_realtime_etfs。
+                    # /api/fund/market)。保留自选补拉；启用且正在使用的 ETF
+                    # 计划候选优先加入请求，再用自选填充到 60 只上限。
                     fetch_etfs = getattr(provider, "get_realtime_etfs", None)
                     if callable(fetch_etfs):
                         try:
@@ -709,16 +834,24 @@ class QuoteService:
                                     etf_universe = set(
                                         etf_inst["symbol"].cast(pl.Utf8).to_list()
                                     )
+                            plan_etfs: list[str] = []
+                            if preferences.get_realtime_pull_etf() and self._repo:
+                                store = getattr(self._repo, "store", None)
+                                data_dir = getattr(store, "data_dir", None)
+                                if data_dir is not None:
+                                    plan_etfs = _active_etf_plan_realtime_symbols(data_dir)
+                                    shortterm = getattr(self._app_state, "etf_shortterm_service", None)
+                                    if shortterm:
+                                        plan_etfs = list(dict.fromkeys([*plan_etfs, *shortterm.realtime_symbols()]))
                             watch = get_pool("watchlist") or []
                             if etf_universe:
                                 # 有 ETF 维表时只补维表确认过的 ETF/LOF
-                                wanted_etfs = sorted(
-                                    {s for s in watch if s in etf_universe}
-                                )[:60]
+                                watch_etfs = sorted({s for s in watch if s in etf_universe})
                             else:
                                 # 无维表时把自选逐只试探: 非场内基金上游返回
                                 # code=3004 由 provider 单只跳过, 不猜代码格式
-                                wanted_etfs = list(dict.fromkeys(watch))[:60]
+                                watch_etfs = list(dict.fromkeys(watch))
+                            wanted_etfs = list(dict.fromkeys([*plan_etfs, *watch_etfs]))[:60]
                             if wanted_etfs:
                                 fetched_etfs = fetch_etfs(wanted_etfs)
                                 if fetched_etfs:
@@ -867,6 +1000,9 @@ class QuoteService:
 
         index_records = [r for r in records if r.get("symbol") in all_index_symbols]
         etf_records = [r for r in records if r.get("symbol") in all_etf_symbols]
+        shortterm = getattr(self._app_state, "etf_shortterm_service", None) if self._app_state else None
+        if shortterm:
+            shortterm.update_quotes(etf_records, source_timestamps=preferences.get_realtime_data_provider() in {"stocksdk", "tickflow"})
         stock_records = [
             r for r in records
             if r.get("symbol") not in all_index_symbols and r.get("symbol") not in all_etf_symbols

@@ -51,7 +51,7 @@ except ImportError:
     prange = range
 
 _MATRIX_CACHE_VERSION = 1
-_DIRECT_MATRIX_LOADER_VERSION = 4
+_DIRECT_MATRIX_LOADER_VERSION = 5
 _MATRIX_AXIS_INDEX_VERSION = 1
 _ARROW_BATCH_SIZE = 131_072
 _SCORE_ASSET_CHUNK_SIZE = 256
@@ -169,6 +169,7 @@ class MatrixComputeCache:
                 "low": market.low,
                 "close": market.close,
                 "volume": market.volume,
+                "observed": market.observed,
                 "tradable": market.tradable,
                 "limit_up_locked": market.limit_up_locked,
                 "limit_down_locked": market.limit_down_locked,
@@ -439,6 +440,7 @@ class MarketDataMatrix:
     limit_up_locked: np.ndarray
     limit_down_locked: np.ndarray
     fields: Mapping[str, np.ndarray]
+    observed: np.ndarray | None = None
     cache_status: str = "memory"
     cache_path: str | None = None
     cache_lease: Any | None = field(default=None, compare=False, repr=False)
@@ -449,6 +451,17 @@ class MarketDataMatrix:
         compare=False,
         repr=False,
     )
+
+    def __post_init__(self) -> None:
+        if self.observed is None:
+            # Compatibility for manually constructed matrices; builders retain
+            # actual source rows, including rows whose entire OHLC is missing.
+            observed = (~np.isnan(self.open) | ~np.isnan(self.high)
+                        | ~np.isnan(self.low) | ~np.isnan(self.close))
+            observed.flags.writeable = False
+            object.__setattr__(self, "observed", observed)
+        elif self.observed.shape != self.open.shape:
+            raise ValueError("observed mask must match market matrix shape")
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -464,6 +477,7 @@ class MarketDataMatrix:
             self.low,
             self.close,
             self.volume,
+            self.observed,
             self.tradable,
             self.limit_up_locked,
             self.limit_down_locked,
@@ -579,6 +593,8 @@ def build_market_data_matrix(
 
     timestamp_col, unique_timestamps, symbol_values, time_id, asset_id = _encode_axes(panel)
     shape = (len(unique_timestamps), len(symbol_values))
+    observed = np.zeros(shape, dtype=bool)
+    observed[time_id, asset_id] = True
 
     def float_matrix(
         column: str,
@@ -652,6 +668,7 @@ def build_market_data_matrix(
         low,
         close,
         volume,
+        observed,
         tradable,
         limit_up_locked,
         limit_down_locked,
@@ -674,6 +691,7 @@ def build_market_data_matrix(
         limit_up_locked=limit_up_locked,
         limit_down_locked=limit_down_locked,
         fields=MappingProxyType(fields),
+        observed=observed,
     )
 
 
@@ -1020,6 +1038,7 @@ def _build_market_data_matrix_from_dataset(
     _make_read_only(
         timestamps,
         session_ids,
+        seen,
         *arrays.values(),
         tradable,
         limit_up_locked,
@@ -1042,6 +1061,7 @@ def _build_market_data_matrix_from_dataset(
         limit_down_locked=limit_down_locked,
         fields=MappingProxyType(fields),
         cache_status=cache_status,
+        observed=seen,
     )
 
 
@@ -1134,6 +1154,7 @@ def _build_market_data_matrix_cache_from_dataset(
         _raise_if_matrix_cancelled(cancel_event)
         if not seen.any():
             raise ValueError("matrix parquet range contains no requested market data")
+        arrays["observed"][:] = seen
         timing_ms["scan"] = round((time.perf_counter() - stage_started) * 1000, 1)
         stage_started = time.perf_counter()
         _mask_unseen_staging_core(arrays, fields, parquet_fields, seen)
@@ -1241,6 +1262,7 @@ def _matrix_binary_layout(
         ("low", np.dtype(np.float32), shape),
         ("close", np.dtype(np.float32), shape),
         ("volume", np.dtype(np.float32), shape),
+        ("observed", np.dtype(np.uint8), shape),
         ("tradable", np.dtype(np.uint8), shape),
         ("limit_up_locked", np.dtype(np.uint8), shape),
         ("limit_down_locked", np.dtype(np.uint8), shape),
@@ -1773,6 +1795,7 @@ def _load_market_data_matrix_cache(
         fields=MappingProxyType(fields),
         cache_status=cache_status,
         cache_path=str(path),
+        observed=arrays["observed"],
         cache_lease=_MatrixDiskCacheLease(path),
         vector_fields=vector_field_names,
         cache_timing_ms=MappingProxyType({
@@ -1829,6 +1852,7 @@ def _slice_and_project_market_data_matrix(
         limit_up_locked=sliced.limit_up_locked,
         limit_down_locked=sliced.limit_down_locked,
         fields=projected,
+        observed=sliced.observed,
         cache_status=sliced.cache_status,
         cache_path=sliced.cache_path,
         cache_lease=sliced.cache_lease,
@@ -2490,6 +2514,7 @@ def slice_market_data_matrix(market: MarketDataMatrix, start: int, stop: int) ->
         limit_down_locked=market.limit_down_locked[start:stop],
         fields=MappingProxyType(fields),
         cache_status=market.cache_status,
+        observed=market.observed[start:stop],
         cache_path=market.cache_path,
         cache_lease=market.cache_lease,
         vector_fields=market.vector_fields,
@@ -2503,6 +2528,7 @@ def slice_market_data_matrix(market: MarketDataMatrix, start: int, stop: int) ->
         result.low,
         result.close,
         result.volume,
+        result.observed,
         result.tradable,
         result.limit_up_locked,
         result.limit_down_locked,
@@ -2591,6 +2617,7 @@ def _live_target_asset_ids(
 
 def _market_array_fields() -> tuple[str, ...]:
     return (
+        "observed",
         "open",
         "high",
         "low",
@@ -2615,6 +2642,7 @@ def _writable_market_copy(market: MarketDataMatrix) -> MarketDataMatrix:
         low=np.array(market.low, copy=True),
         close=np.array(market.close, copy=True),
         volume=np.array(market.volume, copy=True),
+        observed=np.array(market.observed, copy=True),
         tradable=np.array(market.tradable, copy=True),
         limit_up_locked=np.array(market.limit_up_locked, copy=True),
         limit_down_locked=np.array(market.limit_down_locked, copy=True),
@@ -2641,6 +2669,7 @@ def _readonly_market_view(market: MarketDataMatrix) -> MarketDataMatrix:
         low=_readonly_view(market.low),
         close=_readonly_view(market.close),
         volume=_readonly_view(market.volume),
+        observed=_readonly_view(market.observed),
         tradable=_readonly_view(market.tradable),
         limit_up_locked=_readonly_view(market.limit_up_locked),
         limit_down_locked=_readonly_view(market.limit_down_locked),
@@ -3770,6 +3799,7 @@ _MATRIX_COMPUTED_FEATURES = frozenset({
     "macd_dif", "macd_dea", "macd_hist",
     "macd_dif_pct", "macd_dea_pct", "macd_hist_pct",
     "kdj_k", "kdj_d", "kdj_j", "atr_14", "atr_pct",
+    "adx_14", "adx_plus_di_14", "adx_minus_di_14",
     "vol_ma5", "vol_ma10", "vol_ratio_5d", "vol_ratio_10d", "vol_trend_5_10",
     "turnover_ratio_5d", "log_amount", "amount_ratio_5d",
     "gap_return", "intraday_return", "close_position",
@@ -3804,13 +3834,26 @@ def matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
     with _activate_valid_bar_index(market.valid_bars):
         return _cached_matrix_operation(
             "matrix_feature",
-            (market.close,),
+            ((market.open, market.high, market.low, market.close, market.observed)
+             if name in {"adx_14", "adx_plus_di_14", "adx_minus_di_14"}
+             else (market.close,)),
             {"name": name},
             lambda: _compute_matrix_feature(market, name),
         )
 
 
 def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
+    if name in {"adx_14", "adx_plus_di_14", "adx_minus_di_14"}:
+        from app.indicators.adx import compute_adx_matrix
+
+        directional = _cached_matrix_operation(
+            "directional_wilder_14",
+            (market.open, market.high, market.low, market.close, market.observed), {},
+            lambda: compute_adx_matrix(
+                market.open, market.high, market.low, market.close, market.observed,
+            ),
+        )
+        return directional[("adx_14", "adx_plus_di_14", "adx_minus_di_14").index(name)]
     close_valid = np.isfinite(market.close)
     if name == "prev_close":
         return valid_shift(market.close, 1, close_valid)

@@ -75,11 +75,12 @@ export function HoldingsDailyReview({
 
   useEffect(() => {
     if (!loaded || !state || state.status !== 'not_generated' || state.holdings_count <= 0) return
-    if (!state.today || autoStartedDays.current.has(state.today)) return
+    const generationKey = state.today
+    if (!state.today || autoStartedDays.current.has(generationKey)) return
     // 以服务端返回的北京时间日期为准，同一页面生命周期一天最多自动调用一次。
-    autoStartedDays.current.add(state.today)
+    autoStartedDays.current.add(generationKey)
     mutate(false)
-  }, [loaded, mutate, state])
+  }, [loaded, mutate, state, holdingSignature])
 
   const manualGenerate = () => {
     startMutation.reset()
@@ -87,7 +88,7 @@ export function HoldingsDailyReview({
   }
 
   const report = state?.report ?? null
-  const showPrevious = !!report && report.report_date !== state?.today
+  const showPrevious = !!report && (report.report_date !== state?.today || state?.report_current === false)
   const canManuallyGenerate = !!state && state.status !== 'running' && state.status !== 'empty' && state.status !== 'unconfigured'
 
   return (
@@ -136,6 +137,10 @@ export function HoldingsDailyReview({
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span>{report?.error ?? '今日分析未完成。可检查行情日期和 AI 配置后手动重试。'}</span>
             </div>
+          </div>
+        ) : state?.status === 'outdated' ? (
+          <div className="rounded-lg border border-warning/30 bg-warning/5 p-3 text-xs text-secondary" role="status">
+            当前持仓或模型已有变化；今天已生成过一次。请手动重新生成以更新操作分析，避免自动反复消耗额度。
           </div>
         ) : state?.status === 'not_generated' ? (
           startMutation.isError ? (
@@ -202,6 +207,25 @@ export function HoldingsDailyReview({
                   ))}
                 </ul>
               </details>
+            )}
+            {!!report.actions?.length && (
+              <div className="grid gap-3 xl:grid-cols-2" aria-label="逐持仓操作分析">
+                {report.actions.map(item => (
+                  <article key={item.symbol} className="rounded-lg border border-border bg-base/40 p-3">
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="text-xs font-semibold text-foreground">{item.name} <span className="font-mono font-normal text-muted">{item.symbol}</span></h3>
+                      <span className="rounded-md border border-accent/25 bg-accent/10 px-2 py-1 text-[11px] text-accent">{item.action}</span>
+                    </div>
+                    <p className="mb-2 text-[10px] text-muted">依据数据日 {item.data_date || '未知'} · 条件式研究建议</p>
+                    <dl className="space-y-2 text-[11px] leading-5 text-secondary">
+                      <div><dt className="text-muted">依据</dt><dd>{item.reason}</dd></div>
+                      <div><dt className="text-muted">执行条件</dt><dd>{item.trigger}</dd></div>
+                      <div><dt className="text-muted">失效 / 反向条件</dt><dd>{item.invalidation}</dd></div>
+                      {!!item.missing_data.length && <div><dt className="text-warning">待补资料</dt><dd>{item.missing_data.join('、')}</dd></div>}
+                    </dl>
+                  </article>
+                ))}
+              </div>
             )}
             {report.content.trim() && (
               <div className="border-t border-border/60 pt-3 text-xs leading-6 text-secondary">

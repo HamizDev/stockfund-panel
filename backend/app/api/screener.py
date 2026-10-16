@@ -851,34 +851,22 @@ def limit_ladder(
     count_up_raw = int(df.filter(pl.col("signal_limit_up").fill_null(False)).height) if "signal_limit_up" in df.columns else 0
     count_down_raw = int(df.filter(pl.col("signal_limit_down").fill_null(False)).height) if "signal_limit_down" in df.columns else 0
 
-    # 双方向 sealed 修正: 减去各自的假涨停(假涨停已归炸板, 不计入涨停数)
+    # Quote breadth and independently timed depth snapshots must not change each other's counts.
+    from app.services.limit_counts import sealed_counts
+
     depth_svc_global = getattr(request.app.state, "depth_service", None)
-    fake_up = 0
-    fake_down = 0
-    sealed_up_ready = False
-    sealed_down_ready = False
+    up_map, down_map = {}, {}
+    sealed_up_ready = sealed_down_ready = False
     if depth_svc_global:
         up_map = depth_svc_global.get_sealed_map(as_of, is_down=False)
         down_map = depth_svc_global.get_sealed_map(as_of, is_down=True)
-        sealed_up_ready = bool(up_map) and depth_svc_global.is_sealed_ready(as_of)
-        sealed_down_ready = bool(down_map) and depth_svc_global.is_sealed_ready(as_of)
-        if up_map:
-            fake_up = sum(1 for v in up_map.values() if v.get("sealed") is False)
-        if down_map:
-            fake_down = sum(1 for v in down_map.values() if v.get("sealed") is False)
-    count_up = count_up_raw - fake_up if sealed_up_ready else count_up_raw
-    count_down = count_down_raw - fake_down if sealed_down_ready else count_down_raw
-
-    # 双方向 sealed 明细(供前端弹窗同时显示涨跌停)
-    def _count_sealed(m: dict, ready: bool):
-        if not m or not ready:
-            return {"real": 0, "fake": 0, "pending": 0}
-        real = sum(1 for v in m.values() if v.get("sealed") is True)
-        fake = sum(1 for v in m.values() if v.get("sealed") is False)
-        pending = sum(1 for v in m.values() if v.get("sealed") is None)
-        return {"real": real, "fake": fake, "pending": pending}
-    sealed_counts_up = _count_sealed(up_map, sealed_up_ready)
-    sealed_counts_down = _count_sealed(down_map, sealed_down_ready)
+        ready = depth_svc_global.is_sealed_ready(as_of)
+        sealed_up_ready, sealed_down_ready = bool(up_map) and ready, bool(down_map) and ready
+    up_symbols = df.filter(pl.col("signal_limit_up").fill_null(False))["symbol"].to_list() if "signal_limit_up" in df.columns else []
+    down_symbols = df.filter(pl.col("signal_limit_down").fill_null(False))["symbol"].to_list() if "signal_limit_down" in df.columns else []
+    sealed_counts_up = sealed_counts(up_symbols, up_map, sealed_up_ready)
+    sealed_counts_down = sealed_counts(down_symbols, down_map, sealed_down_ready)
+    count_up, count_down = count_up_raw, count_down_raw
 
     # 加载前一日的 prev consecutive_limit_ups/downs
     # 窄读: 仅取前一交易日的 [symbol, consec_col] 两列 (存储列, 直接谓词下推读 parquet),
@@ -911,8 +899,7 @@ def limit_ladder(
     df = df.filter(pl.col("status").is_not_null() & (pl.col("boards") > 0))
 
     # ── 五档 sealed 叠加(独立旁路, 不改 signal_limit_up) ──
-    # 假涨停(收盘价=涨停价但卖一有量)从 limit 降级为 broken(归炸板视图)
-    # 真涨停保留 + 附封单量; sealed=null(待确认/降级)保持原状
+    # Depth is evidence only: a different snapshot must not rewrite price-limit status.
     depth_svc = getattr(request.app.state, "depth_service", None)
     sealed_ready = False
     sealed_age: float | None = None
@@ -937,21 +924,15 @@ def limit_ladder(
 
             if not sealed_rows.is_empty():
                 df = df.join(sealed_rows, on="symbol", how="left")
-                # 假涨停(main 状态但 sealed=False)→ 降级为 broken
                 df = df.with_columns(
-                    pl.when(
-                        (pl.col("status") == status_main)
-                        & pl.col("_sealed").is_not_null()
-                        & (pl.col("_sealed") == False)  # noqa: E712
-                    ).then(pl.lit(status_broken))
-                    .otherwise(pl.col("status")).alias("status"),
                     # sealed_status: real/fake/pending/null
                     pl.when(
                         (pl.col("status") == status_main)
                         & (pl.col("_sealed") == True)  # noqa: E712
                     ).then(pl.lit("real"))
                     .when(
-                        (pl.col("_sealed") == False)  # noqa: E712
+                        (pl.col("status") == status_main)
+                        & (pl.col("_sealed") == False)  # noqa: E712
                     ).then(pl.lit("fake"))
                     .when(
                         (pl.col("status") == status_main)

@@ -140,8 +140,8 @@ export function StockInfoBar({
       <div className="px-2 pb-3 font-mono text-[12px] select-none space-y-1">
         {/* 首行 min-h-7 对齐完整态的 text-lg 价格行高, 加载中不整体变矮 */}
         <div className="flex min-h-7 items-baseline gap-x-3 flex-wrap">
-          <span className="text-foreground font-bold text-sm tracking-wide">{symbol}</span>
-          {name && <span className="text-secondary font-medium">{name}</span>}
+          <span className="font-sans text-foreground font-semibold text-sm">{stockInfo?.name || name || '名称读取中…'}</span>
+          <span className="text-muted text-[10px]">{symbol}</span>
           <span className="ml-auto self-center text-muted">
             <span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border-[1.5px] border-current border-t-transparent" />
           </span>
@@ -245,8 +245,8 @@ export function StockInfoBar({
     <div className="px-2 pb-3 font-mono text-[12px] select-none space-y-1">
       {/* Row 1: code, name, price, change, change% */}
       <div className="flex items-baseline gap-x-3 flex-wrap">
-        <span className="text-foreground font-bold text-sm tracking-wide">{symbol}</span>
-        <span className="text-secondary font-medium">{displayName}</span>
+        <span className="font-sans text-foreground font-semibold text-sm">{displayName || '名称暂缺'}</span>
+        <span className="text-muted text-[10px]">{symbol}</span>
         <span style={{ color: clr }} className="text-lg font-bold tabular-nums">
           {fmtPrice(close)}
         </span>

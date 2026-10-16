@@ -9,8 +9,6 @@
 > 无代码接入(纯 HTTP YAML 配置)请看 [custom-data-source.md](./custom-data-source.md),
 > 两种方式遵循同一套内部数据契约。
 
-本机研究用的可选分钟连接器见 [ELTDX 研究分钟与股票全量分钟](./eltdx-gateway.md)。它依赖单独安装的研究许可程序，不捆绑本体；单只分钟支持股票和 ETF，全量分钟仅采集股票当日数据。
-
 ## 快速上手
 
 一个插件 = 一个目录 + 一个 `plugin.yaml` 清单:
@@ -30,7 +28,7 @@ display_name: "我的数据源"                 # 设置页显示名
 runtime: none                            # 运行时类型: node | python | none
 entry: app.plugins.my_source.provider:MyProvider   # provider 类的导入路径
 check: app.plugins.my_source.bridge:availability   # 可用性检测函数(可选)
-datasets: [realtime]                     # 支持: daily/adj_factor/minute/full_minute/realtime/depth5/financial
+datasets: [realtime]                     # 支持: daily/adj_factor/minute/realtime/depth5/financial
 api_key_env: MY_SOURCE_API_KEY           # (可选)声明后设置页提供 Key 输入框
 hidden: false                            # (可选)true = 已加载但对设置页隐藏,不注册不展示
 description: "数据源描述"
@@ -221,10 +219,10 @@ provider 不应自行切换或回退到其他数据源。
 深历史（TickFlow 基准）。浅源（如 stock-sdk 免费分时仅保留最近 5 个交易日）声明后，
 个股分时档位自动收窄为可行选项并默认 5 日，深源默认 20 日。
 
-> **全量分钟 (`full_minute`) 数据集契约**:声明 `full_minute` 数据集并把
+> **全量分钟 (full_minute) 数据集契约**:声明 `full_minute` 数据集并把
 > `full_minute_data_provider` 路由到你的源,即接入「全量分钟」能力(盘中全市场
-> 当日分钟K落盘,由内置服务 `minute_refresh` 调度,与 TickFlow Expert 共用
-> `intraday.universe` 能力键)。需实现:
+> 当日分钟K增量落盘,由内置服务 `minute_refresh` 调度,与 TickFlow Expert 同一
+> 能力键 `intraday.universe`)。需实现:
 >
 > - `get_intraday_batch(symbols, count=300, asset_type="stock") -> pl.DataFrame`
 >   — **必须**(或已有 `get_minute` 自动回退,但强烈建议实现批量端点)。
@@ -233,26 +231,11 @@ provider 不应自行切换或回退到其他数据源。
 >   内部自行分块/限速。服务在冷启动、覆盖断档、连续空轮时调用(修复轮)。
 > - `get_intraday_latest(symbols=None, count=3) -> pl.DataFrame` — **可选**,
 >   稳态增量轮专用:尽量单请求返回全市场每只标的最新 `count` 根。未实现时
->   服务自动降级为仅修复轮,默认节奏下限为 60s。
-> - 类属性 `full_minute_min_interval_s: int` — **可选**,仅在仅修复轮时提高最小轮间隔。
->   实际间隔为 `max(用户设置, 60, 属性值)`;属性值最高按 3600 秒计算,缺省或无效时按 60 秒。
-> - `get_intraday_status() -> dict` — **可选**,无网络/磁盘操作地返回当前采集状态。服务将结果放在
->   分钟刷新状态的 `collection` 字段中,供界面展示覆盖情况。建议返回:
->   `requested_symbols`、`covered_symbols`、`empty_symbols`、`failed_symbols`、
->   `unqueried_symbols`、`collecting`、`collection_complete`、`requests` 和
->   `oldest_latest_bar`。计数均为整数;`collecting` / `collection_complete` 为布尔值;
->   `oldest_latest_bar` 为北京时间墙钟 naive `datetime` 或 `None`。其中
->   `covered_symbols` 表示至少返回一条有效分钟行的标的;空数据、请求失败和未查询
->   应分别计数。若提供此状态方法,只有未采集中、完整覆盖且最旧的最新 bar 不落后超过
->   180 秒时,本地全量分钟分区才可用于本地优先批量读取;不满足时,批量消费者继续按
->   常规缺失/陈旧标的路径请求 provider。健康标志只优化股票列表的陈旧尾部刷新,不会
->   抑制显式单只实时查询;覆盖缺口和 ETF 仍按需补拉。
+>   服务自动降级为仅修复轮,节奏下限抬到 60s(全天批量打不住 6s 节奏)。
 >
-> 返回帧都过 `_enforce_minute_beijing_wallclock` 时区守卫(与
+> 两个方法的返回帧都过 `_enforce_minute_beijing_wallclock` 时区守卫(与
 > `get_minute` 同纪律);失败抛异常或返回空 df 均按空轮处理,连续空轮触发
-> 修复轮自愈。修复轮可返回已成功标的的数据,但服务会按完整 universe 计算覆盖;
-> 有空数据、失败或未查询标的时,状态保持未覆盖齐,不能让本地快照阻止单只补拉。
-> 声明方式:插件在 `plugin.yaml` 的 `datasets:` 列表加入
+> 修复轮自愈。声明方式:插件在 `plugin.yaml` 的 `datasets:` 列表加入
 > `full_minute`。YAML 声明式源同样支持(数据集配置与 `minute` 同形,仅提供
 > 修复轮语义,见 [custom-data-source.md](./custom-data-source.md))。
 
@@ -263,7 +246,7 @@ provider 不应自行切换或回退到其他数据源。
 | `get_realtime` | **软失败**: 返回 `[]` + warning 日志, 保证轮询线程不中断 |
 | `get_realtime_indices` | **软失败**: 返回 `None` + warning 日志, 保留上轮有效缓存; 成功无数据返回 `[]` |
 | `get_depth_batch` | 单批异常由服务隔离并保留其他批次; 不跨数据源回退 |
-| `get_minute` | 默认异常时回退 TickFlow；显式声明 `minute_fail_closed=True` 的研究源直接报错，不跨源替代 |
+| `get_minute` | 抛异常时调用方自动回退 TickFlow 重试 |
 | `get_daily` / `get_adj_factors` / `get_financials` | 异常由上层同步流程捕获记录; 无数据返回空 DataFrame |
 | `iter_daily` | 可选; 每批必须符合 `get_daily` 契约。流正常结束后才提交 staging; 未捕获异常会丢弃 staging。provider 内已定义的单标的软失败语义保持不变 |
 
@@ -337,8 +320,6 @@ uv run --extra dev python -m ruff check app/plugins/<your_plugin>/ tests/test_<y
   - `bridge.py` — Python↔Node 桥接 + availability 检测
   - `bridge.mjs` — Node 端(并发池、重试、SDK 解析)
   - `provider.py` — Provider 实现(归一化、分批、错误降级)
-  - 全市场股票快照之外，使用 `get_realtime_indices(symbols)` 和 `get_realtime_etfs(symbols)` 补拉沪深指数及自选 ETF/LOF；复用 SDK 的腾讯公开接口，无需新 Key。指数由服务的明确清单指定，ETF/LOF 由维表确认，仅补自选、上限 60 只，不枚举全市场基金。
-  - 指定标的桥接使用 `realtime_symbols` / `sdk.quotes.cn`，保留上游行情时间戳，不以请求时间伪造新鲜度；涨跌幅百分数转小数、成交额万元转元。补拉失败返回 `None`，与成功但无数据的 `[]` 区分；非空响应无法识别请求标的时按失败处理，指数失败时服务保留上一份有效缓存。本地指数日线兜底仍是历史参考价。
 
 ## 路由机制(无需关心, 仅参考)
 

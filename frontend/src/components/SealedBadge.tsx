@@ -7,7 +7,7 @@ import { HelpCircle } from 'lucide-react'
 import { api } from '@/lib/api'
 import { toast } from '@/components/Toast'
 
-/** 单方向(涨停/跌停)的修正明细块 */
+/** 单方向价格计数及独立的盘口证据。 */
 function SealedDirBlock({ title, color, counts, rawTotal }: {
   title: string
   color: 'bull' | 'bear'
@@ -16,25 +16,22 @@ function SealedDirBlock({ title, color, counts, rawTotal }: {
 }) {
   const real = counts?.real ?? 0
   const fake = counts?.fake ?? 0
-  // pending 从原始总数推算(后端 pending 含另一方向票, 不可用)
+  // A missing depth snapshot is pending, never evidence that a price-limit quote is false.
   const pending = Math.max(0, (rawTotal ?? 0) - real - fake)
   const original = rawTotal ?? (real + fake + pending)
-  const fixed = real + pending
   return (
     <div className="mb-2 last:mb-0">
       <div className={`flex items-center justify-between px-1 py-0.5 rounded bg-${color}/5 mb-1`}>
         <span className={`text-[10px] font-medium text-${color}`}>{title}</span>
         <span className="tabular-nums text-[10px]">
-          <span className="text-muted line-through">{original}</span>
-          <span className="text-muted/50 mx-1">→</span>
-          <span className={`font-bold text-${color}`}>{fixed}</span>
+          <span className={`font-bold text-${color}`}>价格触及 {original}</span>
         </span>
       </div>
       <div className="flex gap-3 px-1 text-[10px]">
-        <span className={`flex items-center gap-0.5 text-${color}`}><span className={`h-1 w-1 rounded-full bg-${color}`} />真封 {real}</span>
-        <span className="flex items-center gap-0.5 text-yellow-500"><span className="h-1 w-1 rounded-full bg-yellow-500" />假 {fake}</span>
+        <span className={`flex items-center gap-0.5 text-${color}`}><span className={`h-1 w-1 rounded-full bg-${color}`} />有封单 {real}</span>
+        <span className="flex items-center gap-0.5 text-yellow-500"><span className="h-1 w-1 rounded-full bg-yellow-500" />未封 {fake}</span>
         {pending > 0 && (
-          <span className="flex items-center gap-0.5 text-muted"><span className="h-1 w-1 rounded-full bg-muted" />待 {pending}</span>
+          <span className="flex items-center gap-0.5 text-muted"><span className="h-1 w-1 rounded-full bg-muted" />待核对 {pending}</span>
         )}
       </div>
     </div>
@@ -70,11 +67,11 @@ export function SealedBadge({ degraded, hasDepth, isHistorical, sealedReady, sea
 
   // 组装原因文案(仅降级时用)
   const reasons: string[] = []
-  if (!hasDepth) reasons.push('五档盘口数据不可用,涨停判定基于收盘价,可能含假涨停')
-  if (isHistorical) reasons.push('历史日期的盘口快照不可获取,无法判定真假板')
-  if (hasDepth && !isHistorical && !sealedReady) reasons.push('盘中 sealed 数据尚未就绪,收盘后自动恢复')
+  if (!hasDepth) reasons.push('五档盘口数据不可用，价格涨跌停计数仍保留')
+  if (isHistorical) reasons.push('历史日期缺少盘口快照，不能确认当时封单')
+  if (hasDepth && !isHistorical && !sealedReady) reasons.push('当日盘口快照尚未就绪')
 
-  const label = degraded ? '降级' : '修正'
+  const label = degraded ? '盘口待核对' : '盘口'
 
   return (
     <>
@@ -118,7 +115,7 @@ export function SealedBadge({ degraded, hasDepth, isHistorical, sealedReady, sea
               >
                 {degraded ? (
                   <>
-                    <div className="font-medium text-foreground mb-1.5">真假涨停判定降级</div>
+                    <div className="font-medium text-foreground mb-1.5">盘口证据待核对</div>
                     {reasons.map((r, i) => (
                       <div key={i} className="flex gap-1 mb-1">
                         <span className="text-yellow-500 shrink-0">·</span>
@@ -126,16 +123,16 @@ export function SealedBadge({ degraded, hasDepth, isHistorical, sealedReady, sea
                       </div>
                     ))}
                     <div className="mt-1.5 pt-1.5 border-t border-border text-muted">
-                      真假板判定依赖五档盘口实时快照(卖一/买一量)。配置提供五档盘口的数据源后,当天数据在收盘后自动恢复。
+                      涨跌停家数按当日涨跌停价与最新价统计。盘口封单是另一时点的证据，缺少快照不会扣减家数。
                     </div>
                   </>
                 ) : (
                   <>
-                    <div className="font-medium text-foreground mb-1.5">五档盘口修正结果</div>
+                    <div className="font-medium text-foreground mb-1.5">价格计数与盘口证据</div>
                     <SealedDirBlock title="涨停" color="bull" counts={sealedCountsUp} rawTotal={rawUp} />
                     <SealedDirBlock title="跌停" color="bear" counts={sealedCountsDown} rawTotal={rawDown} />
                     <div className="mt-1.5 pt-1.5 border-t border-border text-muted">
-                      真封板显示封单量,假涨停/假跌停已归入炸板/翘板视图。{sealedReady && '数据为盘中快照,收盘后自动定版。'}
+                      盘口只统计这些价格触板标的，不改变涨跌停家数或梯队。{sealedReady && '快照可能与收盘行情时点不同。'}
                     </div>
                   </>
                 )}
@@ -146,7 +143,7 @@ export function SealedBadge({ degraded, hasDepth, isHistorical, sealedReady, sea
                       disabled={runFix.isPending}
                       className="flex-1 px-2 py-1.5 rounded text-[11px] bg-accent/15 text-accent hover:bg-accent/25 transition-colors text-center disabled:opacity-50"
                     >
-                      {runFix.isPending ? '修正中…' : '立即修正'}
+                      {runFix.isPending ? '刷新中…' : '刷新盘口'}
                     </button>
                   )}
                   <button

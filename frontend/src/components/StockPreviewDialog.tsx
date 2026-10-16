@@ -22,6 +22,7 @@ import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { storage } from '@/lib/storage'
 import { navItemKey, type NavItem } from '@/lib/listNav'
 import { useListNav } from '@/lib/useListNav'
+import { usePaperInstrumentNames } from '@/lib/usePaperInstrumentNames'
 import { DEFAULT_INTRADAY_DAYS } from '@/lib/kline'
 import { ExtensionSlot } from '@/extensions/ExtensionSlot'
 
@@ -89,6 +90,9 @@ function fmtAbnormalCalcTime(asofSec: number): string {
 }
 
 export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList: navListSource, onNavigate }: Props) {
+  const instrumentNames = usePaperInstrumentNames(symbol ? [symbol] : [])
+  const displayName = name && name !== symbol && name !== symbol?.split('.')[0]
+    ? name : (symbol && instrumentNames.data?.names?.[symbol]) || (instrumentNames.isPending ? '名称读取中…' : '名称暂缺')
   const [view, setView] = useState<PreviewView>('daily')
   const [intradayDays, setIntradayDays] = useState<number | null>(loadIntradayDays)
   const [dateRange, setDateRange] = useState(getDefaultRange)
@@ -279,8 +283,8 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo, navList
                     </span>
                   ) : null
                 })()}
-                <span className="shrink-0 font-mono text-[15px] font-semibold tracking-tight text-foreground">{symbol}</span>
-                {name && <span className="truncate text-xs text-secondary">{name}</span>}
+                <span className="truncate text-[15px] font-semibold text-foreground">{displayName}</span>
+                <span className="shrink-0 font-mono text-[10px] text-muted">{symbol}</span>
 
                 {/* 切股导航: 上一只 / n·N / 下一只 */}
                 <NavPager nav={nav} prevLabel="上一只" nextLabel="下一只" />

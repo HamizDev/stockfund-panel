@@ -55,12 +55,12 @@ def scoring_warmup_bars(scoring: Mapping[str, Any]) -> int:
         for name, weight in scoring.items()
         if weight
     ]
-    # composite/custom 因子的预热来自注册表 (P3)
+    # Registered base indicators such as ADX also need their declared warmup.
     for name, weight in scoring.items():
         if not weight:
             continue
         spec = _registry_get_factor(str(name))
-        if spec is not None and spec.kind in ("custom", "composite"):
+        if spec is not None:
             warmups.append(spec.warmup_bars)
     return max(warmups, default=1)
 

@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, Loader2, RefreshCw } from 'lucide-react'
-import { api, type IndexInstrument, type IndexMinuteRow, type KlineRow } from '@/lib/api'
+import { api, type IndexInstrument, type IndexMinuteRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
-import { EChartsCandlestick, type OHLC } from '@/components/EChartsCandlestick'
+import { usePageState } from '@/lib/usePageState'
+import { dailyChartRows } from '@/lib/dailyChartRows'
+import { EChartsCandlestick } from '@/components/EChartsCandlestick'
 import { EChartsIntraday } from '@/components/EChartsIntraday'
 
 function defaultRange() {
@@ -13,34 +15,6 @@ function defaultRange() {
   const s = new Date(now)
   s.setMonth(s.getMonth() - 6)
   return { start: s.toISOString().slice(0, 10), end }
-}
-
-function toOHLC(rows: KlineRow[]): OHLC[] {
-  return rows
-    .filter(r => r?.date != null && r.open != null && r.close != null)
-    .map(r => ({
-      date: typeof r.date === 'string' ? r.date.slice(0, 10) : String(r.date),
-      open: Number(r.open),
-      high: Number(r.high),
-      low: Number(r.low),
-      close: Number(r.close),
-      volume: Number(r.volume ?? 0),
-      ma5: r.ma5 != null ? Number(r.ma5) : null,
-      ma10: r.ma10 != null ? Number(r.ma10) : null,
-      ma20: r.ma20 != null ? Number(r.ma20) : null,
-      ma60: r.ma60 != null ? Number(r.ma60) : null,
-      macd_dif: r.macd_dif != null ? Number(r.macd_dif) : null,
-      macd_dea: r.macd_dea != null ? Number(r.macd_dea) : null,
-      macd_hist: r.macd_hist != null ? Number(r.macd_hist) : null,
-      rsi_6: r.rsi_6 != null ? Number(r.rsi_6) : null,
-      rsi_14: r.rsi_14 != null ? Number(r.rsi_14) : null,
-      rsi_24: r.rsi_24 != null ? Number(r.rsi_24) : null,
-      kdj_k: r.kdj_k != null ? Number(r.kdj_k) : null,
-      kdj_d: r.kdj_d != null ? Number(r.kdj_d) : null,
-      kdj_j: r.kdj_j != null ? Number(r.kdj_j) : null,
-      boll_upper: r.boll_upper != null ? Number(r.boll_upper) : null,
-      boll_lower: r.boll_lower != null ? Number(r.boll_lower) : null,
-    }))
 }
 
 function fmtPct(v: number | null | undefined) {
@@ -61,13 +35,30 @@ const PINNED_INDEXES = [
   { symbol: '000688.SH', name: '科创50' },
 ]
 
+type IndexView = { selected: string; range: { start: string; end: string }; selectedDate: string | null }
+function isIndexView(value: unknown): value is IndexView {
+  if (!value || typeof value !== 'object') return false
+  const view = value as IndexView
+  const date = (v: unknown) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)
+    && Number.isFinite(Date.parse(v))
+  return PINNED_INDEXES.some(index => index.symbol === view.selected)
+    && !!view.range && date(view.range.start) && date(view.range.end) && view.range.start <= view.range.end
+    && (view.selectedDate === null || date(view.selectedDate))
+}
+
 export function Indices() {
   const qc = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const symbolParam = searchParams.get('symbol') ?? ''
-  const [selected, setSelected] = useState<string>(symbolParam)
-  const [range, setRange] = useState(defaultRange)
-  const [selectedDate, setSelectedDate] = useState<string | null>(null)
+  const validSymbolParam = PINNED_INDEXES.some(index => index.symbol === symbolParam) ? symbolParam : ''
+  const [view, setView] = usePageState<IndexView>('indices', () => ({
+    selected: PINNED_INDEXES[0].symbol, range: defaultRange(), selectedDate: null,
+  }), isIndexView)
+  const { selected, range } = view
+  const selectedDate = validSymbolParam && validSymbolParam !== selected ? null : view.selectedDate
+  const setSelected = (symbol: string) => setView(previous => ({ ...previous, selected: symbol, selectedDate: null }))
+  const setRange = (update: (previous: IndexView['range']) => IndexView['range']) => setView(previous => ({ ...previous, range: update(previous.range) }))
+  const setSelectedDate = (date: string | null) => setView(previous => previous.selectedDate === date ? previous : { ...previous, selectedDate: date })
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
 
   // 指数标的固定核心五只 (产品契约, 不再提供全指数搜索/浏览)
@@ -75,11 +66,12 @@ export function Indices() {
     symbol: p.symbol, name: p.name, asset_type: 'index' as const,
   }))
 
-  const selectedSymbol = selected || topRows[0]?.symbol || ''
+  const selectedSymbol = validSymbolParam || selected
+  const previousSymbol = useRef(selectedSymbol)
 
   useEffect(() => {
-    if (symbolParam && symbolParam !== selected) setSelected(symbolParam)
-  }, [selected, symbolParam])
+    if (validSymbolParam && validSymbolParam !== selected) setSelected(validSymbolParam)
+  }, [selected, validSymbolParam])
 
   const selectIndex = (symbol: string) => {
     setSelected(symbol)
@@ -96,13 +88,13 @@ export function Indices() {
     queryKey: QK.indexDaily(selectedSymbol, range.start, range.end),
     queryFn: () => api.indexDaily(selectedSymbol, 180, range),
     enabled: !!selectedSymbol,
-    placeholderData: (prev) => prev,
   })
 
   const minute = useQuery({
     queryKey: QK.indexMinute(selectedSymbol, selectedDate ?? ''),
     queryFn: () => api.indexMinute(selectedSymbol, selectedDate!),
-    enabled: !!selectedSymbol && !!selectedDate,
+    enabled: !!selectedSymbol && !!selectedDate && daily.data?.symbol === selectedSymbol
+      && daily.data.rows.some(row => row.date === selectedDate),
     retry: false,
   })
 
@@ -123,7 +115,7 @@ export function Indices() {
   const selectedQuoteValue = selectedQuote?.last_price ?? selectedQuote?.price ?? selectedQuote?.close
   const selectedQuotePct = selectedQuote?.change_pct ?? selectedQuote?.pct
 
-  const chartRows = useMemo(() => toOHLC(daily.data?.rows ?? []), [daily.data?.rows])
+  const chartRows = useMemo(() => dailyChartRows(daily.data?.symbol === selectedSymbol ? daily.data.rows : []), [daily.data?.rows, daily.data?.symbol, selectedSymbol])
   const selectedInfo = topRows.find(r => r.symbol === selectedSymbol) || daily.data?.index_info
   const minuteRows: IndexMinuteRow[] = minute.data?.symbol === selectedSymbol
     && minute.data?.date === selectedDate && daily.data?.symbol === selectedSymbol
@@ -132,7 +124,8 @@ export function Indices() {
   const prevClose = selectedIdx > 0 ? chartRows[selectedIdx - 1].close : undefined
 
   useEffect(() => {
-    setSelectedDate(null)
+    if (previousSymbol.current !== selectedSymbol) setSelectedDate(null)
+    previousSymbol.current = selectedSymbol
     setLinkedPrice(null)
   }, [selectedSymbol])
 
@@ -166,11 +159,11 @@ export function Indices() {
 
   return (
     <div className="h-full overflow-auto bg-base p-4">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3 pl-10 md:pl-0">
         <div>
           <h1 className="text-lg font-semibold text-foreground">指数</h1>
           <p className="mt-1 text-xs text-muted">
-            指数使用独立 kline_index_* parquet，不进入股票选股和策略链路。
+            核心指数走势 · 日K与分时 · 数据日期以图表标注为准
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -206,7 +199,7 @@ export function Indices() {
                 {selectedSymbol && <span className={`font-mono text-xs ${Number(selectedQuotePct ?? 0) >= 0 ? 'text-bull' : 'text-bear'}`}>{fmtPct(selectedQuotePct)}</span>}
               </div>
               <div className="mt-1 text-xs text-muted">
-                实时缓存 {quotes.data?.count ?? 0} 只指数 · 日K来源 {daily.data?.source ?? '--'}
+                已缓存 {quotes.data?.count ?? 0} 只指数 · 日K截至 {chartRows.at(-1)?.date ?? '--'}
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2 text-xs">

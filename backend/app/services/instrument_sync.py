@@ -21,6 +21,32 @@ logger = logging.getLogger(__name__)
 _EXCHANGES = ["SH", "SZ", "BJ"]
 
 
+def _merge_snapshot(fresh: pl.DataFrame, previous: pl.DataFrame) -> pl.DataFrame:
+    """Replace returned markets; retain missing markets and known nonempty names.
+
+    A failed exchange must not erase the entire exchange from the shared table.
+    Retained rows keep their original as_of and all financial fields.
+    """
+    fresh = fresh.unique(subset=["symbol"], keep="last")
+    if previous.is_empty():
+        return fresh
+    previous = previous.unique(subset=["symbol"], keep="last")
+    if "name" in previous.columns and "name" in fresh.columns:
+        names = previous.select("symbol", pl.col("name").cast(pl.String).alias("_saved_name"))
+        fresh = fresh.join(names, on="symbol", how="left").with_columns(
+            pl.when(pl.col("name").is_null() | (pl.col("name").cast(pl.String).str.strip_chars() == ""))
+            .then(pl.col("_saved_name"))
+            .otherwise(pl.col("name"))
+            .alias("name")
+        ).drop("_saved_name")
+    returned = fresh["symbol"].str.extract(r"\.(SH|SZ|BJ)$", 1).drop_nulls().unique().to_list()
+    retained = previous.filter(~pl.col("symbol").str.extract(r"\.(SH|SZ|BJ)$", 1).is_in(returned))
+    if not retained.is_empty():
+        logger.warning("instruments: preserved %d rows from markets absent in this response", retained.height)
+        fresh = pl.concat([fresh, retained], how="diagonal_relaxed")
+    return fresh.sort("symbol")
+
+
 def _flatten_instruments(items: list[dict]) -> list[dict]:
     """把 SDK 返回的 Instrument 列表 flatten 成扁平行。"""
     rows = []
@@ -40,6 +66,9 @@ def _flatten_instruments(items: list[dict]) -> list[dict]:
         row["tick_size"] = ext.get("tick_size")
         row["limit_up"] = ext.get("limit_up")
         row["limit_down"] = ext.get("limit_down")
+        # Pull time does not establish the trading day of a quoted daily limit.
+        # Unknown source dates remain null; price-limit consumers then use their rules.
+        row["limit_price_date"] = ext.get("limit_price_date")
         rows.append(row)
     return rows
 
@@ -94,10 +123,10 @@ def sync_instruments(data_dir: Path) -> int:
     if not all_rows:
         return 0
 
-    df = pl.DataFrame(all_rows)
-    df = df.with_columns(pl.lit(date.today()).alias("as_of"))
-
     out = data_dir / "instruments" / "instruments.parquet"
+    previous = pl.read_parquet(out) if out.exists() else pl.DataFrame()
+    df = pl.DataFrame(all_rows).with_columns(pl.lit(date.today()).alias("as_of"))
+    df = _merge_snapshot(df, previous)
     out.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_parquet(df, out)
 

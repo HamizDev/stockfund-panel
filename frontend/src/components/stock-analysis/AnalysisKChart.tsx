@@ -1,3 +1,4 @@
+import { chartPrice } from '@/lib/chartPrice'
 import { useEffect, useRef, useMemo, useState } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import * as echarts from 'echarts'
@@ -260,7 +261,7 @@ export function AnalysisKChart({
         itemStyle: { color: p.color },
         endLabel: {
           show: true,
-          formatter: () => `${p.label} ${p.value.toFixed(2)}`,
+          formatter: () => `${p.label} ${chartPrice(p.value)}`,
           color: p.color, fontSize: hit ? 10 : 9, fontFamily: 'JetBrains Mono, monospace',
           fontWeight: hit ? 'bold' : 'normal',
           backgroundColor: hit ? CT().tooltipBg : CT().infoBarBg,
@@ -297,7 +298,7 @@ export function AnalysisKChart({
         // 右侧端点标签:显示该通道的最新数值,距绘图区右缘留 6px 间距
         endLabel: lastVal != null ? {
           show: true,
-          formatter: () => `${lastVal!.toFixed(2)}`,
+          formatter: () => `${chartPrice(lastVal)}`,
           color: def.color, fontSize: hit ? 10 : 9, fontFamily: 'JetBrains Mono, monospace',
           fontWeight: hit ? 'bold' : 'normal',
           backgroundColor: hit ? CT().tooltipBg : CT().infoBarBg,
@@ -369,6 +370,10 @@ export function AnalysisKChart({
     }
   }
 
+  // 点击事件只注册一次，通过ref读取最新日期和回调，避免日线刷新后点错日期。
+  const dateClickRef = useRef({ dates, onDateClick })
+  dateClickRef.current = { dates, onDateClick }
+
   // 初始化 + 数据更新
   useEffect(() => {
     if (!chartRef.current) return
@@ -376,8 +381,10 @@ export function AnalysisKChart({
       chartInstRef.current = echarts.init(chartRef.current, undefined, { renderer: 'canvas' })
       chartInstRef.current.on('click', (params: any) => {
         // 预留:点击 K 线(非 markPoint/markLine)回调
-        if (params.componentType === 'series' && params.seriesType === 'candlestick' && onDateClick) {
-          onDateClick(dates[params.dataIndex])
+        const current = dateClickRef.current
+        if (params.componentType === 'series' && params.seriesType === 'candlestick'
+          && Number.isInteger(params.dataIndex) && current.dates[params.dataIndex]) {
+          current.onDateClick?.(current.dates[params.dataIndex])
         }
       })
       // hover 价位线/曲线 endLabel → 联动高亮(与下方文字行双向联动)
@@ -539,7 +546,7 @@ function LevelOverview({
       >
         <span className="h-1.5 w-1.5 rounded-full shrink-0 transition-transform" style={{ backgroundColor: color, transform: hit ? 'scale(1.5)' : 'scale(1)' }} />
         <span className={`text-[11px] w-24 shrink-0 truncate ${hit ? 'text-foreground font-medium' : 'text-secondary'}`}>{p.label}</span>
-        <span className={`text-[11px] font-mono ${hit ? 'text-foreground font-bold' : 'text-foreground'}`}>{p.value.toFixed(2)}</span>
+        <span className={`text-[11px] font-mono ${hit ? 'text-foreground font-bold' : 'text-foreground'}`}>{chartPrice(p.value)}</span>
         <span className="text-[9px] font-mono text-muted">{fmtPct(p.value)}</span>
       </div>
     )
@@ -550,7 +557,7 @@ function LevelOverview({
       {/* 当前价 */}
       <div className="sm:col-span-2 flex items-center gap-2 pb-1 border-b border-border/30 mb-0.5">
         <span className="text-[10px] text-muted">当前价</span>
-        <span className="text-xs font-mono font-medium text-foreground">{cur.toFixed(2)}</span>
+        <span className="text-xs font-mono font-medium text-foreground">{chartPrice(cur)}</span>
       </div>
       {/* 压力位(从近到远,即从低到高)倒序展示:最高的在最上 */}
       {resistances.length > 0 && (
@@ -611,7 +618,7 @@ function strengthColor(strength: string | undefined, base: string): string {
 
 /** 价位唯一标识: 同类型同价格视为同一点位(用于联动高亮)。 */
 function levelKey(type: string, value: number): string {
-  return `${type}-${value.toFixed(2)}`
+  return `${type}-${value}`
 }
 
 function fmtVol(v: number): string {

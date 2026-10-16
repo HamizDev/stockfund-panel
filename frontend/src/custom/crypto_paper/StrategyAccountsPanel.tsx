@@ -1,6 +1,9 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Activity, ChevronDown, ChevronRight, Loader2, Pause, Play, RefreshCcw } from 'lucide-react'
 import { AiStrategyDraftPanel } from './AiStrategyDraftPanel'
+import { StrategySignalPreview } from './StrategySignalPreview'
+import { usePageState } from '@/lib/usePageState'
+import { STRATEGY_FIELDS, describeStrategyParameters, readStrategyParameters } from './strategy-research'
 import {
   cryptoApi,
   type CryptoExchange,
@@ -29,6 +32,8 @@ const DEFAULT_MODEL: CryptoStrategyModel = {
 const FALLBACK_STRATEGIES: CryptoStrategyDefinition[] = [
   { id: 'ema_trend', name: 'EMA 趋势', description: '均线趋势研究预设' },
   { id: 'channel_breakout', name: '通道突破', description: '通道突破研究预设' },
+  { id: 'supertrend_pullback', name: 'Supertrend 回踩', description: 'Supertrend 翻向或顺势 EMA 回穿时生成多空候选，否则保持；账户止盈止损规则继续生效。' },
+  { id: 'bb_aroon', name: '布林带 Aroon', description: '固定 2σ 布林带；收盘下穿下轨且 AroonUp>90 时做多，下穿上轨或 AroonUp<70 时空仓，其余等待。' },
 ]
 
 type FormState = {
@@ -40,6 +45,13 @@ type FormState = {
   fast_period: string
   slow_period: string
   lookback: string
+  ma_period: string
+  adx_threshold: string
+  atr_period: string
+  atr_multiplier: string
+  ema_period: string
+  bb_period: string
+  aroon_period: string
   interval: CryptoStrategyInterval
   leverage: string
   initial_cash: string
@@ -57,6 +69,13 @@ const INITIAL_FORM: FormState = {
   fast_period: '20',
   slow_period: '60',
   lookback: '20',
+  ma_period: '55',
+  adx_threshold: '23',
+  atr_period: '10',
+  atr_multiplier: '3',
+  ema_period: '20',
+  bb_period: '20',
+  aroon_period: '100',
   interval: '1h',
   leverage: '1',
   initial_cash: '10000',
@@ -95,14 +114,7 @@ function accountName(account: CryptoStrategyAccount, strategies: CryptoStrategyD
 }
 
 function strategyParametersLabel(account: CryptoStrategyAccount) {
-  const params = account.strategy_params ?? {}
-  const read = (key: string, fallback: number) => {
-    const value = Number(params[key])
-    return Number.isInteger(value) && value > 0 ? value : fallback
-  }
-  return account.strategy_id === 'ema_trend'
-    ? `EMA ${read('fast_period', 20)} / ${read('slow_period', 60)}`
-    : `通道回看 ${read('lookback', 20)} 根 K 线`
+  return describeStrategyParameters(account.strategy_id, account.strategy_params)
 }
 
 function exchangeName(exchange: CryptoExchange) {
@@ -152,6 +164,10 @@ function mergeAccounts(current: CryptoStrategyAccount[] | null, incoming: Crypto
   const byId = new Map((current ?? []).map(item => [item.id, item]))
   incoming.forEach(item => byId.set(item.id, item))
   return [...byId.values()]
+}
+
+function isExpandedAccountId(value: unknown): value is string | null {
+  return value === null || (typeof value === 'string' && value.length > 0 && value.length <= 200)
 }
 
 function NavChart({ points }: { points: CryptoStrategyAccountDetail['nav'] }) {
@@ -249,8 +265,9 @@ function positionSummary(value: unknown, market: CryptoMarket) {
   return fields
 }
 
-export function StrategyAccountsPanel({ onInspectAccount }: {
+export function StrategyAccountsPanel({ onInspectAccount, onAccountsLoaded }: {
   onInspectAccount?: (account: CryptoStrategyAccount) => void
+  onAccountsLoaded?: (accounts: CryptoStrategyAccount[]) => void
 } = {}) {
   const [strategies, setStrategies] = useState<CryptoStrategyDefinition[]>(FALLBACK_STRATEGIES)
   const [strategyError, setStrategyError] = useState('')
@@ -267,15 +284,17 @@ export function StrategyAccountsPanel({ onInspectAccount }: {
   const [submitting, setSubmitting] = useState(false)
   const [runningId, setRunningId] = useState<string | null>(null)
   const [accountActionId, setAccountActionId] = useState<string | null>(null)
-  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [expandedId, setExpandedId] = usePageState('cryptoExpandedAccount', null, isExpandedAccountId)
   const [details, setDetails] = useState<Record<string, CryptoStrategyAccountDetail>>({})
   const [detailLoading, setDetailLoading] = useState<Record<string, boolean>>({})
   const [detailErrors, setDetailErrors] = useState<Record<string, string>>({})
   const refreshAccountsRef = useRef<(() => Promise<void>) | null>(null)
+  const onAccountsLoadedRef = useRef(onAccountsLoaded)
+  onAccountsLoadedRef.current = onAccountsLoaded
   const detailRefreshRef = useRef<((id: string) => Promise<void>) | null>(null)
   const detailQueueRef = useRef<Promise<void>>(Promise.resolve())
   const panelAliveRef = useRef(false)
-  const expandedIdRef = useRef<string | null>(null)
+  const expandedIdRef = useRef<string | null>(expandedId)
   const listRevision = useRef(0)
   const detailRevision = useRef<Record<string, number>>({})
 
@@ -320,16 +339,32 @@ export function StrategyAccountsPanel({ onInspectAccount }: {
       else setAccountsLoading(true)
       try {
         const result = await cryptoApi.strategyAccounts()
+        let accepted = false
         if (alive && revisionAtStart === listRevision.current) {
           setAccounts(result.accounts)
           setRuntimeRunning(result.runtime.running)
           setModel(result.model)
           setAccountsError('')
           loaded = true
+          accepted = true
           pollSeconds = result.runtime.poll_seconds || result.model.poll_seconds || DEFAULT_MODEL.poll_seconds
+          onAccountsLoadedRef.current?.(result.accounts)
+          const expandedIdAtPoll = expandedIdRef.current
+          if (expandedIdAtPoll && !result.accounts.some(account => account.id === expandedIdAtPoll)) {
+            expandedIdRef.current = null
+            setExpandedId(null)
+            detailRevision.current[expandedIdAtPoll] = (detailRevision.current[expandedIdAtPoll] ?? 0) + 1
+            setDetails(current => {
+              const next = { ...current }
+              delete next[expandedIdAtPoll]
+              return next
+            })
+            setDetailLoading(current => ({ ...current, [expandedIdAtPoll]: false }))
+            setDetailErrors(current => ({ ...current, [expandedIdAtPoll]: '' }))
+          }
         }
         const expandedIdAtPoll = expandedIdRef.current
-        if (alive && expandedIdAtPoll) await detailRefreshRef.current?.(expandedIdAtPoll)
+        if (alive && accepted && expandedIdAtPoll) await detailRefreshRef.current?.(expandedIdAtPoll)
       } catch (cause) {
         if (alive) setAccountsError(requestError(cause, '策略模拟账户加载失败'))
       } finally {
@@ -446,18 +481,8 @@ export function StrategyAccountsPanel({ onInspectAccount }: {
     if (creationMode === 'compare' && form.market !== 'usdm') return setFormError('杠杆对照组仅支持 U 本位合约。')
 
     let strategyParams: Record<string, number>
-    if (form.strategy_id === 'ema_trend') {
-      const fastPeriod = Number(form.fast_period)
-      const slowPeriod = Number(form.slow_period)
-      if (!Number.isInteger(fastPeriod) || fastPeriod < 5 || fastPeriod > 50) return setFormError('EMA 快线周期须为 5 至 50 的整数。')
-      if (!Number.isInteger(slowPeriod) || slowPeriod < 20 || slowPeriod > 120) return setFormError('EMA 慢线周期须为 20 至 120 的整数。')
-      if (fastPeriod >= slowPeriod) return setFormError('EMA 快线周期必须小于慢线周期。')
-      strategyParams = { fast_period: fastPeriod, slow_period: slowPeriod }
-    } else {
-      const lookback = Number(form.lookback)
-      if (!Number.isInteger(lookback) || lookback < 5 || lookback > 120) return setFormError('通道回看周期须为 5 至 120 的整数。')
-      strategyParams = { lookback }
-    }
+    try { strategyParams = readStrategyParameters(form.strategy_id, form) }
+    catch (cause) { return setFormError(requestError(cause, '策略参数无效')) }
 
     setSubmitting(true)
     setActionError('')
@@ -518,6 +543,13 @@ export function StrategyAccountsPanel({ onInspectAccount }: {
       fast_period: 'fast_period' in draft.strategy_params ? String(draft.strategy_params.fast_period) : current.fast_period,
       slow_period: 'slow_period' in draft.strategy_params ? String(draft.strategy_params.slow_period) : current.slow_period,
       lookback: 'lookback' in draft.strategy_params ? String(draft.strategy_params.lookback) : current.lookback,
+      ma_period: 'ma_period' in draft.strategy_params ? String(draft.strategy_params.ma_period) : current.ma_period,
+      adx_threshold: 'adx_threshold' in draft.strategy_params ? String(draft.strategy_params.adx_threshold) : current.adx_threshold,
+      atr_period: 'atr_period' in draft.strategy_params ? String(draft.strategy_params.atr_period) : current.atr_period,
+      atr_multiplier: 'atr_multiplier' in draft.strategy_params ? String(draft.strategy_params.atr_multiplier) : current.atr_multiplier,
+      ema_period: 'ema_period' in draft.strategy_params ? String(draft.strategy_params.ema_period) : current.ema_period,
+      bb_period: 'bb_period' in draft.strategy_params ? String(draft.strategy_params.bb_period) : current.bb_period,
+      aroon_period: 'aroon_period' in draft.strategy_params ? String(draft.strategy_params.aroon_period) : current.aroon_period,
       interval: draft.interval,
       leverage: String(draft.market === 'spot' ? 1 : draft.leverage),
       initial_cash: String(draft.initial_cash),
@@ -660,7 +692,7 @@ export function StrategyAccountsPanel({ onInspectAccount }: {
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div>
         <div className="flex items-center gap-2"><Activity className="h-4 w-4 text-accent" /><h2 className="text-sm font-semibold">策略自动模拟账户</h2></div>
-        <p className="mt-1 text-xs text-muted">Bitget USDT 本位账户使用独立虚拟资金，可单独暂停、检查或做杠杆对照；Binance 账户只作为历史记录查看。</p>
+        <p className="mt-1 text-xs text-muted">Bitget USDT 本位账户使用独立虚拟资金，可单独暂停、检查或做杠杆对照。</p>
       </div>
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <span className={`rounded-full border px-2.5 py-1 ${runtimeRunning ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border text-muted'}`}>
@@ -675,7 +707,7 @@ export function StrategyAccountsPanel({ onInspectAccount }: {
     </div>
 
     <div className="rounded-btn border border-amber-500/30 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-300">
-      仅作研究模拟，新账户仅支持 Bitget USDT 本位合约，不连接真实账户或交易 Key。Bitget 成交手续费率使用公开合约规则返回的 Taker 费率；Binance 历史账户仅保留只读记录，不提供新建、启停或运行入口。费率尚未返回时显示“待获取公开手续费率”。Bitget 资金费使用交易所公布的实际费率及 1 分钟 MARK 价格开盘价估算标记价。维护保证金率 {formatRate(renderedModel.maintenance_margin_rate)}、强平费率 {formatRate(renderedModel.liquidation_fee_rate)} 是统一固定研究假设，不代表交易所实际保证金档位或撮合结果。策略只在所选 1 小时或 4 小时 K 线收盘后生成信号；后台约每 {model.poll_seconds || 30} 秒轮询，无需保持浏览器打开。暂停会停止策略开平仓，已有持仓仍继续进行资金费与强平核算。行情或资金费数据不可用、账户异常或补账期间，旧收益不代表最新状态。模拟收益不代表实盘盈利能力。
+      仅作研究模拟，新账户仅支持 Bitget USDT 本位合约，不连接真实账户或交易 Key。Bitget 成交手续费率使用公开合约规则返回的 Taker 费率。费率尚未返回时显示“待获取公开手续费率”。Bitget 资金费使用交易所公布的实际费率及 1 分钟 MARK 价格开盘价估算标记价。维护保证金率 {formatRate(renderedModel.maintenance_margin_rate)}、强平费率 {formatRate(renderedModel.liquidation_fee_rate)} 是统一固定研究假设，不代表交易所实际保证金档位或撮合结果。策略只在所选 1 小时或 4 小时 K 线收盘后生成信号；后台约每 {model.poll_seconds || 30} 秒轮询，无需保持浏览器打开。暂停会停止策略开平仓，已有持仓仍继续进行资金费与强平核算。行情或资金费数据不可用、账户异常或补账期间，旧收益不代表最新状态。模拟收益不代表实盘盈利能力。
     </div>
 
     {(accountsError || strategyError || actionError) && <div className="space-y-1 rounded-btn border border-danger/40 bg-danger/10 p-3 text-sm text-danger">
@@ -703,10 +735,7 @@ export function StrategyAccountsPanel({ onInspectAccount }: {
         <div className="text-xs text-muted">市场<div className="mt-1 rounded-btn border border-border bg-base p-2 text-foreground">USDT 本位合约</div></div>
         <label className="text-xs text-muted">交易对<select aria-label="策略交易对" value={form.symbol} onChange={event => setForm(current => ({ ...current, symbol: event.target.value as CryptoSymbol }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{SYMBOLS.map(item => <option key={item}>{item}</option>)}</select></label>
         <label className="text-xs text-muted">策略<select aria-label="策略类型" value={form.strategy_id} onChange={event => setForm(current => ({ ...current, strategy_id: event.target.value as CryptoStrategyId }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{strategyOptions.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        {form.strategy_id === 'ema_trend' ? <>
-          <label className="text-xs text-muted">EMA 快线周期<input aria-label="EMA 快线周期" type="number" min="5" max="50" step="1" required value={form.fast_period} onChange={event => setForm(current => ({ ...current, fast_period: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>
-          <label className="text-xs text-muted">EMA 慢线周期<input aria-label="EMA 慢线周期" type="number" min="20" max="120" step="1" required value={form.slow_period} onChange={event => setForm(current => ({ ...current, slow_period: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>
-        </> : <label className="text-xs text-muted">通道回看周期<input aria-label="通道回看周期" type="number" min="5" max="120" step="1" required value={form.lookback} onChange={event => setForm(current => ({ ...current, lookback: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>}
+        {STRATEGY_FIELDS[form.strategy_id].map(field => <label key={field.key} className="text-xs text-muted">{field.label}<input aria-label={field.label} type="number" min={field.min} max={field.max} step="1" required value={form[field.key as keyof FormState]} onChange={event => setForm(current => ({ ...current, [field.key]: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>)}
         <label className="text-xs text-muted">信号周期<select aria-label="信号周期" value={form.interval} onChange={event => setForm(current => ({ ...current, interval: event.target.value as CryptoStrategyInterval }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground"><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label>
         {form.market === 'usdm' && creationMode === 'single' && <label className="text-xs text-muted">杠杆<select aria-label="杠杆倍数" value={form.leverage} onChange={event => setForm(current => ({ ...current, leverage: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 text-foreground">{LEVERAGES.map(item => <option key={item} value={item}>{item}x</option>)}</select></label>}
         <label className="text-xs text-muted">初始资金（USDT）<input aria-label="初始资金（USDT）" type="number" required min={100} max={10_000_000} step="any" value={form.initial_cash} onChange={event => setForm(current => ({ ...current, initial_cash: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>
@@ -714,6 +743,13 @@ export function StrategyAccountsPanel({ onInspectAccount }: {
         <label className="text-xs text-muted">止损（%）<input aria-label="止损（%）" type="number" required min="0.000001" max={100} step="any" value={form.stop_loss_pct} onChange={event => setForm(current => ({ ...current, stop_loss_pct: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>
         <label className="text-xs text-muted">止盈（%）<input aria-label="止盈（%）" type="number" required min="0.000001" max={100} step="any" value={form.take_profit_pct} onChange={event => setForm(current => ({ ...current, take_profit_pct: event.target.value }))} className="mt-1 block w-full rounded-btn border border-border bg-base p-2 font-mono text-foreground" /></label>
       </div>
+      <p className="mt-2 text-[11px] leading-5 text-muted">{strategies.find(item => item.id === form.strategy_id)?.description}</p>
+      {strategies.find(item => item.id === form.strategy_id)?.adaptation && <p className="mt-1 text-[11px] leading-5 text-muted">{strategies.find(item => item.id === form.strategy_id)?.adaptation} <a className="text-accent underline" href={strategies.find(item => item.id === form.strategy_id)?.source_url} target="_blank" rel="noreferrer">查看规则来源</a></p>}
+      <StrategySignalPreview contextKey={JSON.stringify(form)} getRequest={() => ({
+        exchange: 'bitget', market: 'usdm', symbol: form.symbol, interval: form.interval,
+        leverage: Number(form.leverage), allocation_pct: Number(form.allocation_pct),
+        strategy_id: form.strategy_id, strategy_params: readStrategyParameters(form.strategy_id, form),
+      })} />
       {formError && <p className="mt-2 text-xs text-danger">{formError}</p>}
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <button type="submit" disabled={submitting} className="rounded-btn bg-accent px-3 py-2 text-xs font-medium text-white disabled:opacity-50">{submitting ? '创建中…' : creationMode === 'compare' ? '创建四个暂停账户' : '创建暂停账户'}</button>

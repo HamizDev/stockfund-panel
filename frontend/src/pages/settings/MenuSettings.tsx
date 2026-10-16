@@ -38,7 +38,7 @@ const BUILTIN_PAGES: NavEntry[] = [
   { id: '/screener', label: '策略', type: 'builtin', visible: true },
   { id: '/factors', label: '因子', type: 'builtin', visible: true },
   { id: '/backtest', label: '回测', type: 'builtin', visible: true },
-  { id: '/stock-analysis', label: '个股分析', type: 'builtin', visible: true },
+  { id: '/stock-analysis', label: '股票 / ETF 分析', type: 'builtin', visible: true },
   { id: '/limit-ladder', label: '连板梯队', type: 'builtin', visible: true },
   { id: '/concept-analysis', label: '概念分析', type: 'builtin', visible: true },
   { id: '/industry-analysis', label: '行业分析', type: 'builtin', visible: true },
@@ -305,7 +305,7 @@ export function SettingsMenuSettingsPanel() {
         <div className="text-[11px] uppercase tracking-[0.2em] text-accent/80">菜单设置</div>
         <h2 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">调整左侧菜单顺序</h2>
         <p className="mt-2 max-w-3xl text-sm leading-6 text-secondary">
-          拖动左侧手柄调整菜单排列顺序，点击眼睛图标控制菜单在侧边栏中的显示或隐藏。
+          侧边栏按用途折叠分组；拖动手柄调整同一分组内的页面顺序，点击眼睛图标控制显示或隐藏。原页面和链接保留。
         </p>
       </section>
 

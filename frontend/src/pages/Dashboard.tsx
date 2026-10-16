@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Activity, ArrowDownRight, ArrowUpRight, BarChart3, BellRing, Database, Flame, Gauge, Info, LineChart, Loader2, Play, RefreshCw, Sparkles, Target, Timer } from 'lucide-react'
 import { DatePicker } from '@/components/DatePicker'
-import { api, type MarketSnapshotRow, type OverviewDimensionRankItem, type OverviewMarket, type AlertEvent } from '@/lib/api'
+import { api, type DashboardDataSummary, type DashboardInit, type MarketSnapshotRow, type OverviewDimensionRankItem, type OverviewMarket, type AlertEvent } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct } from '@/lib/format'
 import { DimensionMembersDialog, dimensionKindForSourceField, type DimensionMembersTarget } from '@/components/DimensionMembersDialog'
@@ -16,9 +16,12 @@ import { SettingsModal } from '@/components/data/SettingsModal'
 import { useAdjFactorSyncGate } from '@/components/AdjFactorSyncGate'
 import { STAGE_LABELS } from '@/components/data/ActiveJobCard'
 import { cn } from '@/lib/cn'
+import { marketFreshness } from '@/lib/marketFreshness'
+import { toast } from '@/components/Toast'
 import { cnSignal } from '@/lib/signals'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
+import { usePaperInstrumentNames } from '@/lib/usePaperInstrumentNames'
 import { boardTag } from '@/components/stock-table/primitives'
 
 function n(v: number | null | undefined) {
@@ -111,7 +114,11 @@ function MonitorWidget({ onStockClick, activeSymbol }: {
     queryFn: () => api.alertsList({ days: 7, limit: 10 }),
     refetchInterval: 10000,
   })
-  const events: AlertEvent[] = alerts.data?.alerts ?? []
+  const rawEvents: AlertEvent[] = alerts.data?.alerts ?? []
+  const eventNames = usePaperInstrumentNames(rawEvents.filter(ev => ev.symbol && ev.source !== 'sector').map(ev => ev.symbol!))
+  const events: AlertEvent[] = rawEvents.map(ev => ({ ...ev, name: ev.symbol && ev.source !== 'sector'
+    ? (ev.name && !/^\d{6}(\.(SH|SZ|BJ))?$/.test(ev.name) ? ev.name : eventNames.data?.names[ev.symbol])
+    : ev.name }))
   // 切股导航列表: 有 symbol 的触发记录
   const alertNav = toNavItems(events.filter((ev): ev is AlertEvent & { symbol: string } => !!ev.symbol))
 
@@ -147,7 +154,7 @@ function MonitorWidget({ onStockClick, activeSymbol }: {
                   title={isSector ? '在监控中心查看板块告警' : ev.symbol ? `查看 ${ev.symbol} 日K` : undefined}
                   className={`inline-flex items-center gap-1 min-w-0 shrink-0 rounded hover:bg-elevated/60 transition-colors -mx-0.5 px-0.5 ${isSector || ev.symbol ? 'cursor-pointer' : 'cursor-default'}`}
                 >
-                  <span className="font-mono text-[10px] font-medium text-foreground/80 hover:text-accent">{ev.symbol?.replace(/\.(SH|SZ|BJ)$/, '')}</span>
+                  <span className="text-[11px] font-medium text-foreground truncate max-w-[7rem]">{ev.name || (eventNames.isPending ? '名称读取中…' : '名称暂缺')}</span>
                   {ev.symbol && (() => {
                     const board = boardTag(ev.symbol)
                     return board && (
@@ -156,7 +163,7 @@ function MonitorWidget({ onStockClick, activeSymbol }: {
                       </span>
                     )
                   })()}
-                  {ev.name && <span className="text-[10px] text-secondary truncate max-w-[5rem] hover:text-foreground">{ev.name}</span>}
+                  <span className="font-mono text-[9px] text-muted">{ev.symbol?.replace(/\.(SH|SZ|BJ)$/, '')}</span>
                 </button>
                 <span className="flex-1" />
                 {ev.price != null && (
@@ -634,6 +641,21 @@ function DashboardSkeleton() {
   )
 }
 
+export function seedDashboardCaches(qc: Pick<QueryClient, 'setQueryData'>, data: DashboardInit, selectedDate?: string) {
+  qc.setQueryData(QK.overviewMarket(selectedDate), data.overview)
+  qc.setQueryData(QK.capabilities, data.capabilities)
+  qc.setQueryData(QK.settings, data.settings)
+  qc.setQueryData(QK.preferences, data.preferences)
+  qc.setQueryData(QK.dataSources, data.data_sources)
+  qc.setQueryData(['alerts', ''], data.alerts)
+}
+
+export function dashboardHasNoData(summary: DashboardDataSummary | null | undefined): boolean {
+  return summary?.known === true
+    && (summary.enriched?.trading_days ?? 0) === 0
+    && (summary.daily?.trading_days ?? 0) === 0
+}
+
 export function Dashboard() {
   const qc = useQueryClient()
   const [selectedDate, setSelectedDate] = useState<string | undefined>()
@@ -653,27 +675,17 @@ export function Dashboard() {
   const [indexKline, setIndexKline] = useState<{ code: string; name: string } | null>(null)
   // 首次使用(无数据 + 未完成引导)自动弹窗: 同一会话只弹一次
   const [showWelcomeModal, setShowWelcomeModal] = useState(false)
-  // 首屏聚合：1 个请求替代原来的 7 个并行请求 (overview/capabilities/settings/
-  // preferences/data-sources/data-status/alerts)。切换日期时 placeholderData
-  // 保留上一份数据不白屏。
+  // 首屏聚合不等待完整容量统计；跨日期不复用另一日期的占位数据，避免误标与缓存污染。
   const init = useQuery({
     queryKey: QK.dashboardInit(selectedDate),
     queryFn: () => api.dashboardInit(selectedDate),
     staleTime: 5_000,
-    placeholderData: (prev) => prev,
   })
-  // 把聚合结果同步写入各共享 queryKey 的缓存，其他页面/组件用 useCapabilities()
-  // 等共享 hook 时直接命中缓存，不再发请求。
+  // 种入其它共享缓存；完整 data/status 只由它自己的接口填充。
   useEffect(() => {
     const d = init.data
     if (!d) return
-    qc.setQueryData(QK.overviewMarket(selectedDate), d.overview)
-    qc.setQueryData(QK.capabilities, d.capabilities)
-    qc.setQueryData(QK.settings, d.settings)
-    qc.setQueryData(QK.preferences, d.preferences)
-    qc.setQueryData(QK.dataSources, d.data_sources)
-    qc.setQueryData(QK.dataStatus, d.data_status)
-    qc.setQueryData(['alerts', ''], d.alerts)
+    seedDashboardCaches(qc, d, selectedDate)
   }, [init.data, selectedDate, qc])
   const overview = init
   const data = init.data?.overview
@@ -691,11 +703,10 @@ export function Dashboard() {
   ].find(s => s.name === activeProvider)?.display_name
     ?.replace(/（.*?）|\(.*?\)/g, '').trim() || activeProvider
   // 无本地数据(enriched/daily 都没有)→ 常驻引导卡片
-  // 注: 后端 status 的 rows 为性能刻意返回 0, 用 trading_days 判断是否有数据
-  const ds = init.data?.data_status
-  const hasNoData = !!ds
-    && (ds.enriched?.trading_days ?? 0) === 0
-    && (ds.daily?.trading_days ?? 0) === 0
+  // 摘要未知时不能当成无数据，也不能把摘要种进完整 data/status 的共享缓存。
+  const ds = init.data?.data_summary
+    ?? (init.data?.data_status ? { known: true, daily: init.data.data_status.daily, enriched: init.data.data_status.enriched } : null)
+  const hasNoData = dashboardHasNoData(ds)
 
   // ===== 盘后管道触发(看板内一键获取数据) =====
   const [fetchJobId, setFetchJobId] = useState<string | null>(null)
@@ -734,6 +745,7 @@ export function Dashboard() {
     if (fetchSucceeded) {
       qc.invalidateQueries({ queryKey: QK.dataStatus })
       qc.invalidateQueries({ queryKey: QK.overviewMarket(undefined) })
+      qc.invalidateQueries({ queryKey: [QK.dashboardInit()[0]] })
     }
   }, [fetchSucceeded, qc])
 
@@ -756,6 +768,7 @@ export function Dashboard() {
     setManualFetching(true)
     api.refreshCache()
       .then(() => qc.invalidateQueries({ queryKey: ['overview-market'] }))
+      .catch(() => toast('刷新失败，当前仍显示最近可用行情', 'error'))
       .finally(() => {
         overview.refetch().finally(() => setManualFetching(false))
       })
@@ -779,9 +792,9 @@ export function Dashboard() {
   const score = data.emotion?.score ?? 50
   const strongUp = data.breadth.strong_up ?? 0
   const strongDown = data.breadth.strong_down ?? 0
-  const latestDate = init.data?.data_status?.enriched?.latest_date ?? null
+  const latestDate = ds?.enriched?.latest_date ?? null
   const currentDate = selectedDate ?? data.as_of ?? ''
-  const quoteRunning = (!selectedDate || selectedDate === latestDate) && data.quote_status?.running
+  const freshness = marketFreshness(data.quote_status ?? {}, !!selectedDate && selectedDate !== latestDate)
   // 实时模式: none / watchlist / full_market。
   // watchlist 模式仅自选 ≤5 只实时, 看板呈现的大盘数据实为盘后快照, 需提示避免误读。
   const quoteMode = data.quote_status?.mode as ('none' | 'watchlist' | 'full_market') | undefined
@@ -840,15 +853,15 @@ export function Dashboard() {
             <DatePicker
               value={currentDate}
               onChange={setSelectedDate}
-              min={init.data?.data_status?.enriched?.earliest_date ?? undefined}
+              min={ds?.enriched?.earliest_date ?? undefined}
               max={latestDate ?? undefined}
               className="w-32"
             />
           ) : (
             <span className="font-mono text-secondary">—</span>
           )}
-          <span className="flex items-center gap-1"><Timer className="h-3 w-3" />{quoteAge(data.quote_status?.quote_age_ms)}</span>
-          <span className={quoteRunning ? 'text-accent' : 'text-warning'}>{quoteRunning ? '实时' : '非实时'}</span>
+          <span title="最近报价距今；未提供时间时不代表实时" className="flex items-center gap-1"><Timer className="h-3 w-3" />{quoteAge(data.quote_status?.quote_age_ms)}</span>
+          <span title={freshness.note} className={freshness.live ? 'text-accent' : 'text-warning'}>{freshness.label}</span>
           <button
             onClick={handleRefresh}
             disabled={manualFetching}
@@ -871,14 +884,14 @@ export function Dashboard() {
         </div>
       )}
 
-      <div className="mb-1.5 grid grid-cols-2 gap-1 sm:grid-cols-4">
+      <div className="mb-1.5 grid grid-cols-2 gap-1 sm:grid-cols-3 xl:grid-cols-5">
         {data.indices.map(item => <IndexTicker key={item.symbol} item={item} />)}
       </div>
 
       <div className="mb-1.5 grid grid-cols-3 gap-1 lg:grid-cols-6">
         <KpiCell label="个股涨 / 平 / 跌" value={<><span className="text-bull">{data.breadth.up}</span><span className="text-muted">/</span><span className="text-muted">{data.breadth.flat}</span><span className="text-muted">/</span><span className="text-bear">{data.breadth.down}</span></>} sub={`上涨率 ${data.breadth.up_pct.toFixed(1)}%`} />
         <KpiCell label="强势 / 弱势" value={<><span className="text-bull">{strongUp}</span><span className="text-muted">/</span><span className="text-bear">{strongDown}</span></>} sub="涨跌 ≥3%" />
-        <KpiCell label={<span className="inline-flex items-center gap-1">涨停 / 跌停<SealedBadge degraded={isSealedDegrade} hasDepth={hasDepth} isHistorical={false} sealedReady={sealedReady} sealedCountsUp={{ real: data.limit.limit_up, fake: data.limit.fake_up ?? 0, pending: 0 }} sealedCountsDown={{ real: data.limit.limit_down, fake: data.limit.fake_down ?? 0, pending: 0 }} rawUp={data.limit.limit_up + (data.limit.fake_up ?? 0)} rawDown={data.limit.limit_down + (data.limit.fake_down ?? 0)} invalidateKeys={['overview-market', 'limit-ladder']} /></span>} value={<><span className="text-bull">{data.limit.limit_up}</span><span className="text-muted">/</span><span className="text-bear">{data.limit.limit_down}</span></>} sub={`封板率 ${(data.limit.seal_rate ?? 0).toFixed(0)}%`} />
+        <KpiCell label={<span className="inline-flex items-center gap-1">涨停 / 跌停<SealedBadge degraded={isSealedDegrade} hasDepth={hasDepth} isHistorical={false} sealedReady={sealedReady} sealedCountsUp={data.limit.sealed_counts_up} sealedCountsDown={data.limit.sealed_counts_down} rawUp={data.limit.limit_up} rawDown={data.limit.limit_down} invalidateKeys={['overview-market', 'limit-ladder']} /></span>} value={<><span className="text-bull">{data.limit.limit_up}</span><span className="text-muted">/</span><span className="text-bear">{data.limit.limit_down}</span></>} sub={`价格口径 · 封板率 ${(data.limit.seal_rate ?? 0).toFixed(0)}%`} />
         <KpiCell label="最高连板" value={`${data.limit.max_boards || 0}板`} sub={(() => {
           const top = data.limit.tiers.find(t => t.boards === data.limit.max_boards)
           const stocks = top?.stocks ?? []

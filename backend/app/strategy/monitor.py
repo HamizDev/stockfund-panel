@@ -446,6 +446,8 @@ class MonitorRuleEngine:
             rule.get("strategy_id"),
             rule.get("score_min"),
             rule.get("score_max"),
+            tuple(sorted((rule.get("strategy_params") or {}).items())),
+            rule.get("paper_activation"),
             rule.get("asset_type", "stock"),
             rule.get("scope", "symbols"),
             tuple(sorted(str(symbol) for symbol in rule.get("symbols", []))),
@@ -1232,6 +1234,10 @@ class MonitorRuleEngine:
             except Exception:
                 pass
 
+        # Account budgets are monitor-local; do not change another account's parameters.
+        overrides = {**overrides, "params": {**(overrides.get("params") or {}),
+                                             **(rule.get("strategy_params") or {})}}
+
         # 声明 filter_history 的策略 (如反包) 需要多日历史窗口才能判定形态。
         # 旧实现因"实时监控不支持 history loader"直接跳过 → 反包等策略盘中永不触发。
         # 现接入 history_loader, 拼历史窗口 + 今日实时行情, 经 precomputed_history 喂给引擎。
@@ -1377,9 +1383,11 @@ class MonitorRuleEngine:
         changes: dict[str, set[str]] = {
             "buy_signal": self._new_strategy_signals(
                 pool_key, "buy_signal", result.as_of, entry_signal_hits,
+                emit_initial=bool(rule.get("emit_current_on_start")),
             ),
             "sell_signal": self._new_strategy_signals(
                 pool_key, "sell_signal", result.as_of, result.exit_signal_hits,
+                emit_initial=bool(rule.get("emit_current_on_start")),
             ),
             "pool_entry": set() if prev_pool is None else current_pool - prev_pool,
             "pool_exit": set() if prev_pool is None else prev_pool - current_pool,
@@ -1454,6 +1462,7 @@ class MonitorRuleEngine:
         event_type: str,
         as_of: Any,
         hits: list[dict],
+        *, emit_initial: bool = False,
     ) -> set[str]:
         rule_id, strategy_id, asset_type = pool_key
         state_key = (rule_id, strategy_id, asset_type, event_type)
@@ -1465,7 +1474,7 @@ class MonitorRuleEngine:
         if previous is None:
             for symbol in current:
                 self._strategy_signal_seen[(*state_key, symbol)] = date_key
-            return set()
+            return current if emit_initial else set()
 
         previous_date, previous_symbols = previous
         candidates = current if previous_date != date_key else current - previous_symbols

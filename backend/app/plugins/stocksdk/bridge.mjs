@@ -198,6 +198,10 @@ async function opMinute(sdk, job) {
 }
 
 function realtimeRecord(q, symbol) {
+  // 腾讯科创板(含 689 CDR)快照的成交量为股; 其余股票、ETF和指数为手。
+  // SDK 原样传回字段 6, 内部 OHLCV 统一使用手, 保留不足一手的小数。
+  const volume = q.source === 'tencent' && /^68[89]\d{3}\.SH$/.test(symbol)
+    && Number.isFinite(q.volume) ? q.volume / 100 : q.volume
   return {
     symbol,
     name: q.name,
@@ -206,7 +210,7 @@ function realtimeRecord(q, symbol) {
     open: q.open,
     high: q.high,
     low: q.low,
-    volume: q.volume,
+    volume,
     amount: q.amount,
     change_pct: q.changePercent,
     timestamp: q.timestamp,
@@ -268,10 +272,22 @@ async function opInstruments(sdk, job) {
         float_shares: q.circulatingShares ?? null,
         limit_up: q.limitUp ?? null,
         limit_down: q.limitDown ?? null,
+        // Quote dates can lag the calendar date before the next session opens.
+        limit_price_date: quoteDate(q.timestamp),
       },
     })
   }
   return rows
+}
+
+function quoteDate(timestamp) {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp) || timestamp <= 0) return null
+  const value = new Date(timestamp)
+  if (!Number.isFinite(value.getTime())) return null
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(value).map(part => [part.type, part.value]))
+  return `${parts.year}-${parts.month}-${parts.day}`
 }
 
 async function main() {

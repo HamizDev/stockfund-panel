@@ -158,6 +158,9 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "kdj_j":                   "KDJ J值 (3K-2D)",
     # ── ATR ──────────────────────────────────────────────
     "atr_14":                  "14日平均真实波幅",
+    "adx_14":                  "14日ADX趋势强度(0至100, SMA种子预热28根)",
+    "adx_plus_di_14":          "14日正向动向+DI",
+    "adx_minus_di_14":         "14日负向动向-DI",
     # ── 量价 ─────────────────────────────────────────────
     "vol_ma5":                 "5日成交均量",
     "vol_ma10":                "10日成交均量",
@@ -347,6 +350,7 @@ _ALL_INDICATOR_COLS: frozenset[str] = frozenset({
     "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
     "change_pct", "change_amount", "amplitude", "_daily_pct", "annual_vol_20d",
     "rsi_6", "rsi_14", "rsi_24",
+    "adx_14", "adx_plus_di_14", "adx_minus_di_14",
 })
 
 
@@ -562,6 +566,13 @@ def compute_indicators(
                              )).alias(f"rsi_{n}"),
             )
 
+    if want & {"adx_14", "adx_plus_di_14", "adx_minus_di_14"}:
+        from app.indicators.adx import compute_adx
+
+        directional = compute_adx(df)
+        df = df.with_columns([directional[name] for name in
+            ("adx_14", "adx_plus_di_14", "adx_minus_di_14") if name in want])
+
     # Pass 6: 换手率 (需要 float_shares, 后续在 compute_all 中 JOIN instruments 后补充)
 
     # 清理临时列 (只丢弃实际存在的临时列)
@@ -772,9 +783,10 @@ def compute_limit_signals(
             continue
         if c in instruments.columns:
             inst_cols.append(c)
-    if need_price_limits and "as_of" in instruments.columns:
+    limit_date_column = "limit_price_date" if "limit_price_date" in instruments.columns else "as_of"
+    if need_price_limits and limit_date_column in instruments.columns:
         inst_cols.append(
-            pl.col("as_of").cast(pl.Date, strict=False).alias("_instrument_as_of")
+            pl.col(limit_date_column).cast(pl.Date, strict=False).alias("_instrument_as_of")
         )
     inst_subset = instruments.select(inst_cols).unique(subset=["symbol"])
 
@@ -2309,9 +2321,10 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
     for c in ["float_shares", "limit_up", "limit_down", "listing_date"]:
         if c in instruments.columns:
             inst_cols.append(c)
-    if "as_of" in instruments.columns:
+    limit_date_column = "limit_price_date" if "limit_price_date" in instruments.columns else "as_of"
+    if limit_date_column in instruments.columns:
         inst_cols.append(
-            pl.col("as_of").cast(pl.Date, strict=False).alias("_instrument_as_of")
+            pl.col(limit_date_column).cast(pl.Date, strict=False).alias("_instrument_as_of")
         )
     inst_subset = instruments.select(inst_cols).unique(subset=["symbol"])
     if "name" in instruments.columns:

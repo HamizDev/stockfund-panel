@@ -48,7 +48,7 @@ from app.plugins.fuyao.client import FuyaoClient, FuyaoError
 logger = logging.getLogger(__name__)
 
 # 只声明真实提供的数据集; 其余数据集 provider_has_dataset 返回 False → 回退 tickflow
-_DATASETS = ("realtime", "daily", "adj_factor", "financial")
+_DATASETS = ("realtime", "daily", "adj_factor", "financial", "board_membership")
 
 API_KEY_ENV = "FUYAO_API_KEY"
 SECRETS_FIELD = "fuyao_api_key"  # UI 配置的 Key 存 secrets.json, 优先级高于 .env
@@ -325,6 +325,15 @@ class FuyaoProvider:
         if self._client is None:
             self._client = fuyao_client.FuyaoClient(api_key=get_api_key())
         return self._client
+
+    def get_board_membership(self, kind: str, data_dir: Path, *, refresh: bool = False) -> dict | None:
+        """Normalized board membership; only explicit refresh may use the network."""
+        from app.plugins.fuyao.boards import read_snapshot, refresh_snapshot
+
+        snapshot = read_snapshot(data_dir, kind)
+        if refresh and (snapshot is None or time.time() * 1000 - snapshot['fetched_at_ms'] >= 86_400_000):
+            snapshot = refresh_snapshot(self._get_client(), data_dir, kind, reuse_fresh=True)
+        return snapshot
 
     # ---- dump 缓存 ----
     def _ensure_dump_path(self, dump_kind: str, cache_prefix: str) -> Path:

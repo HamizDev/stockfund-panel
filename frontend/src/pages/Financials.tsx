@@ -58,8 +58,8 @@ export function Financials() {
     }
   }, [syncing, syncStartedAt])
   // 选中的个股(模糊搜索结果);null 时显示搜索引导
-  const [selected, setSelected] = useState<{ symbol: string; name: string } | null>(null)
-  const { last: lastStock, remember: rememberStock } = useLastStock('financials')
+  const { last: lastStock, remember: rememberStock, clear: clearLastStock } = useLastStock('financials')
+  const [selected, setSelected] = useState<{ symbol: string; name: string } | null>(lastStock)
   const pick = (symbol: string, name: string) => {
     setSelected({ symbol, name })
     rememberStock(symbol, name)
@@ -299,7 +299,7 @@ export function Financials() {
                     <StockFinancialSearch onSelect={pick} />
                   </div>
                   <button
-                    onClick={() => setSelected(null)}
+                    onClick={() => { setSelected(null); clearLastStock() }}
                     className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs text-secondary hover:text-foreground rounded-btn border border-border hover:bg-elevated transition-colors shrink-0"
                     title="清除选择"
                   >
