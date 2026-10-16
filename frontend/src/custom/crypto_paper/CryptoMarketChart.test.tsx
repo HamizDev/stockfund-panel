@@ -17,6 +17,12 @@ vi.mock('@/components/CanvasMarketChart', async () => {
   }
 })
 
+function getRenderedCanvasProps(): CanvasMarketChartProps {
+  const props = mocked.props
+  if (props === null) throw new Error('CanvasMarketChart was not rendered')
+  return props
+}
+
 const testBars = (endTime = 60_000): CryptoMarketBar[] => [
   { open_time_ms: 0, close_time_ms: 59_999, open: '100', high: '110', low: '90', close: '105', volume: '2' },
   { open_time_ms: endTime, close_time_ms: endTime + 59_999, open: '105', high: '112', low: '101', close: '108', volume: '3' },
@@ -27,8 +33,7 @@ function renderChart(props: Partial<ComponentProps<typeof CryptoMarketChart>> = 
   const html = renderToStaticMarkup(
     <CryptoMarketChart bars={testBars()} interval="1m" symbol="BTCUSDT" {...props} />,
   )
-  if (!mocked.props) throw new Error('CanvasMarketChart was not rendered')
-  return { html, canvas: mocked.props }
+  return { html, canvas: getRenderedCanvasProps() }
 }
 
 describe('CryptoMarketChart Canvas adapter', () => {

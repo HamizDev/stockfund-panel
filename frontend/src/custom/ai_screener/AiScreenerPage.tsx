@@ -13,6 +13,8 @@ import { candidatePriceLabel } from './candidateDisplay'
 import { fetchAssistantStatus } from '../assistant/client'
 import { DEFAULT_CANDIDATE_PREVIEW_LIMIT, previewCandidates } from '../candidatePreview'
 import { usePageState } from '@/lib/usePageState'
+import type { HeatmapWeight } from '@/lib/candidateHeatmap'
+import { CandidateHeatmapView } from './CandidateHeatmapView'
 
 type AssetType = 'stock' | 'etf'
 
@@ -22,6 +24,8 @@ type AiScreenerViewState = {
   selectedByAsset: Record<AssetType, string | null>
   visibleLimitByAsset: Record<AssetType, number>
   lastAssetType: AssetType
+  displayByAsset?: Record<AssetType, 'cards' | 'heatmap'>
+  heatmapWeightByAsset?: Record<AssetType, HeatmapWeight>
 }
 
 const MAX_VIEW_SEARCH_LENGTH = 120
@@ -43,10 +47,16 @@ function isVisibleLimit(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= DEFAULT_CANDIDATE_PREVIEW_LIMIT && value <= MAX_VISIBLE_CANDIDATES
 }
 
+function validAssetOptions(value: unknown, options: readonly string[]): boolean {
+  return value === undefined || (isRecord(value) && (['stock', 'etf'] as const).every(asset =>
+    typeof value[asset] === 'string' && options.includes(value[asset] as string)))
+}
+
 function isAiScreenerViewState(value: unknown): value is AiScreenerViewState {
   if (!isRecord(value) || typeof value.search !== 'string' || value.search.length > MAX_VIEW_SEARCH_LENGTH ||
       typeof value.multiOnly !== 'boolean' || !isRecord(value.selectedByAsset) || !isRecord(value.visibleLimitByAsset) ||
-      !isAssetType(value.lastAssetType)) return false
+      !isAssetType(value.lastAssetType) || !validAssetOptions(value.displayByAsset, ['cards', 'heatmap']) ||
+      !validAssetOptions(value.heatmapWeightByAsset, ['equal', 'amount'])) return false
   const selectedByAsset = value.selectedByAsset as Record<string, unknown>
   const visibleLimitByAsset = value.visibleLimitByAsset as Record<string, unknown>
   return (['stock', 'etf'] as const).every((assetType) =>
@@ -108,6 +118,8 @@ export function AiScreenerPage() {
     setView(current => ({ ...current, lastAssetType: type }))
   }
   const { search, multiOnly, selectedByAsset, visibleLimitByAsset } = view
+  const displayMode = view.displayByAsset?.[assetType] ?? 'cards'
+  const heatmapWeight = view.heatmapWeightByAsset?.[assetType] ?? 'equal'
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
   const candidateListRef = useRef<HTMLElement | null>(null)
   const selectedCandidateRef = useRef<HTMLElement | null>(null)
@@ -191,12 +203,17 @@ export function AiScreenerPage() {
         <section ref={candidateListRef} className="min-w-0 rounded-xl border border-border bg-surface">
           <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-3">
             <div className="flex flex-wrap items-center gap-x-2 text-sm font-semibold text-foreground">候选观察 <span className="text-xs font-normal text-muted">显示 {visible.length} / 匹配 {matching.length} 只</span></div>
+            <div role="group" aria-label="候选展示方式" className="inline-flex rounded-md border border-border bg-base/50 p-0.5">
+              {(['cards', 'heatmap'] as const).map(mode => <button key={mode} type="button" aria-pressed={displayMode === mode} onClick={() => setView(current => ({ ...current, displayByAsset: { stock: current.displayByAsset?.stock ?? 'cards', etf: current.displayByAsset?.etf ?? 'cards', [assetType]: mode } }))} className={`min-h-8 rounded px-2.5 text-xs ${displayMode === mode ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'}`}>{mode === 'cards' ? '卡片' : '热力图'}</button>)}
+            </div>
             <div className="ml-auto flex items-center gap-2">
               <label className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-secondary"><Search className="h-3.5 w-3.5" /><input aria-label="搜索候选" value={search} onChange={e => setView(current => ({ ...current, search: e.target.value.slice(0, MAX_VIEW_SEARCH_LENGTH) }))} placeholder="代码 / 名称" className="w-24 bg-transparent text-foreground outline-none placeholder:text-muted md:w-32" /></label>
               <button onClick={() => setView(current => ({ ...current, multiOnly: !current.multiOnly }))} className={`rounded-md border px-2.5 py-1.5 text-xs ${multiOnly ? 'border-accent/50 bg-accent/15 text-accent' : 'border-border text-secondary hover:text-foreground'}`}>多策略</button>
             </div>
           </div>
-          <div className="grid gap-3 p-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr))]">
+          {visible.length > 0 && (displayMode === 'heatmap' ? <CandidateHeatmapView candidates={visible} selectedSymbol={selectedSymbol} weight={heatmapWeight} asOf={data.as_of}
+            onWeightChange={weight => setView(current => ({ ...current, heatmapWeightByAsset: { stock: current.heatmapWeightByAsset?.stock ?? 'equal', etf: current.heatmapWeightByAsset?.etf ?? 'equal', [assetType]: weight } }))}
+            onSelect={selectCandidate} /> : <div className="grid gap-3 p-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr))]">
             {visible.map(({ item, rank }) => {
               const key = researchKey(assetType, item.symbol)
               return <StockCandidateCard key={key} item={item} assetType={assetType} asOf={data.as_of} provider={data.quote.provider} quoteTime={data.quote.last_fetch_ms}
@@ -206,7 +223,7 @@ export function AiScreenerPage() {
                 onSelect={() => selectCandidate(item.symbol)} onPreview={() => { selectCandidate(item.symbol); setPreviewSymbol(item.symbol) }}
                 onAnalyze={() => { selectCandidate(item.symbol); void research.generate(item, assetType) }} />
             })}
-          </div>
+          </div>)}
           {!visible.length && <div className="p-8 text-center text-sm text-muted">没有符合当前过滤条件的候选</div>}
           {matching.length > DEFAULT_CANDIDATE_PREVIEW_LIMIT && searchActive && <div role="status" className="border-t border-border px-4 py-2 text-center text-[11px] text-muted">搜索结果已显示全部 {matching.length} 只，包含前 {DEFAULT_CANDIDATE_PREVIEW_LIMIT} 名以外的候选。</div>}
           {!searchActive && matching.length > DEFAULT_CANDIDATE_PREVIEW_LIMIT && <div className="flex flex-wrap justify-center gap-2 border-t border-border px-4 py-2">

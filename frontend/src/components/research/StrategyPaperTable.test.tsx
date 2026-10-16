@@ -108,10 +108,11 @@ const strategies = [makeStrategy('alpha', 'Alpha'), makeStrategy('beta', 'Beta')
 function render(rows: PaperCompareRow[], onToggle = vi.fn(), togglePending = false) {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   root = createRoot(container)
-  client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity } } })
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity } } })
+  client = queryClient
   act(() => {
     root!.render(
-      <QueryClientProvider client={client}>
+      <QueryClientProvider client={queryClient}>
         <StrategyPaperTable
           rows={rows}
           strategies={strategies}

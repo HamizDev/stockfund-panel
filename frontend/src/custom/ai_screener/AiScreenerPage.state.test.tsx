@@ -225,3 +225,41 @@ it('rejects malformed persisted view state and ignores an unsupported URL asset 
   expect(host.querySelector<HTMLInputElement>('input[aria-label="搜索候选"]')?.value).toBe('')
   expect(fixtures.generate).not.toHaveBeenCalled()
 })
+
+it('remembers independent heatmap settings across asset tabs and navigation without requesting analysis or extra candidates', async () => {
+  await act(async () => render('/ai-screener?asset_type=etf'))
+  await act(async () => fixtures.resolveEtf?.(etfResponse))
+  await settle()
+  const displayButton = (text: string) => [...host.querySelectorAll<HTMLButtonElement>('[aria-label="候选展示方式"] button')].find(button => button.textContent === text)!
+  expect(displayButton('卡片').getAttribute('aria-pressed')).toBe('true')
+  const requests = fixtures.getCandidates.mock.calls.length
+  await act(async () => displayButton('热力图').click())
+  const select = host.querySelector<HTMLSelectElement>('[aria-label="热力图面积依据"]')!
+  await act(async () => {
+    select.value = 'amount'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+  await settle()
+  expect(fixtures.getCandidates).toHaveBeenCalledTimes(requests)
+  expect(viewState().displayByAsset).toEqual({ stock: 'cards', etf: 'heatmap' })
+  expect(viewState().heatmapWeightByAsset).toEqual({ stock: 'equal', etf: 'amount' })
+
+  await act(async () => [...host.querySelectorAll('button')].find(button => button.textContent === '股票')!.click())
+  await settle()
+  expect(displayButton('卡片').getAttribute('aria-pressed')).toBe('true')
+  await act(async () => [...host.querySelectorAll('button')].find(button => button.textContent === 'ETF')!.click())
+  await settle()
+  expect(displayButton('热力图').getAttribute('aria-pressed')).toBe('true')
+  expect(host.querySelector<HTMLSelectElement>('[aria-label="热力图面积依据"]')?.value).toBe('amount')
+
+  await act(async () => [...host.querySelectorAll('a')].find(link => link.textContent === '离开选股')!.click())
+  await settle()
+  await act(async () => [...host.querySelectorAll('a')].find(link => link.textContent === '返回选股')!.click())
+  await settle()
+  expect(displayButton('热力图').getAttribute('aria-pressed')).toBe('true')
+  expect(host.querySelector<HTMLSelectElement>('[aria-label="热力图面积依据"]')?.value).toBe('amount')
+  await changeSearch('not-a-candidate')
+  expect(host.querySelector('[aria-label="候选热力图"]')).toBeNull()
+  expect(host.textContent).toContain('没有符合当前过滤条件的候选')
+  expect(fixtures.generate).not.toHaveBeenCalled()
+})

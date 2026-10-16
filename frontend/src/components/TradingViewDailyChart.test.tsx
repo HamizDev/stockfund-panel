@@ -18,6 +18,12 @@ vi.mock('@/components/CanvasMarketChart', async () => {
   }
 })
 
+function getRenderedCanvasProps(): CanvasMarketChartProps {
+  const props = mocked.props
+  if (props === null) throw new Error('CanvasMarketChart was not rendered')
+  return props
+}
+
 const testRows: DailyKlineInput[] = [
   { date: '2026-09-28', open: 10, high: 12, low: 9, close: 11, volume: null, ma5: 10.5 },
   { date: '2026-09-30', open: 11, high: 13, low: 10, close: 12, volume: 200, ma5: 11 },
@@ -33,8 +39,7 @@ function renderChart(props: Partial<ComponentProps<typeof TradingViewDailyChart>
       {...props}
     />,
   )
-  if (!mocked.props) throw new Error('CanvasMarketChart was not rendered')
-  return { html, canvas: mocked.props }
+  return { html, canvas: getRenderedCanvasProps() }
 }
 
 describe('TradingViewDailyChart Canvas adapter', () => {
