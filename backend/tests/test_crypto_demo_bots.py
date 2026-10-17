@@ -179,6 +179,36 @@ def test_uncertain_post_is_durable_pauses_and_is_never_retried(tmp_path, venue):
         start(tmp_path, ETH)
 
 
+def test_exchange_rejection_diagnostic_is_durable_and_post_is_never_retried(tmp_path, venue, monkeypatch):
+    original_transport = bots.execution._transport
+    posts = []
+
+    def transport(credentials, method, path, **kwargs):
+        if method == 'POST':
+            posts.append((method, path, kwargs['body']['clOrdId']))
+            raise DemoAPIError('模拟委托结果待核对', category='exchange_code', code='51008')
+        return original_transport(credentials, method, path, **kwargs)
+
+    monkeypatch.setattr(bots.execution, '_transport', transport)
+    start(tmp_path, ETH)
+    bots.tick(tmp_path)
+
+    saved = bots._load(tmp_path)['bots'][ETH]
+    assert not row(tmp_path)['armed']
+    assert saved['pending']['state'] == 'uncertain'
+    assert saved['pending']['diagnostic_category'] == 'exchange_code'
+    assert saved['pending']['diagnostic_code'] == '51008'
+    assert saved['orders'][-1]['state'] == 'uncertain'
+    assert saved['orders'][-1]['diagnostic_category'] == 'exchange_code'
+    assert saved['orders'][-1]['diagnostic_code'] == '51008'
+    assert '[demo-error:exchange_code:51008]' in saved['reason']
+
+    for _ in range(2):
+        bots.tick(tmp_path)
+    assert len(posts) == 1
+    assert bots._load(tmp_path)['bots'][ETH]['pending']['state'] == 'uncertain'
+
+
 @pytest.mark.parametrize('terminal', ['partially_filled', 'canceled'])
 def test_partial_fill_never_counts_as_a_complete_trade_or_clears_pending(tmp_path, venue, terminal):
     start(tmp_path, ETH)

@@ -11,6 +11,10 @@ const api = vi.hoisted(() => ({
   status: vi.fn(), createPresets: vi.fn(), setEnabled: vi.fn(), setBotEnabled: vi.fn(), reconcile: vi.fn(), preflight: vi.fn(),
 }))
 vi.mock('./demo-bots-client', () => ({ demoBotsApi: api }))
+vi.mock('@/custom/jevos/components', () => ({
+  useJevosStatus: () => ({ data: undefined, isPending: false, isError: true }),
+  JevosStrategyShadow: () => 'Jevos 对照意见',
+}))
 
 function bot(overrides: Partial<DemoBot> = {}): DemoBot {
   return {
@@ -173,6 +177,39 @@ it('offers only reconciliation for unresolved orders and never exposes raw failu
   expect(host.textContent).toContain('委托对账失败，请核对欧易官方委托并稍后重试。')
   expect(host.textContent).not.toContain('secret API key diagnostic')
   expect(api.setBotEnabled).not.toHaveBeenCalled()
+})
+
+it.each([
+  ['exchange_code:51603', '交易所错误码 51603'],
+  ['http_status:403', 'HTTP 403'],
+  ['network', '网络请求失败'],
+])('shows a bounded %s diagnostic after a known reason', async (marker, label) => {
+  vi.mocked(api.status).mockResolvedValue(status({ bots: [bot({
+    reason: `请求结果待核对，策略已暂停；只查单不自动重发 [demo-error:${marker}]`,
+  })] }))
+  await render()
+  expect(host.textContent).toContain(label)
+  expect(host.textContent).not.toContain('[demo-error:')
+})
+
+it('does not accept raw content as a diagnostic reason', async () => {
+  vi.mocked(api.status).mockResolvedValue(status({ bots: [bot({
+    reason: 'raw secret [demo-error:exchange_code:51603]',
+  })] }))
+  await render()
+  expect(host.textContent).toContain('策略状态需要核对')
+  expect(host.textContent).not.toContain('raw secret')
+})
+
+it('keeps an operator-reviewed missing intent visible without blocking new activation', async () => {
+  vi.mocked(api.status).mockResolvedValue(status({ bots: [bot({ orders: [{
+    client_id: 'reviewed-intent', action: 'open_long', state: 'reviewed_not_found', created_at_ms: 1_798_000_000_000,
+  }] })] }))
+  await render()
+  expect(host.textContent).toContain('人工核对未找到')
+  expect(host.textContent).not.toContain('存在未完成或待核对委托')
+  expect(api.setBotEnabled).not.toHaveBeenCalled()
+  expect(api.reconcile).not.toHaveBeenCalled()
 })
 
 it('shows a fixed safe message when an enable request fails', async () => {

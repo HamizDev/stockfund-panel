@@ -4,6 +4,7 @@
 // Prod:同源(FastAPI 托管前端 dist)
 
 import { toast } from '@/components/Toast'
+import type { JevosStatus } from '@/custom/jevos/types'
 
 const BASE = ''
 
@@ -2477,6 +2478,7 @@ export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
 
   newsFeed: (refresh = false) => request<NewsFeedResponse>(`/api/custom/news/feed${refresh ? '?refresh=true' : ''}`, { quiet: true }),
+  jevosStatus: (signal?: AbortSignal) => request<JevosStatus>('/api/custom/jevos/status', { signal, quiet: true }),
   newsDirections: (effort: 'high' | 'max') => request<NewsDirectionJob>('/api/custom/news/directions', {
     method: 'POST', body: JSON.stringify({ effort }),
   }),

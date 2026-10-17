@@ -500,13 +500,18 @@ def _send(data_dir, bot, action, quote, spec):
             b['pending'].update(order_id=order_id, state='submitted')
             b.update(status='reconciling', reason='官方已接受，等待完整成交对账')
         _edit(data_dir, identifier, accepted)
-    except DemoAPIError:
+    except DemoAPIError as exc:
+        category, code = exc.diagnostic_category, exc.diagnostic_code
         def uncertain(b):
             b['orders'][-1]['state'] = 'uncertain' if started else 'rejected'
             b['pending']['state'] = 'uncertain' if started else 'rejected'
+            for record in (b['orders'][-1], b['pending']):
+                if category:
+                    record.update(diagnostic_category=category, diagnostic_code=code)
             if not started:
                 b['pending'] = None
-            b.update(status='paused', reason='请求结果待核对，策略已暂停；只查单不自动重发' if started else '发送前已暂停，本笔未发送')
+            reason = '请求结果待核对，策略已暂停；只查单不自动重发' if started else '发送前已暂停，本笔未发送'
+            b.update(status='paused', reason=str(DemoAPIError(reason, category=category, code=code)))
         _edit(data_dir, identifier, uncertain)
         with _RUNTIME_LOCK:
             _RUNTIME.setdefault(_runtime_key(data_dir, identifier), {})['armed'] = False
@@ -544,6 +549,10 @@ def _tick_bot(data_dir, bot):
         bar = bars[-1]['close_time_ms']
         is_new = bar != bot['last_bar_ms']
         bot = _edit(data_dir, identifier, lambda b: b.update(last_bar_ms=bar, last_signal=target))
+        # The optional observer only queues public evidence; it cannot veto orders.
+        from app.custom.jevos.service import offer_strategy
+
+        offer_strategy(data_dir, bot, bars)
         if held and is_new and target not in ('hold', held['side']):
             action = 'close_' + held['side']
         elif not held and is_new and target in ('long', 'short'):
@@ -593,6 +602,7 @@ def tick(data_dir):
                         '预检期间价格变化超过0.5%，等待下一轮',
                     }
                     reason = str(exc) if str(exc) in allowed else '行情、连接或官方配置预检暂未通过；未重发订单，等待下一轮核对'
+                    reason = str(DemoAPIError(reason, category=exc.diagnostic_category, code=exc.diagnostic_code))
                     _edit(data_dir, bot['id'], lambda b, reason=reason: b.update(status='blocked', reason=reason))
                 except (ValueError, TypeError, KeyError, ArithmeticError):
                     _edit(data_dir, bot['id'], lambda b: b.update(status='blocked', reason='行情、连接或官方配置预检暂未通过；未重发订单，等待下一轮核对'))

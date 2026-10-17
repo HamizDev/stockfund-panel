@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, LoaderCircle, Pause, Play, RefreshCcw, RotateCcw, ShieldCheck } from 'lucide-react'
 import { QK } from '@/lib/queryKeys'
+import { JevosStrategyShadow, useJevosStatus } from '@/custom/jevos/components'
 import { demoBotsApi, type DemoBot, type DemoBotOrder, type DemoBotsPreflight } from './demo-bots-client'
 
 const EXCHANGE = 'okx' as const
@@ -47,14 +48,24 @@ const SAFE_REASONS = new Set([
   '启用期间连接已变化或已暂停，本次未启用',
 ])
 
+function knownReason(reason: string): string | null {
+  if (SAFE_REASONS.has(reason)) return reason
+  const match = reason.match(/^(.+) \[demo-error:(exchange_code:[0-9]{1,8}|http_status:[1-5][0-9]{2}|network|invalid_response|exchange_error)\]$/)
+  if (!match || !SAFE_REASONS.has(match[1])) return null
+  const [category, code] = match[2].split(':')
+  const detail = category === 'exchange_code' ? `交易所错误码 ${code}`
+    : category === 'http_status' ? `HTTP ${code}`
+      : category === 'network' ? '网络请求失败'
+        : category === 'invalid_response' ? '返回格式异常' : '交易所返回错误'
+  return `${match[1]}（${detail}）`
+}
+
 function actionError(error: unknown, fallback: string) {
-  return error instanceof Error && SAFE_REASONS.has(error.message) ? error.message : fallback
+  return error instanceof Error ? knownReason(error.message) ?? fallback : fallback
 }
 
 function safeReason(reason: string) {
-  return SAFE_REASONS.has(reason)
-    ? reason
-    : '策略状态需要核对；请检查欧易官方模拟配置和未完成委托。'
+  return knownReason(reason) ?? '策略状态需要核对；请检查欧易官方模拟配置和未完成委托。'
 }
 
 function formatTime(value: number | null | undefined) {
@@ -110,6 +121,7 @@ function actionLabel(action: string) {
 }
 
 function orderStateLabel(state: string) {
+  if (state === 'reviewed_not_found') return '人工核对未找到'
   if (state === 'filled' || state === 'confirmed') return '已成交'
   if (state === 'rejected') return '已拒绝'
   if (state === 'canceled' || state === 'cancelled' || state === 'mmp_canceled') return '已撤销'
@@ -117,7 +129,7 @@ function orderStateLabel(state: string) {
 }
 
 function isUnresolved(order: DemoBotOrder) {
-  return !['filled', 'confirmed', 'rejected', 'canceled', 'cancelled', 'closed', 'mmp_canceled'].includes(order.state.toLowerCase())
+  return !['filled', 'confirmed', 'rejected', 'canceled', 'cancelled', 'closed', 'mmp_canceled', 'reviewed_not_found'].includes(order.state.toLowerCase())
 }
 
 function executionStateClass(bot: DemoBot) {
@@ -259,6 +271,7 @@ function Metric({ label, value, valueClass = 'text-foreground' }: { label: strin
 
 export function OfficialDemoBotsPanel() {
   const queryClient = useQueryClient()
+  const jevos = useJevosStatus()
   const [confirmDemo, setConfirmDemo] = useState(false)
   const [pendingAction, setPendingAction] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -460,6 +473,8 @@ export function OfficialDemoBotsPanel() {
             onReconcile={target => { void reconcileBot(target) }}
           />)}
         </div>}
+      <JevosStrategyShadow status={jevos.data} isLoading={jevos.isPending} isError={jevos.isError}
+        bots={bots.map(bot => ({ id: bot.id, name: bot.name, last_bar_ms: bot.last_bar_ms, last_signal: bot.last_signal }))} />
     </>}
   </section>
 }

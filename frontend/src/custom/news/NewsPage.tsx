@@ -7,6 +7,7 @@ import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { JevosNewsReview, JevosNewsStatus, useJevosStatus } from '@/custom/jevos/components'
 import { beijingNewsDay, readNewsFeedSessionCache, writeNewsFeedSessionCache, type SessionCachedNewsFeed } from './newsFeedSessionCache'
 
 const VIEWS = [ ['all', '全市场'], ['stocks', '个股'], ['serenity', 'Serenity'], ['wojianshan', '我见山'] ] as const
@@ -91,6 +92,7 @@ export function NewsPage() {
     setParams(next, { replace: true })
   }
   const feedDay = beijingNewsDay()
+  const jevos = useJevosStatus()
   const feed = useQuery<SessionCachedNewsFeed>({ queryKey: QK.newsFeed, queryFn: async () => {
       const data = await api.newsFeed()
       writeNewsFeedSessionCache(data)
@@ -222,6 +224,7 @@ export function NewsPage() {
           <button disabled={analyze.isPending || !feedData?.summary.today_count} onClick={() => generate('daily')}
             className="ml-auto inline-flex items-center gap-1.5 rounded border border-violet-400/30 px-2.5 py-1.5 text-violet-400 hover:bg-violet-400/10 disabled:opacity-40"><Sparkles size={14} />AI 今日研判</button>
         </section>
+        <JevosNewsStatus status={jevos.data} isLoading={jevos.isPending} isError={jevos.isError} />
         <section aria-label="AI 当日方向判断" className="rounded-lg border border-border bg-surface px-4 py-3">
           <div className="flex flex-wrap items-center gap-2">
             <div className="mr-auto min-w-56">
@@ -286,7 +289,7 @@ export function NewsPage() {
         </div>
         {(error || feed.error) && <div role="alert" className="rounded border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">{error || (feed.error instanceof Error ? feed.error.message : '快讯加载失败')}</div>}
         {feed.isLoading || (feed.isFetching && !feedData) ? <div className="flex items-center justify-center gap-2 py-20 text-sm text-muted"><Loader2 className="animate-spin" size={18} />正在拉取公开快讯…</div>
-          : <PaginatedNewsResults key={displayFilterKey} items={visible} classification={classification}
+          : <PaginatedNewsResults key={displayFilterKey} items={visible} classification={classification} jevosNews={jevos.data?.news ?? {}}
             analyzing={analyze.isPending} onAnalyze={generate} onPreview={setPreview}
             emptyMessage={waitingForAssociationSync ? '快讯缓存已恢复，个股持仓关联待更新' : rows.length === 0 ? '暂无有效快讯，请核对来源状态后刷新' : '没有符合当前筛选的快讯'}
             showMineHint={scope === 'mine' && !waitingForAssociationSync} />}
@@ -311,9 +314,10 @@ export function NewsPage() {
   </div>
 }
 
-function PaginatedNewsResults({ items, classification, analyzing, onAnalyze, onPreview, emptyMessage, showMineHint }: {
+function PaginatedNewsResults({ items, classification, jevosNews, analyzing, onAnalyze, onPreview, emptyMessage, showMineHint }: {
   items: NewsItem[]
   classification: 'serenity' | 'wojianshan'
+  jevosNews: Record<string, import('@/custom/jevos/types').JevosReview>
   analyzing: boolean
   onAnalyze: (id: string) => void
   onPreview: (stock: { symbol: string; name: string }) => void
@@ -338,13 +342,14 @@ function PaginatedNewsResults({ items, classification, analyzing, onAnalyze, onP
     </div>
     {items.length === 0 ? <div className="rounded-lg border border-border py-20 text-center text-sm text-muted">{emptyMessage}{showMineHint && <p className="mt-2 text-xs">仅匹配本地自选和登记的股票 / ETF，未命中不代表没有相关新闻。</p>}</div>
       : <section aria-label="快讯列表" className="overflow-hidden rounded-lg border border-border">
-        {displayed.map(item => <NewsRow key={item.id} item={item} classification={classification} onAnalyze={() => onAnalyze(item.id)} analyzing={analyzing} onPreview={onPreview} />)}
+        {displayed.map(item => <NewsRow key={item.id} item={item} classification={classification} jevosReview={jevosNews[item.id]} onAnalyze={() => onAnalyze(item.id)} analyzing={analyzing} onPreview={onPreview} />)}
       </section>}
   </>
 }
 
-function NewsRow({ item, classification, onAnalyze, analyzing, onPreview }: {
+function NewsRow({ item, classification, jevosReview, onAnalyze, analyzing, onPreview }: {
   item: NewsItem; classification: 'serenity' | 'wojianshan'; onAnalyze: () => void; analyzing: boolean
+  jevosReview?: import('@/custom/jevos/types').JevosReview
   onPreview: (stock: { symbol: string; name: string }) => void
 }) {
   const cls = item.classifications[classification]
@@ -370,6 +375,7 @@ function NewsRow({ item, classification, onAnalyze, analyzing, onPreview }: {
       </ul>}
       <p className="mt-2 text-[11px] text-muted">{AI_SCOPES[aiDirection.scope]} · {aiDirection.model} · {aiDirection.reasoning_effort} · 判断于 {timeText(aiDirection.generated_at)}</p>
     </details>}
+    <JevosNewsReview review={jevosReview} />
     <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-muted">
       {cls.matched.length > 0 && <span className="mr-2">命中：{cls.matched.join('、')}</span>}
       {item.associations.length > 0 && <span>关联：</span>}

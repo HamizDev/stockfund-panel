@@ -56,15 +56,27 @@ def _transport(credentials: dict, method: str, path: str, *, params=None, body=N
             response = client.request(method, host + request_path, headers=headers,
                                       content=raw if method == 'POST' else None)
             if response.status_code >= 300 or len(response.content) > 1_000_000:
-                raise DemoAPIError('模拟请求未取得明确结果，请按客户端订单号查单')
+                raise DemoAPIError('模拟请求未取得明确结果，请按客户端订单号查单',
+                                   category='http_status', code=response.status_code)
             value = response.json()
     except (httpx.HTTPError, ValueError) as exc:
         if isinstance(exc, DemoAPIError):
             raise
-        raise DemoAPIError('模拟请求未取得明确结果，请按客户端订单号查单') from exc
+        raise DemoAPIError('模拟请求未取得明确结果，请按客户端订单号查单',
+                           category='network' if isinstance(exc, httpx.HTTPError) else 'invalid_response') from exc
     success = '0' if flavor == 'okx' else '00000'
     if not isinstance(value, dict) or str(value.get('code')) != success or 'data' not in value:
-        raise DemoAPIError('官方模拟接口拒绝请求或结果不明；请检查模拟密钥、权限及订单状态')
+        code = value.get('code') if isinstance(value, dict) else None
+        if flavor == 'okx' and method == 'POST' and isinstance(value, dict):
+            rows = value.get('data')
+            if (isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict)
+                    and isinstance(body, dict) and body.get('clOrdId')
+                    and rows[0].get('clOrdId') == body['clOrdId']
+                    and re.fullmatch(r'[0-9]{1,8}', str(rows[0].get('sCode', '')))
+                    and str(rows[0]['sCode']) != '0'):
+                code = rows[0]['sCode']
+        raise DemoAPIError('官方模拟接口拒绝请求或结果不明；请检查模拟密钥、权限及订单状态',
+                           category='exchange_code', code=code)
     return value['data']
 
 

@@ -44,7 +44,12 @@ async def current_feed(request: Request, refresh: bool = False) -> dict:
     else:
         await news.refresh(refresh)
     instruments, related, status = await run_in_threadpool(collect_context, request.app.state.repo)
-    return await run_in_threadpool(news.feed, instruments, related, status)
+    snapshot = await run_in_threadpool(news.feed, instruments, related, status)
+    # Enqueue only: local inference must not extend news/provider request latency.
+    from app.custom.jevos.service import offer_news
+
+    await run_in_threadpool(offer_news, news.data_dir, snapshot['items'], snapshot['related_symbols'])
+    return snapshot
 
 
 def build_router() -> APIRouter:

@@ -10,6 +10,7 @@
 export const QK = {
   marketMembershipStatus: ['market-membership-status'] as const,
   newsFeed: ['news-feed'] as const,
+  jevosStatus: ['jevos-status'] as const,
   newsAnalysis: (id: string) => ['news-analysis', id] as const,
   newsDirectionJob: (id: string) => ['news-direction-job', id] as const,
   cryptoMarketQuote: (symbol: string) => ['crypto-market-quote', 'bitget', 'usdm', symbol] as const,

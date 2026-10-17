@@ -11,6 +11,7 @@ import { beijingNewsDay, readNewsFeedSessionCache, writeNewsFeedSessionCache } f
 
 const state = vi.hoisted(() => ({
   data: {} as NewsFeedResponse,
+  jevosStatus: null as null | Record<string, unknown>,
   refreshes: [] as boolean[], analyses: [] as string[], directionStarts: [] as string[], directionPolls: [] as string[],
   directionStartResult: {} as { id: string; status: string; total: number; completed: number; error: string | null; model: string; reasoning_effort: string; cache_hit: boolean },
   directionJobResult: {} as { id: string; status: string; total: number; completed: number; error: string | null; model: string; reasoning_effort: string; cache_hit: boolean },
@@ -22,6 +23,7 @@ vi.mock('@/lib/api', () => {
     constructor(message: string, readonly status: number) { super(message) }
   }
   return { ApiError: MockApiError, api: {
+  jevosStatus: async () => state.jevosStatus,
   newsFeed: async (refresh = false) => {
     state.refreshes.push(refresh)
     if (!refresh && state.feedError) throw new Error(state.feedError)
@@ -53,6 +55,7 @@ beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   sessionStorage.clear()
   state.refreshes = []; state.analyses = []; state.directionStarts = []; state.directionPolls = []; state.busy = false; state.feedError = ''; state.directionPollError = 0
+  state.jevosStatus = { mode: 'shadow', status: 'offline', model: null, fingerprint: null, last_check_ms: null, queued: 0, completed: 0, news: {}, strategies: {}, strategy_history: [] }
   state.directionStartResult = { id: 'direction-job-1', status: 'running', total: 240, completed: 0, error: null, model: 'gpt-6-luna', reasoning_effort: 'high', cache_hit: false }
   state.directionJobResult = { ...state.directionStartResult }
   state.data = {
@@ -104,6 +107,27 @@ it('renders source failure independently, original links and explicit model acti
   expect(state.analyses).toEqual([])
   expect(state.directionStarts).toEqual([])
   expect(sessionStorage.getItem('stockfund.news-direction-job.v1')).toBeNull()
+})
+
+it('adds a Jevos opinion only to its matching news row and keeps the existing feed visible', async () => {
+  const id = '1'.repeat(24)
+  state.jevosStatus = {
+    mode: 'shadow', status: 'ready', model: 'jevos-v5', fingerprint: 'b'.repeat(64), last_check_ms: 1_800_000_000_000,
+    queued: 0, completed: 1, strategies: {}, strategy_history: [],
+    news: { [id]: {
+      kind: 'news', id, input_key: 'a'.repeat(64), model: 'jevos-v5', fingerprint: 'b'.repeat(64),
+      generated_at_ms: 1_800_000_000_000, source_at_ms: null, label: 'positive_clue', original_signal: null,
+      probabilities: { positive: 0.9, risk: 0.05, material: 0.8 }, related_names: ['工商银行'],
+    } },
+  }
+  await render()
+
+  const rows = host.querySelectorAll('article')
+  expect(rows).toHaveLength(2)
+  expect(rows[0].textContent).toContain('Jevos 初筛 · 正面线索')
+  expect(rows[0].textContent).toContain('关注 / 登记持仓')
+  expect(rows[1].textContent).not.toContain('Jevos 初筛')
+  expect(host.textContent).toContain('公司遭处罚')
 })
 
 it('starts the selected Luna effort only after a button click and stores only job coordinates', async () => {
