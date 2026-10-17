@@ -217,6 +217,67 @@ def _available(snapshot):
         raise DemoAPIError('官方模拟USDT可用余额无效') from exc
 
 
+def preflight(data_dir):
+    """Read current demo settings without arming, writing a ledger or sending orders."""
+    with demo_trading._op(demo_trading._key(data_dir, 'okx')):
+        credentials, generation, fingerprint = _credentials(data_dir)
+        with _STORE_LOCK:
+            bots = list(copy.deepcopy(_load(data_dir)['bots']).values())
+        config = execution._transport(credentials, 'GET', '/api/v5/account/config')
+        if not isinstance(config, list) or len(config) != 1 or not isinstance(config[0], dict):
+            raise DemoAPIError('官方模拟账户配置不可核对，请稍后重试')
+        account = config[0]
+        account_label = {'1': '现货模式', '2': '合约模式', '3': '跨币种保证金模式', '4': '组合保证金模式'}.get(account.get('acctLv'), '未知模式')
+        position_label = {'net_mode': '单向持仓', 'long_short_mode': '双向持仓'}.get(account.get('posMode'), '未知模式')
+        snapshot = execution.snapshot(credentials)
+        enough = _available(snapshot) >= sum(D(bot['budget_usdt']) for bot in bots)
+        legacy_armed = demo_trading.status(data_dir, 'okx')['armed']
+        common = [
+            {'label': '账户模式', 'passed': account.get('acctLv') == '2', 'actual': account_label, 'required': '合约模式'},
+            {'label': '持仓模式', 'passed': account.get('posMode') == 'net_mode', 'actual': position_label, 'required': '单向持仓'},
+            {'label': '原单策略', 'passed': not legacy_armed, 'actual': '请先暂停' if legacy_armed else '未运行', 'required': '未运行'},
+            {'label': '模拟额度', 'passed': enough, 'actual': '充足' if enough else '不足或不可核对', 'required': '覆盖全部策略预算'},
+        ]
+        items = []
+        for bot in bots:
+            rows = execution._transport(credentials, 'GET', '/api/v5/account/leverage-info', params={
+                'instId': execution.instrument(bot['symbol']), 'mgnMode': 'isolated'})
+            valid = isinstance(rows, list) and bool(rows) and all(isinstance(row, dict) for row in rows)
+            leverages = []
+            if valid:
+                for row in rows:
+                    try:
+                        raw_leverage = str(row.get('lever') or '')
+                        if len(raw_leverage) > 16:
+                            continue
+                        value = execution._positive(raw_leverage)
+                        if 1 <= value <= 1000:
+                            leverages.append(format(value, 'f'))
+                    except DemoAPIError:
+                        pass
+            leverage_ok = valid and all(row.get('instId') == execution.instrument(bot['symbol'])
+                and row.get('mgnMode') == 'isolated' and row.get('lever') is not None for row in rows)
+            leverage_ok = bool(leverage_ok and len(leverages) == len(rows) and all(D(v) == bot['leverage'] for v in leverages))
+            owned = True
+            try:
+                _owned_position(bot, snapshot)
+            except OwnershipError:
+                owned = False
+            owned = owned and (not bot['position'] or bot['position'].get('fingerprint') == fingerprint)
+            clear = owned and not bot['pending'] and not any(row['symbol'] == execution.instrument(bot['symbol']) for row in snapshot['orders'])
+            checks = [
+                {'label': '逐仓杠杆', 'passed': leverage_ok, 'actual': ' / '.join(dict.fromkeys(leverages)) + ' 倍' if leverages else '不可核对', 'required': f'{bot["leverage"]} 倍'},
+                {'label': '委托与仓位', 'passed': clear, 'actual': '可核对' if clear else '有待核对记录', 'required': '无冲突或待对账委托'},
+            ]
+            items.append({'id': bot['id'], 'name': bot['name'], 'symbol': bot['symbol'], 'checks': checks})
+        _, current_generation, current_fingerprint = _credentials(data_dir)
+        if (generation, fingerprint) != (current_generation, current_fingerprint):
+            raise DemoAPIError('检查期间连接已变化，请重新检查')
+        return {'exchange': 'okx', 'environment': 'demo', 'checked_at_ms': int(time.time() * 1000),
+            'ready': bool(items) and all(c['passed'] for c in common) and all(c['passed'] for item in items for c in item['checks']),
+            'checks': common, 'bots': items}
+
+
 def set_enabled(data_dir, request: EnabledRequest, identifier=None):
     root = str(data_dir.resolve())
     with _STORE_LOCK:

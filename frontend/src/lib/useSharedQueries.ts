@@ -15,6 +15,7 @@ export function useCapabilities() {
   return useQuery({
     queryKey: QK.capabilities,
     queryFn: api.capabilities,
+    staleTime: 30_000,
   })
 }
 
@@ -28,6 +29,7 @@ export function useCapabilityMatrix() {
   return useQuery({
     queryKey: QK.capabilityMatrix,
     queryFn: api.capabilityMatrix,
+    staleTime: 30_000,
   })
 }
 
@@ -36,6 +38,7 @@ export function useSettings() {
   return useQuery({
     queryKey: QK.settings,
     queryFn: api.settings,
+    staleTime: 30_000,
   })
 }
 
@@ -44,6 +47,7 @@ export function usePreferences() {
   return useQuery({
     queryKey: QK.preferences,
     queryFn: api.preferences,
+    staleTime: 30_000,
   })
 }
 

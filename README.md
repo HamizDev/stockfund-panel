@@ -16,7 +16,7 @@
 
 由 **HamizDev 独立维护**，把行情观察、候选筛选、策略验证和模拟跟踪放在同一个界面里。支持股票、场内 ETF、场外基金研究，以及独立的数字资产模拟模块；数据源和 AI 服务按需配置，个人数据与密钥保存在使用者自己的运行环境。
 
-当前版本 **0.0.2**：[版本说明](docs/release-0.0.2.md) · [候选热力图](docs/dsh-widget-absorption.md)。
+当前版本 **0.0.3**：[版本说明](docs/release-0.0.3.md) · [更新历史](CHANGELOG.md) · [候选热力图](docs/dsh-widget-absorption.md)。
 
 ## 功能亮点
 
@@ -196,7 +196,7 @@ AI 选股的候选来自已有策略计算，不是模型自行发现的股票�
 | 主题 | 文档 |
 | --- | --- |
 | 安装、启动与更新 | [部署指南](docs/deployment.md) · [配置说明](docs/configuration.md) |
-| 最新版本 | [0.0.2 更新说明](docs/release-0.0.2.md) |
+| 最新版本 | [0.0.3 更新说明](docs/release-0.0.3.md) · [更新历史](CHANGELOG.md) |
 | 图表与技术研究 | [图表研究工具](docs/chart-research.md) · [本地 Canvas 与官方模拟入口](docs/local-chart-and-official-demo.md) |
 | 候选观察 | [股票 / ETF 热力图](docs/dsh-widget-absorption.md) |
 | 策略、AI 与回测 | [策略说明](docs/strategy.md) · [AI 策略迭代](docs/strategy-iteration.md) · [研究流程](docs/strategy-research.md) |

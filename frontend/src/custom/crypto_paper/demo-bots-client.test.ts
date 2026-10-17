@@ -65,3 +65,10 @@ it('rejects a malformed status without forwarding an arbitrary response detail',
   fetchMock.mockResolvedValueOnce(reply({ detail: 'secret diagnostic payload' }))
   await expect(demoBotsApi.status('okx')).rejects.toThrow('官方模拟策略状态响应格式无效')
 })
+
+it('preflight uses GET and rejects malformed configuration without echoing it', async () => {
+  fetchMock.mockResolvedValueOnce(reply({ private: 'do-not-render' }))
+  await expect(demoBotsApi.preflight('okx')).rejects.toThrow('官方模拟检查响应格式无效')
+  expect(fetchMock.mock.calls[0][0]).toBe('/api/custom/crypto-paper/demo/bots/okx/preflight')
+  expect(fetchMock.mock.calls[0][1].method).toBeUndefined()
+})

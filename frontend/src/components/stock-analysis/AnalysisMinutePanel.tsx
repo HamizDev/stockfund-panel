@@ -55,7 +55,7 @@ function validOhlc(row: MinuteKlineRow): boolean {
 }
 
 function sourceLabel(source: string | undefined): string {
-  if (source === 'live') return '实时'
+  if (source === 'live') return '在线查询'
   if (source === 'local') return '本地'
   if (source === 'none') return '无来源'
   return source || '未知'

@@ -6,7 +6,7 @@ import pytest
 
 from app.api import screener
 from app.services import market_overview_builder as overview
-from app.services.limit_counts import sealed_counts
+from app.services.limit_counts import price_limit_scope, sealed_counts
 from app.services.screener import ScreenerService
 
 
@@ -14,6 +14,18 @@ def test_snapshot_counts_only_price_limit_members_and_missing_is_pending():
     snapshot = {'A': {'sealed': True}, 'B': {'sealed': False}, 'unrelated': {'sealed': False}}
     assert sealed_counts(['A', 'B', 'C', 'A'], snapshot, True) == {'real': 1, 'fake': 1, 'pending': 1}
     assert sealed_counts(['A', 'B'], snapshot, False) == {'real': 0, 'fake': 0, 'pending': 2}
+
+
+def test_price_scope_explains_st_counts_and_deduplicates_symbols():
+    rows = [
+        {'symbol': '600001.SH', 'name': '*ST示例', 'signal_limit_up': True},
+        {'symbol': '600002.SH', 'name': '普通示例', 'signal_limit_up': True},
+        {'symbol': '920001.BJ', 'name': '北交示例', 'signal_limit_down': True},
+    ]
+    result = price_limit_scope([*rows, rows[1]])
+    assert result['covered'] == 3
+    assert result['non_st_up'] == result['non_st_down'] == 1
+    assert '含ST及北交所' in result['label']
 
 
 @pytest.mark.parametrize('direction', ['up', 'down'])

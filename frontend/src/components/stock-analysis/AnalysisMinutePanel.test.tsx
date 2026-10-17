@@ -140,7 +140,7 @@ it('routes index to the price-points endpoint and disables 1-minute candles', as
   const intradayButton = [...host.querySelectorAll('button')].find(button => button.textContent === '分时')!
   expect(intradayButton.getAttribute('aria-pressed')).toBe('true')
   expect(host.querySelector('[data-testid="candles"]')).toBeNull()
-  expect(host.textContent).toContain('来源：实时 · txquote')
+  expect(host.textContent).toContain('来源：在线查询 · txquote')
 })
 
 it('does not draw candles when real OHLC is incomplete and does not synthesize open from close', async () => {

@@ -8,7 +8,7 @@ import type { DemoBot, DemoBotsStatus } from './demo-bots-client'
 import { OfficialDemoBotsPanel } from './OfficialDemoBotsPanel'
 
 const api = vi.hoisted(() => ({
-  status: vi.fn(), createPresets: vi.fn(), setEnabled: vi.fn(), setBotEnabled: vi.fn(), reconcile: vi.fn(),
+  status: vi.fn(), createPresets: vi.fn(), setEnabled: vi.fn(), setBotEnabled: vi.fn(), reconcile: vi.fn(), preflight: vi.fn(),
 }))
 vi.mock('./demo-bots-client', () => ({ demoBotsApi: api }))
 
@@ -52,6 +52,7 @@ beforeEach(() => {
   vi.mocked(api.setEnabled).mockReset().mockResolvedValue(status())
   vi.mocked(api.setBotEnabled).mockReset().mockResolvedValue(status())
   vi.mocked(api.reconcile).mockReset().mockResolvedValue(status())
+  vi.mocked(api.preflight).mockReset()
 })
 
 it('shows unknown official positions as pending and contract quantities in lots', async () => {
@@ -182,4 +183,28 @@ it('shows a fixed safe message when an enable request fails', async () => {
 
   expect(host.textContent).toContain('策略启用失败，请检查官方模拟配置')
   expect(host.textContent).not.toContain('raw exchange payload with secret')
+})
+
+it('shows a known setup rejection instead of hiding it in a generic batch error', async () => {
+  api.setEnabled.mockRejectedValueOnce(new Error('请先在OKX模拟盘设为合约账户、单向持仓模式'))
+  await render()
+  await checkConfirmation()
+  await clickButton('全部启用（官方模拟）')
+  expect(host.textContent).toContain('请先在OKX模拟盘设为合约账户、单向持仓模式')
+  expect(host.textContent).not.toContain('批量启用失败')
+})
+
+it('checks configuration only on demand and displays actual mode and leverage', async () => {
+  api.preflight.mockResolvedValueOnce({ exchange: 'okx', environment: 'demo', checked_at_ms: 1_798_000_000_000, ready: false,
+    checks: [{ label: '持仓模式', passed: false, actual: '双向持仓', required: '单向持仓' }],
+    bots: [{ id: 'btc', name: 'BTC 检查', symbol: 'BTCUSDT', checks: [{ label: '逐仓杠杆', passed: false, actual: '3 倍', required: '10 倍' }] }],
+  })
+  await render()
+  expect(api.preflight).not.toHaveBeenCalled()
+  await clickButton('检查运行条件（不下单）')
+  expect(host.textContent).toContain('当前：双向持仓')
+  expect(host.textContent).toContain('当前：3 倍')
+  expect(host.textContent).toContain('要求：10 倍')
+  expect(api.setEnabled).not.toHaveBeenCalled()
+  expect(api.setBotEnabled).not.toHaveBeenCalled()
 })

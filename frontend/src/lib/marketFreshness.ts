@@ -1,6 +1,7 @@
 type QuoteStatus = {
   enabled?: boolean; running?: boolean; paused?: boolean; is_trading_hours?: boolean
   quote_age_ms?: number | null; interval_s?: number; mode?: string; market_phase?: string
+  source_age_ms?: number | null
 }
 
 /** A running polling service alone does not establish a fresh market quote. */
@@ -16,10 +17,11 @@ export function marketFreshness(status: QuoteStatus, historical: boolean) {
     return { label: '时间待核对', live: false, note: '未取得可核对的行情更新时间，不能确认实时性' }
   }
   const interval = typeof status.interval_s === 'number' && Number.isFinite(status.interval_s) && status.interval_s > 0 ? status.interval_s : 60
-  if (status.quote_age_ms > Math.max(120_000, interval * 3_000)) {
+  const sourceAge = typeof status.source_age_ms === 'number' && Number.isFinite(status.source_age_ms) ? status.source_age_ms : 0
+  if (Math.max(status.quote_age_ms, sourceAge) > Math.max(30_000, interval * 2_000)) {
     return { label: '行情延迟', live: false, note: '报价时间已超过更新周期，请检查数据源连接' }
   }
   if (status.mode === 'watchlist') return { label: '局部实时', live: true, note: '仅部分标的实时更新，其余数据可能来自盘后缓存' }
   if (status.mode !== 'full_market') return { label: '缓存行情', live: false, note: '未确认实时覆盖模式，显示最近可用数据' }
-  return { label: '实时行情', live: true, note: '处于连续交易时段，报价时间在更新周期内' }
+  return { label: '轮询行情', live: true, note: `约每 ${interval} 秒拉取一次，另有数据源与处理耗时；不代表逐笔实时` }
 }

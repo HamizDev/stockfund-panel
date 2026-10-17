@@ -102,8 +102,10 @@ export const QK = {
   klineLatest:          (symbol: string) => ['kline-latest', symbol] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
   stockAnalysisDaily:   (symbol: string, days: number) => ['stock-analysis-daily', symbol, days] as const,
-  klineMinute:          (symbol: string, date: string) =>
-                             ['kline-minute', symbol, date] as const,
+  klineMinute:          (symbol: string, date: string, live?: boolean) =>
+                             live == null
+                               ? ['kline-minute', symbol, date] as const
+                               : ['kline-minute', symbol, date, live] as const,
   klineMinuteRange:     (symbol: string, days: number) =>
                              ['kline-minute-range', symbol, days] as const,
   indexDaily:           (symbol: string, start: string, end: string) =>

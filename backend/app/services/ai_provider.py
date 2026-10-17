@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import uuid
@@ -27,6 +28,28 @@ CODEX_CLI_PROVIDER = "codex_cli"
 CODEX_DEFAULT_COMMAND = "codex"
 CODEX_SUPPORTED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 OPENAI_DEFAULT_REASONING_EFFORT = "high"
+_CODEX_CLI_PROBE_SUCCESS_TTL = 30.0
+_CODEX_CLI_PROBE_FAILURE_TTL = 3.0
+_CODEX_CLI_PROBE_CACHE_MAX_ENTRIES = 8
+_CODEX_CLI_RESOLUTION_ENV = (
+    "PATH",
+    "PATHEXT",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "HOME",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "CODEX_HOME",
+)
+_CODEX_CLI_PROBE_LOCK = threading.Lock()
+_CODEX_CLI_PROBE_CACHE: dict[tuple[object, ...], tuple[bool, float]] = {}
+_CODEX_CLI_PROBE_INFLIGHT: dict[tuple[object, ...], threading.Event] = {}
 
 _CODEX_ENV_ALLOWLIST = (
     "PATH",
@@ -272,11 +295,97 @@ def codex_cli_available() -> bool:
 
     仅 which 到二进制不够 — npm 壳缺平台原生二进制时同样存在于 PATH,
     但一运行就报错(如 "Codex CLI not available"), 状态页会误报已连接。
+    短时缓存只表示 --version 命令可运行, 不代表用户已登录或具备调用权限。
     """
     try:
         base = _codex_base_command()
     except RuntimeError:
         return False
+
+    key = _codex_cli_probe_cache_key(base)
+    while True:
+        now = time.monotonic()
+        with _CODEX_CLI_PROBE_LOCK:
+            for cached_key, (_, expires_at) in tuple(_CODEX_CLI_PROBE_CACHE.items()):
+                if expires_at <= now:
+                    _CODEX_CLI_PROBE_CACHE.pop(cached_key, None)
+
+            cached = _CODEX_CLI_PROBE_CACHE.get(key)
+            if cached is not None:
+                return cached[0]
+
+            pending = _CODEX_CLI_PROBE_INFLIGHT.get(key)
+            if pending is None:
+                pending = threading.Event()
+                _CODEX_CLI_PROBE_INFLIGHT[key] = pending
+                is_probe_owner = True
+            else:
+                is_probe_owner = False
+
+        if not is_probe_owner:
+            pending.wait()
+            continue
+
+        try:
+            available = _probe_codex_cli_version(base)
+        except BaseException:
+            with _CODEX_CLI_PROBE_LOCK:
+                _CODEX_CLI_PROBE_INFLIGHT.pop(key, None)
+                pending.set()
+            raise
+
+        ttl = _CODEX_CLI_PROBE_SUCCESS_TTL if available else _CODEX_CLI_PROBE_FAILURE_TTL
+        expires_at = time.monotonic() + ttl
+        with _CODEX_CLI_PROBE_LOCK:
+            while len(_CODEX_CLI_PROBE_CACHE) >= _CODEX_CLI_PROBE_CACHE_MAX_ENTRIES:
+                oldest_key = min(
+                    _CODEX_CLI_PROBE_CACHE,
+                    key=lambda cache_key: _CODEX_CLI_PROBE_CACHE[cache_key][1],
+                )
+                _CODEX_CLI_PROBE_CACHE.pop(oldest_key, None)
+            _CODEX_CLI_PROBE_CACHE[key] = (available, expires_at)
+            _CODEX_CLI_PROBE_INFLIGHT.pop(key, None)
+            pending.set()
+        return available
+
+
+def _codex_cli_probe_cache_key(base: Sequence[str]) -> tuple[object, ...]:
+    """Key results by the resolved command, executable files, and resolver inputs."""
+    environment = tuple((name.casefold(), os.environ.get(name)) for name in _CODEX_CLI_RESOLUTION_ENV)
+    executable_paths = [base[0]]
+    for index, argument in enumerate(base[:-1]):
+        if argument.casefold() == "-file":
+            executable_paths.append(base[index + 1])
+
+    files = tuple(_codex_cli_file_signature(path) for path in executable_paths)
+    # Including the runner makes isolated monkeypatches and alternate embedders
+    # invalidate their own probe state without weakening the production cache.
+    return tuple(base), files, environment, subprocess.run
+
+
+def _codex_cli_file_signature(command_path: str) -> tuple[object, ...]:
+    resolved = shutil.which(command_path) or command_path
+    try:
+        path = Path(resolved).expanduser().resolve()
+    except (OSError, RuntimeError):
+        path = Path(resolved).expanduser()
+    path_key = os.path.normcase(str(path))
+    try:
+        file_stat = path.stat()
+    except OSError:
+        return path_key, None
+    return (
+        path_key,
+        file_stat.st_dev,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+        file_stat.st_mode,
+        file_stat.st_size,
+        file_stat.st_ino,
+    )
+
+
+def _probe_codex_cli_version(base: Sequence[str]) -> bool:
     try:
         proc = subprocess.run(
             [*base, "--version"],

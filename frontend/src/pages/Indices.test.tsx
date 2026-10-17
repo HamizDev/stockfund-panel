@@ -10,6 +10,7 @@ type MinuteResponse = {
   symbol: string
   date: string
   rows: { datetime: string; open: null; high: null; low: null; close: number; volume: null; amount: null }[]
+  source: 'live' | 'none'
   provider: string
   data_kind: 'price_points'
   history_days: number
@@ -22,18 +23,18 @@ const fixtures = vi.hoisted(() => ({
     reject: (reason: Error) => void
   }[],
   calls: [] as { symbol: string; day: string | undefined }[],
+  dailyCalls: [] as { symbol: string; start: string; end: string }[],
   mounts: 0,
+  dailyRows: [] as { date: string; open: number; high: number; low: number; close: number; volume: number }[],
 }))
 
 vi.mock('@/lib/api', () => ({
   api: {
     indexQuotes: async () => ({ rows: [] }),
-    indexDaily: async (symbol: string) => ({
-      symbol,
-      rows: ['2026-09-09', '2026-09-10', '2026-09-11'].map((date, index) => ({
-        date, open: 7 + index, high: 12, low: 7, close: 8 + index, volume: 1,
-      })),
-    }),
+    indexDaily: async (symbol: string, _days: number, range: { start: string; end: string }) => {
+      fixtures.dailyCalls.push({ symbol, start: range.start, end: range.end })
+      return { symbol, rows: fixtures.dailyRows.filter(row => row.date >= range.start && row.date <= range.end) }
+    },
     indexMinute: (symbol: string, day?: string) => {
       fixtures.calls.push({ symbol, day })
       return new Promise<MinuteResponse>((resolve, reject) => {
@@ -67,9 +68,15 @@ let client: QueryClient
 
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  window.sessionStorage.clear()
+  window.localStorage.clear()
   fixtures.pending.length = 0
   fixtures.calls.length = 0
+  fixtures.dailyCalls.length = 0
   fixtures.mounts = 0
+  fixtures.dailyRows = ['2026-09-09', '2026-09-10', '2026-09-11'].map((date, index) => ({
+    date, open: 7 + index, high: 12, low: 7, close: 8 + index, volume: 1,
+  }))
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -82,12 +89,16 @@ afterEach(async () => {
   await act(async () => root.unmount())
   client.clear()
   host.remove()
+  vi.useRealTimers()
 })
 
 // React Query batches observer notifications on the next timer tick.
 async function settle() {
   for (let i = 0; i < 5; i++) {
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+    await act(async () => {
+      if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0)
+      else await new Promise(resolve => setTimeout(resolve, 0))
+    })
   }
 }
 
@@ -98,6 +109,7 @@ async function resolveDay(day: string, close: number) {
   await act(async () => call.resolve({
     symbol: call.symbol,
     date: day,
+    source: 'live',
     provider: 'txquote',
     data_kind: 'price_points',
     history_days: 5,
@@ -111,7 +123,7 @@ async function resolveEmptyDay(day: string) {
   expect(index).toBeGreaterThanOrEqual(0)
   const [call] = fixtures.pending.splice(index, 1)
   await act(async () => call.resolve({
-    symbol: call.symbol, date: day, provider: 'txquote', data_kind: 'price_points', history_days: 5, rows: [],
+    symbol: call.symbol, date: day, source: 'none', provider: 'txquote', data_kind: 'price_points', history_days: 5, rows: [],
   }))
   await settle()
 }
@@ -128,6 +140,17 @@ async function clickDay(day: string) {
   const button = host.querySelector<HTMLButtonElement>(`[data-day="${day}"]`)
   expect(button).not.toBeNull()
   await act(async () => button!.click())
+  await settle()
+}
+
+async function replaceDailyRows(dates: string[]) {
+  const rows = dates.map((date, index) => ({
+    date, open: 7 + index, high: 12, low: 7, close: 8 + index, volume: 1,
+  }))
+  fixtures.dailyRows = rows
+  const query = client.getQueryCache().getAll().find(item => item.queryKey[0] === 'index-daily')
+  expect(query).toBeDefined()
+  await act(async () => client.setQueryData(query!.queryKey, { symbol: '000001.SH', rows }))
   await settle()
 }
 
@@ -180,7 +203,7 @@ it('shows a distinct empty-date state with the response source and history range
 
   expect(host.textContent).toContain('日期 2026-09-11')
   expect(host.textContent).toContain('价格点位')
-  expect(host.textContent).toContain('来源 腾讯免费分时')
+  expect(host.textContent).toContain('来源 暂无有效数据 · 腾讯免费分时')
   expect(host.textContent).toContain('近5个交易日，以来源实际覆盖为准')
   expect(host.textContent).toContain('2026-09-11 暂无指数分时数据')
   expect(host.querySelector('[data-chart]')).toBeNull()
@@ -206,4 +229,117 @@ it('keeps source failure separate from empty dates and retries the same requeste
   expect(fixtures.calls.filter(call => call.day === '2026-09-11')).toHaveLength(2)
   await resolveDay('2026-09-11', 11.5)
   expect(host.querySelector('[data-chart]')?.textContent).toBe('2026-09-11|2026-09-11 09:35:00|11.5')
+})
+
+it('follows a newly available daily date, then keeps a manually selected historical date pinned', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2026-09-15T02:00:00.000Z')) // Tuesday 10:00 Beijing
+  fixtures.dailyRows = [{ date: '2026-09-14', open: 7, high: 12, low: 7, close: 8, volume: 1 }]
+
+  await act(async () => root.render(
+    <MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>,
+  ))
+  await settle()
+  expect(fixtures.calls).toContainEqual({ symbol: '000001.SH', day: '2026-09-14' })
+  await resolveDay('2026-09-14', 14)
+  expect(host.textContent).toContain('日期 2026-09-14 · 跟随最新')
+
+  await replaceDailyRows(['2026-09-14', '2026-09-15'])
+  expect(fixtures.calls).toContainEqual({ symbol: '000001.SH', day: '2026-09-15' })
+  await resolveDay('2026-09-15', 15)
+  expect(host.textContent).toContain('日期 2026-09-15 · 跟随最新')
+
+  await clickDay('2026-09-14')
+  expect(host.textContent).toContain('日期 2026-09-14 · 手选历史')
+  await replaceDailyRows(['2026-09-14', '2026-09-15', '2026-09-16'])
+  expect(host.textContent).toContain('日期 2026-09-14 · 手选历史')
+  expect(fixtures.calls.some(call => call.day === '2026-09-16')).toBe(false)
+})
+
+it('advances a saved follow-latest end date at the next Beijing session and fetches that date', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2026-09-14T02:00:00.000Z')) // Monday 10:00 Beijing
+  fixtures.dailyRows = [{ date: '2026-09-14', open: 7, high: 12, low: 7, close: 8, volume: 1 }]
+  window.sessionStorage.setItem('page-view:indices', JSON.stringify({
+    selected: '000001.SH',
+    range: { start: '2026-09-09', end: '2026-09-14' },
+    selectedDate: null,
+    followLatest: true,
+    rangeEndFollowsToday: true,
+  }))
+
+  await act(async () => root.render(
+    <MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>,
+  ))
+  await settle()
+  expect(fixtures.dailyCalls).toContainEqual({ symbol: '000001.SH', start: '2026-09-09', end: '2026-09-14' })
+  await resolveDay('2026-09-14', 14)
+
+  fixtures.dailyRows = [
+    { date: '2026-09-14', open: 7, high: 12, low: 7, close: 8, volume: 1 },
+    { date: '2026-09-15', open: 8, high: 13, low: 8, close: 9, volume: 1 },
+  ]
+  vi.setSystemTime(new Date('2026-09-15T01:30:00.000Z')) // Tuesday 09:30 Beijing
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+  await settle()
+
+  expect(fixtures.dailyCalls).toContainEqual({ symbol: '000001.SH', start: '2026-09-09', end: '2026-09-15' })
+  expect(fixtures.calls).toContainEqual({ symbol: '000001.SH', day: '2026-09-15' })
+  await resolveDay('2026-09-15', 15)
+  expect(host.textContent).toContain('日期 2026-09-15 · 跟随最新')
+})
+
+it('keeps a saved historical range and selected minute date fixed across the Beijing date change', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2026-09-14T02:00:00.000Z')) // Monday 10:00 Beijing
+  fixtures.dailyRows = [{ date: '2026-09-14', open: 7, high: 12, low: 7, close: 8, volume: 1 }]
+  window.sessionStorage.setItem('page-view:indices', JSON.stringify({
+    selected: '000001.SH',
+    range: { start: '2026-09-09', end: '2026-09-14' },
+    selectedDate: '2026-09-14',
+    followLatest: false,
+    rangeEndFollowsToday: false,
+  }))
+
+  await act(async () => root.render(
+    <MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>,
+  ))
+  await settle()
+  await resolveDay('2026-09-14', 14)
+  const callsBeforeDateChange = fixtures.dailyCalls.length
+  expect(host.querySelectorAll<HTMLInputElement>('input[type="date"]')[1].value).toBe('2026-09-14')
+
+  vi.setSystemTime(new Date('2026-09-15T01:30:00.000Z')) // Tuesday 09:30 Beijing
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+  await settle()
+
+  expect(fixtures.dailyCalls).toHaveLength(callsBeforeDateChange)
+  expect(fixtures.dailyCalls[0].end).toBe('2026-09-14')
+  expect(fixtures.calls.filter(call => call.day === '2026-09-15')).toHaveLength(0)
+  expect(host.querySelectorAll<HTMLInputElement>('input[type="date"]')[1].value).toBe('2026-09-14')
+  expect(host.textContent).toContain('日期 2026-09-14 · 手选历史')
+})
+
+it('refreshes current-day index minutes every 30 seconds while retaining the last valid chart', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2026-09-14T02:00:00.000Z')) // Monday 10:00 Beijing
+  fixtures.dailyRows = [{ date: '2026-09-14', open: 7, high: 12, low: 7, close: 8, volume: 1 }]
+
+  await act(async () => root.render(
+    <MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>,
+  ))
+  await settle()
+  await resolveDay('2026-09-14', 14)
+  const chart = host.querySelector<HTMLElement>('[data-chart]')
+  const mount = chart?.dataset.mount
+  expect(chart?.textContent).toBe('2026-09-14|2026-09-14 09:35:00|14')
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+  expect(fixtures.calls.filter(call => call.day === '2026-09-14')).toHaveLength(2)
+  expect(host.querySelector('[data-chart]')?.textContent).toBe('2026-09-14|2026-09-14 09:35:00|14')
+  expect(host.querySelector<HTMLElement>('[data-chart]')?.dataset.mount).toBe(mount)
+
+  await resolveDay('2026-09-14', 15)
+  expect(host.querySelector('[data-chart]')?.textContent).toBe('2026-09-14|2026-09-14 09:35:00|15')
+  expect(host.querySelector<HTMLElement>('[data-chart]')?.dataset.mount).toBe(mount)
 })

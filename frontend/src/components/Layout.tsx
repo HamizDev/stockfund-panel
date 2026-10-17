@@ -518,7 +518,7 @@ export function Layout() {
     : isPaused
       ? '同步期间暂停'
       : realtimeActive
-        ? '运行中'
+        ? `轮询 ${quoteStatus?.interval_s ?? 60}秒`
         : realtimeEnabled
           ? (isTrading ? '正在连接' : '等待交易时段')
           : '已关闭'

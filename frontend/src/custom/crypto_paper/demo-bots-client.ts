@@ -67,6 +67,36 @@ export interface DemoBotToggleRequest {
   confirm_demo: boolean
 }
 
+export interface DemoSetupCheck {
+  label: string
+  passed: boolean
+  actual: string
+  required: string
+}
+
+export interface DemoBotsPreflight {
+  exchange: 'okx'
+  environment: 'demo'
+  checked_at_ms: number
+  ready: boolean
+  checks: DemoSetupCheck[]
+  bots: { id: string; name: string; symbol: string; checks: DemoSetupCheck[] }[]
+}
+
+function isCheck(value: unknown): value is DemoSetupCheck {
+  return isRecord(value) && typeof value.label === 'string' && typeof value.passed === 'boolean'
+    && typeof value.actual === 'string' && typeof value.required === 'string'
+}
+
+function isPreflight(value: unknown): value is DemoBotsPreflight {
+  return isRecord(value) && value.exchange === 'okx' && value.environment === 'demo'
+    && typeof value.checked_at_ms === 'number' && Number.isFinite(value.checked_at_ms)
+    && typeof value.ready === 'boolean' && Array.isArray(value.checks) && value.checks.every(isCheck)
+    && Array.isArray(value.bots) && value.bots.every(bot => isRecord(bot)
+      && typeof bot.id === 'string' && typeof bot.name === 'string' && typeof bot.symbol === 'string'
+      && Array.isArray(bot.checks) && bot.checks.every(isCheck))
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -149,6 +179,11 @@ function botsPath(exchange: DemoBotsExchange) {
 }
 
 export const demoBotsApi = {
+  preflight: async (exchange: DemoBotsExchange): Promise<DemoBotsPreflight> => {
+    const result = await request<unknown>(`${botsPath(exchange)}/preflight`)
+    if (!isPreflight(result)) throw new Error('官方模拟检查响应格式无效')
+    return result
+  },
   status: async (exchange: DemoBotsExchange, signal?: AbortSignal): Promise<DemoBotsStatus> => {
     const result = await request<unknown>(botsPath(exchange), { signal })
     if (!isDemoBotsStatus(result)) throw new Error('官方模拟策略状态响应格式无效')

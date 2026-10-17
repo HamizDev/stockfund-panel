@@ -4,6 +4,19 @@ import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { KlineRow, LevelSeries } from '@/lib/api'
+import { DatePicker } from '@/components/DatePicker'
+import {
+  dateRangeToIndexRange,
+  indexRangeToDateRange,
+  indexRangeToZoomRange,
+  matchingRangePreset,
+  presetToIndexRange,
+  zoomRangeToIndexRange,
+  type ChartDateRange,
+  type ChartIndexRange,
+  type ChartRangePreset,
+  type ChartZoomRange,
+} from './chartRange'
 
 /**
  * 个股分析专用日 K 图表。
@@ -111,6 +124,14 @@ interface Props {
 }
 
 const VOL_PANE_H = 90
+const RANGE_PRESETS: { key: ChartRangePreset; label: string; description: string }[] = [
+  { key: '1m', label: '近1月', description: '最近一个月' },
+  { key: '3m', label: '近3月', description: '最近三个月' },
+  { key: '6m', label: '近6月', description: '最近六个月' },
+  { key: '1y', label: '1年', description: '最近一年' },
+  { key: 'all', label: '全部', description: '全部已加载日K' },
+]
+const EMPTY_DATE_RANGE: ChartDateRange = { start: '', end: '' }
 
 export function AnalysisKChart({
   rows,
@@ -137,7 +158,7 @@ export function AnalysisKChart({
   const [hoveredKey, setHoveredKey] = useState<string | null>(null)
 
   // 数据预处理 + 带状曲线序列对齐(后端 series 的日期范围可能与 rows 不同,需映射)
-  const { dates, candle, vols, dateIndex, zoomStart, alignedSeries } = useMemo(() => {
+  const { dates, candle, vols, dateIndex, alignedSeries } = useMemo(() => {
     const dates = rows.map(r => (typeof r.date === 'string' ? r.date.slice(0, 10) : String(r.date)))
     const candle = rows.map(r => [r.open, r.close, r.low, r.high])
     const vols = rows.map(r => ({
@@ -145,9 +166,6 @@ export function AnalysisKChart({
       itemStyle: { color: r.close >= r.open ? THEME.volUp : THEME.volDown },
     }))
     const dateIndex = new Map(dates.map((d, i) => [d, i]))
-    // 默认显示最近 6 个月 ≈ 120 个交易日;数据不足则全部显示
-    const showBars = 120
-    const zoomStart = dates.length > showBars ? Math.round((1 - showBars / dates.length) * 100) : 0
 
     // 把后端 series(按 seriesDates 对齐)映射到前端 rows 的 dates 顺序
     const alignedSeries: Record<string, (number | null)[]> = {}
@@ -185,8 +203,61 @@ export function AnalysisKChart({
       }
     }
 
-    return { dates, candle, vols, dateIndex, zoomStart, alignedSeries }
+    return { dates, candle, vols, dateIndex, alignedSeries }
   }, [rows, series, seriesDates])
+
+  const initialIndexRange = presetToIndexRange(dates, '6m')
+  const [visibleDateRange, setVisibleDateRange] = useState<ChartDateRange>(() =>
+    indexRangeToDateRange(dates, initialIndexRange ?? { start: 0, end: 0 }) ?? EMPTY_DATE_RANGE,
+  )
+  const [activeRangePreset, setActiveRangePreset] = useState<ChartRangePreset | null>(
+    dates.length > 1 ? '6m' : null,
+  )
+  const visibleDateRangeRef = useRef(visibleDateRange)
+  const activeRangePresetRef = useRef(activeRangePreset)
+  const rangeDatesRef = useRef(dates)
+  rangeDatesRef.current = dates
+  const zoomRangeRef = useRef<ChartZoomRange>(
+    indexRangeToZoomRange(initialIndexRange ?? { start: 0, end: 0 }, dates.length),
+  )
+  const datesKey = dates.join('|')
+  const previousDatesKeyRef = useRef(datesKey)
+
+  // Refresh the selected window when the loaded data changes. A keyed remount in StockAnalysis
+  // resets this state when the user switches symbols; this path keeps same-symbol refreshes useful.
+  useEffect(() => {
+    if (previousDatesKeyRef.current === datesKey) return
+    previousDatesKeyRef.current = datesKey
+
+    if (dates.length === 0) {
+      visibleDateRangeRef.current = EMPTY_DATE_RANGE
+      activeRangePresetRef.current = null
+      zoomRangeRef.current = { start: 0, end: 100 }
+      setVisibleDateRange(EMPTY_DATE_RANGE)
+      setActiveRangePreset(null)
+      return
+    }
+
+    const selectedPreset = activeRangePresetRef.current
+    const indices = selectedPreset
+      ? presetToIndexRange(dates, selectedPreset)
+      : visibleDateRangeRef.current.start && visibleDateRangeRef.current.end
+        ? dateRangeToIndexRange(dates, visibleDateRangeRef.current)
+        : null
+    const nextIndices = indices ?? presetToIndexRange(dates, '6m') ?? { start: 0, end: dates.length - 1 }
+    const nextRange = indexRangeToDateRange(dates, nextIndices) ?? EMPTY_DATE_RANGE
+    const nextPreset = selectedPreset && indices
+      ? selectedPreset
+      : indices
+        ? matchingRangePreset(dates, nextIndices)
+        : '6m'
+
+    visibleDateRangeRef.current = nextRange
+    activeRangePresetRef.current = nextPreset
+    zoomRangeRef.current = indexRangeToZoomRange(nextIndices, dates.length)
+    setVisibleDateRange(nextRange)
+    setActiveRangePreset(nextPreset)
+  }, [datesKey, dates])
 
   // 构建 option
   const buildOption = (): EChartsOption => {
@@ -194,7 +265,7 @@ export function AnalysisKChart({
 
     // 三段布局:主图 / 成交量 / 缩放条,从上到下累加,各段之间留间距,互不遮挡
     //   [16 顶部] [mainH 主图] [8 间距] [volH 成交量] [12 间距] [SLIDER_H 缩放条] [8 底部]
-    const SLIDER_H = 22
+    const SLIDER_H = 32
     const PAD_TOP = 16
     const GAP_MAIN_VOL = 8        // 主图 ↔ 成交量
     const GAP_VOL_SLIDER = 12     // 成交量 ↔ 缩放条(留足,避免遮挡)
@@ -358,10 +429,12 @@ export function AnalysisKChart({
                        formatter: (v: number) => fmtVol(v) } },
       ],
       dataZoom: [
-        { type: 'inside', xAxisIndex: [0, 1], start: zoomStart, end: 100 },
-        { type: 'slider', xAxisIndex: [0, 1], bottom: sliderBottom, height: SLIDER_H, start: zoomStart, end: 100,
+        { type: 'inside', xAxisIndex: [0, 1], ...zoomRangeRef.current },
+        { type: 'slider', xAxisIndex: [0, 1], bottom: sliderBottom, height: SLIDER_H, handleSize: 22,
+          ...zoomRangeRef.current,
           borderColor: 'transparent', fillerColor: CT().zoomFill,
-          handleStyle: { color: '#52525B' }, textStyle: { color: CT().text, fontSize: 10 } },
+          handleStyle: { color: '#60A5FA', borderColor: '#BFDBFE', borderWidth: 1 },
+          textStyle: { color: CT().text, fontSize: 10 } },
       ],
       // 不弹 hover tooltip(用户要求);但保留十字线 axisPointer 作为缩放/定位参照
       tooltip: { show: false },
@@ -395,6 +468,28 @@ export function AnalysisKChart({
         }
       })
       chartInstRef.current.on('globalout', () => setHoveredKey(null))
+      chartInstRef.current.on('dataZoom', () => {
+        const chart = chartInstRef.current
+        const currentDates = rangeDatesRef.current
+        if (!chart || currentDates.length === 0) return
+        const zoom = (chart.getOption() as any).dataZoom?.[0]
+        if (!zoom) return
+        const start = Number(zoom.start)
+        const end = Number(zoom.end)
+        if (!Number.isFinite(start) || !Number.isFinite(end)) return
+
+        const indices = zoomRangeToIndexRange({ start, end }, currentDates.length)
+        if (!indices) return
+        const nextRange = indexRangeToDateRange(currentDates, indices)
+        if (!nextRange) return
+
+        const nextPreset = matchingRangePreset(currentDates, indices)
+        zoomRangeRef.current = indexRangeToZoomRange(indices, currentDates.length)
+        visibleDateRangeRef.current = nextRange
+        activeRangePresetRef.current = nextPreset
+        setVisibleDateRange(previous => previous.start === nextRange.start && previous.end === nextRange.end ? previous : nextRange)
+        setActiveRangePreset(previous => previous === nextPreset ? previous : nextPreset)
+      })
     }
     chartInstRef.current.setOption(buildOption(), true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -418,8 +513,97 @@ export function AnalysisKChart({
     })
   }
 
+  const applyIndexRange = (indices: ChartIndexRange, preset: ChartRangePreset | null) => {
+    const nextRange = indexRangeToDateRange(dates, indices)
+    if (!nextRange) return
+    const nextZoom = indexRangeToZoomRange(indices, dates.length)
+    visibleDateRangeRef.current = nextRange
+    activeRangePresetRef.current = preset
+    zoomRangeRef.current = nextZoom
+    setVisibleDateRange(nextRange)
+    setActiveRangePreset(preset)
+    chartInstRef.current?.dispatchAction({ type: 'dataZoom', ...nextZoom })
+  }
+
+  const selectRangePreset = (preset: ChartRangePreset) => {
+    const indices = presetToIndexRange(dates, preset)
+    if (indices) applyIndexRange(indices, preset)
+  }
+
+  const selectExplicitRange = (range: ChartDateRange) => {
+    const indices = dateRangeToIndexRange(dates, range)
+    if (indices) applyIndexRange(indices, matchingRangePreset(dates, indices))
+  }
+
+  const changeRangeDate = (edge: 'start' | 'end', value: string) => {
+    const next = { ...visibleDateRangeRef.current, [edge]: value }
+    if (next.start > next.end) [next.start, next.end] = [next.end, next.start]
+    selectExplicitRange(next)
+  }
+
+  const displayedIndices = dateRangeToIndexRange(dates, visibleDateRange)
+  const displayedRange = displayedIndices ? indexRangeToDateRange(dates, displayedIndices) : null
+  const displayedCount = displayedIndices ? displayedIndices.end - displayedIndices.start + 1 : 0
+
   return (
     <div className={className}>
+      <div
+        role="group"
+        aria-label="日K显示范围"
+        className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-border/40 bg-base/30 px-2.5 py-2"
+      >
+        <div className="flex flex-wrap items-center gap-1" aria-label="快捷日期范围">
+          {RANGE_PRESETS.map(preset => (
+            <button
+              key={preset.key}
+              type="button"
+              aria-label={preset.key === 'all' ? '全部已加载日K' : preset.description}
+              aria-pressed={activeRangePreset === preset.key}
+              disabled={dates.length <= 1}
+              onClick={() => selectRangePreset(preset.key)}
+              title={preset.key === 'all' ? '显示全部已加载日K' : preset.description}
+              className={`h-8 rounded-md border px-2.5 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+                activeRangePreset === preset.key
+                  ? 'border-accent/40 bg-accent/15 text-accent'
+                  : 'border-border/40 bg-elevated/60 text-muted hover:border-accent/30 hover:text-foreground'
+              }`}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+
+        {dates.length > 1 && displayedRange ? (
+          <>
+            <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="起止日期">
+              <span className="text-[10px] text-muted">从</span>
+              <DatePicker
+                value={displayedRange.start}
+                min={dates[0]}
+                max={displayedRange.end}
+                onChange={value => changeRangeDate('start', value)}
+                placeholder="起始日期"
+              />
+              <span className="text-[10px] text-muted">至</span>
+              <DatePicker
+                value={displayedRange.end}
+                min={displayedRange.start}
+                max={dates[dates.length - 1]}
+                onChange={value => changeRangeDate('end', value)}
+                placeholder="结束日期"
+              />
+            </div>
+            <span className="text-[10px] text-muted" aria-live="polite">
+              当前显示：{displayedRange.start} ~ {displayedRange.end} · {displayedCount}/{dates.length} 根（日K全部指已加载数据）
+            </span>
+          </>
+        ) : (
+          <span className="text-[10px] text-muted" role="status">
+            {dates.length === 0 ? '暂无已加载日K' : `${dates[0]} · 仅 1 根已加载日K`}
+          </span>
+        )}
+      </div>
+
       {/* 价位开关按钮组 */}
       {levels && (
         <div className="flex flex-wrap items-center gap-1.5 mb-2">

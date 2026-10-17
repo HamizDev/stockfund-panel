@@ -638,7 +638,7 @@ export interface OverviewMarket {
   }
   amount: { total: number; avg: number }
   boards: { board: string; count: number; up: number; down: number; up_pct: number; amount: number }[]
-  limit: { limit_up: number; broken: number; failed: number; limit_down: number; max_boards: number; seal_rate?: number; tiers: { boards: number; count: number; stocks?: { symbol: string; name?: string; amount?: number }[] }[]; sealed_ready?: boolean; fake_up?: number; fake_down?: number; sealed_counts_up?: { real: number; fake: number; pending: number }; sealed_counts_down?: { real: number; fake: number; pending: number }; count_basis?: 'price_limit' }
+  limit: { limit_up: number; broken: number; failed: number; limit_down: number; max_boards: number; seal_rate?: number; tiers: { boards: number; count: number; stocks?: { symbol: string; name?: string; amount?: number }[] }[]; sealed_ready?: boolean; fake_up?: number; fake_down?: number; sealed_counts_up?: { real: number; fake: number; pending: number }; sealed_counts_down?: { real: number; fake: number; pending: number }; count_basis?: 'price_limit'; scope?: { label: string; covered: number; non_st_up: number; non_st_down: number } }
   distribution: { label: string; count: number; pct: number }[]
   trend: { above_ma5: number; above_ma20: number; above_ma60: number; above_ma5_pct: number; above_ma20_pct: number; above_ma60_pct: number; new_high: number; new_low: number }
   activity: { avg_turnover: number; high_turnover: number; high_vol_ratio: number; vol_ratio: number }
@@ -2721,6 +2721,10 @@ export const api = {
       final_sync_done?: boolean
       final_sync_failed?: string | null
       last_fetch_ms: number | null
+      fetch_duration_ms?: number | null
+      cycle_duration_ms?: number | null
+      source_timestamp_ms?: number | null
+      source_age_ms?: number | null
     }>('/api/intraday/status'),
   quoteInterval: () =>
     request<{ interval: number; min_interval: number; max_interval: number }>(

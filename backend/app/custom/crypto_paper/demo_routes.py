@@ -46,6 +46,10 @@ def build_router() -> APIRouter:
     async def bots_status(request: Request):
         return await _call(demo_bots.status, _data_dir(request))
 
+    @router.get('/bots/okx/preflight')
+    async def bots_preflight(request: Request):
+        return await _call(demo_bots.preflight, _data_dir(request))
+
     @router.post('/bots/okx/presets')
     async def bots_presets(request: Request):
         return await _call(demo_bots.create_presets, _data_dir(request))

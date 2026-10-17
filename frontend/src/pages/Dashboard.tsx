@@ -848,11 +848,11 @@ export function Dashboard() {
             {data.emotion.label} · {score}
           </span>
         </div>
-        <div className="flex items-center gap-3 text-[11px] text-muted">
+        <div className="flex flex-wrap items-center justify-end gap-3 text-[11px] text-muted">
           {currentDate ? (
             <DatePicker
               value={currentDate}
-              onChange={setSelectedDate}
+              onChange={value => setSelectedDate(value === latestDate ? undefined : value)}
               min={ds?.enriched?.earliest_date ?? undefined}
               max={latestDate ?? undefined}
               className="w-32"
@@ -860,8 +860,11 @@ export function Dashboard() {
           ) : (
             <span className="font-mono text-secondary">—</span>
           )}
-          <span title="最近报价距今；未提供时间时不代表实时" className="flex items-center gap-1"><Timer className="h-3 w-3" />{quoteAge(data.quote_status?.quote_age_ms)}</span>
+          <span title="本机最近取数距今，不等于上游行情时间" className="flex items-center gap-1"><Timer className="h-3 w-3" />{quoteAge(data.quote_status?.quote_age_ms)}</span>
           <span title={freshness.note} className={freshness.live ? 'text-accent' : 'text-warning'}>{freshness.label}</span>
+          <span title="配置的拉取周期，取数和计算均可能增加延迟">{data.quote_status?.interval_s ?? '—'}秒/轮</span>
+          {data.quote_status?.source_timestamp_ms && <span title="本轮最新来源时间；不是全部标的的共同时间">源 {new Date(data.quote_status.source_timestamp_ms).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}</span>}
+          {data.quote_status?.cycle_duration_ms != null && <span title="上一轮取数、计算与写盘总耗时">处理 {(data.quote_status.cycle_duration_ms / 1000).toFixed(1)}秒</span>}
           <button
             onClick={handleRefresh}
             disabled={manualFetching}
@@ -891,7 +894,7 @@ export function Dashboard() {
       <div className="mb-1.5 grid grid-cols-3 gap-1 lg:grid-cols-6">
         <KpiCell label="个股涨 / 平 / 跌" value={<><span className="text-bull">{data.breadth.up}</span><span className="text-muted">/</span><span className="text-muted">{data.breadth.flat}</span><span className="text-muted">/</span><span className="text-bear">{data.breadth.down}</span></>} sub={`上涨率 ${data.breadth.up_pct.toFixed(1)}%`} />
         <KpiCell label="强势 / 弱势" value={<><span className="text-bull">{strongUp}</span><span className="text-muted">/</span><span className="text-bear">{strongDown}</span></>} sub="涨跌 ≥3%" />
-        <KpiCell label={<span className="inline-flex items-center gap-1">涨停 / 跌停<SealedBadge degraded={isSealedDegrade} hasDepth={hasDepth} isHistorical={false} sealedReady={sealedReady} sealedCountsUp={data.limit.sealed_counts_up} sealedCountsDown={data.limit.sealed_counts_down} rawUp={data.limit.limit_up} rawDown={data.limit.limit_down} invalidateKeys={['overview-market', 'limit-ladder']} /></span>} value={<><span className="text-bull">{data.limit.limit_up}</span><span className="text-muted">/</span><span className="text-bear">{data.limit.limit_down}</span></>} sub={`价格口径 · 封板率 ${(data.limit.seal_rate ?? 0).toFixed(0)}%`} />
+        <KpiCell label={<span className="inline-flex items-center gap-1"><span title={data.limit.scope ? `${data.limit.scope.label}；有效覆盖 ${data.limit.scope.covered} 只。与排除ST、北交所或使用封单修正的口径可能不同。` : '价格触及涨跌停口径'}>涨停 / 跌停</span><SealedBadge degraded={isSealedDegrade} hasDepth={hasDepth} isHistorical={false} sealedReady={sealedReady} sealedCountsUp={data.limit.sealed_counts_up} sealedCountsDown={data.limit.sealed_counts_down} rawUp={data.limit.limit_up} rawDown={data.limit.limit_down} invalidateKeys={['dashboard-init', 'overview-market', 'limit-ladder']} /></span>} value={<><span className="text-bull">{data.limit.limit_up}</span><span className="text-muted">/</span><span className="text-bear">{data.limit.limit_down}</span></>} sub={data.limit.scope ? `含ST/北交所 · 非ST ${data.limit.scope.non_st_up}/${data.limit.scope.non_st_down}` : `价格口径 · 封板率 ${(data.limit.seal_rate ?? 0).toFixed(0)}%`} />
         <KpiCell label="最高连板" value={`${data.limit.max_boards || 0}板`} sub={(() => {
           const top = data.limit.tiers.find(t => t.boards === data.limit.max_boards)
           const stocks = top?.stocks ?? []

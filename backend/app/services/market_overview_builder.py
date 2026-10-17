@@ -512,7 +512,7 @@ def build_market_overview(
     max_boards = max([int(_finite(r.get("consecutive_limit_ups")) or 0) for r in rows], default=0)
 
     # Price-limit counts describe closing/latest prices; order-book snapshots have their own time.
-    from app.services.limit_counts import sealed_counts
+    from app.services.limit_counts import price_limit_scope, sealed_counts
 
     sealed_ready = False
     up_map, down_map = {}, {}
@@ -639,7 +639,7 @@ def build_market_overview(
         },
         "amount": {"total": total_amount, "avg": avg_amount},
         "boards": boards,
-        "limit": {"limit_up": limit_up, "broken": broken, "failed": 0, "limit_down": limit_down, "max_boards": max_boards, "seal_rate": seal_rate, "tiers": tiers, "sealed_ready": sealed_ready, "fake_up": fake_up, "fake_down": fake_down, "sealed_counts_up": sealed_up, "sealed_counts_down": sealed_down, "count_basis": "price_limit"},
+        "limit": {"limit_up": limit_up, "broken": broken, "failed": 0, "limit_down": limit_down, "max_boards": max_boards, "seal_rate": seal_rate, "tiers": tiers, "sealed_ready": sealed_ready, "fake_up": fake_up, "fake_down": fake_down, "sealed_counts_up": sealed_up, "sealed_counts_down": sealed_down, "count_basis": "price_limit", "scope": price_limit_scope(rows)},
         "distribution": _pct_band_rows(pct_values),
         "trend": {
             "above_ma5": above_ma5,

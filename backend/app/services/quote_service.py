@@ -360,6 +360,8 @@ class QuoteService:
         # 拉取元信息 (给 SSE / status 用)
         self._fetch_time: float = 0.0       # perf_counter (用于计算 quote_age_ms)
         self._fetch_ms: float = 0.0         # 拉取耗时 (毫秒)
+        self._cycle_ms: float = 0.0
+        self._source_timestamp_ms: float | None = None
         # _fetched_at 持久化到 preferences: 进程重启后仍能显示"最后获取"时间,
         # 不因关闭开关/重启而归零 (数据页卡片常驻显示, 方便判断上次拉取时刻)。
         try:
@@ -562,6 +564,9 @@ class QuoteService:
 
         与行情/告警通道独立 — 只刷新连板梯队, 不连带刷新 watchlist 等。
         """
+        from app.api.overview import invalidate_overview_cache
+
+        invalidate_overview_cache()
         for sub in self._snapshot_subscribers():
             sub.notify_depth()
 
@@ -700,6 +705,11 @@ class QuoteService:
             "final_sync_done": final_done,
             "final_sync_failed": final_failed,
             "last_fetch_ms": round(self._fetched_at, 0) if self._fetched_at else None,
+            "fetch_duration_ms": round(self._fetch_ms, 0) if self._fetch_time else None,
+            "cycle_duration_ms": round(self._cycle_ms, 0) if self._cycle_ms else None,
+            # Latest source timestamp only; individual halted symbols may be older.
+            "source_timestamp_ms": self._source_timestamp_ms,
+            "source_age_ms": round(max(0, time.time() * 1000 - self._source_timestamp_ms), 0) if self._source_timestamp_ms else None,
         }
 
     def refresh(self) -> dict:
@@ -722,6 +732,7 @@ class QuoteService:
 
     def _poll_loop(self) -> None:
         while self._running and self._enabled:
+            cycle_started = time.perf_counter()
             try:
                 # 管道/数据修正运行期间临时暂停取数, 防止与管道写同一批 parquet 竞态。
                 # 线程继续存活 + 分片 sleep, resume() 后即时恢复, 无需重启线程。
@@ -764,10 +775,12 @@ class QuoteService:
             except Exception as e:  # noqa: BLE001
                 logger.warning("行情轮询异常: %s", e)
 
-            waited = 0.0
-            while self._running and self._enabled and waited < self._interval:
-                time.sleep(0.5)
-                waited += 0.5
+            self._cycle_ms = (time.perf_counter() - cycle_started) * 1000
+            # Count processing within the interval rather than adding another full wait.
+            # A slow cycle still yields briefly; never overlap or catch up missed polls.
+            deadline = cycle_started + max(self._interval, self._cycle_ms / 1000 + 0.5)
+            while self._running and self._enabled and time.perf_counter() < deadline:
+                time.sleep(max(0, min(0.5, deadline - time.perf_counter())))
 
     def _fetch_quotes(self, *, final: bool = False, final_boundary_ms: int | None = None) -> bool:
         """拉取行情。加锁串行化 (后台轮询 vs 手动 refresh)。返回本轮是否成功更新。
@@ -1010,12 +1023,16 @@ class QuoteService:
 
         fetch_ms = (time.perf_counter() - t0) * 1000
         fetched_at = time.time() * 1000
+        source_times = [float(r['timestamp']) for r in records
+            if isinstance(r.get('timestamp'), (int, float)) and not isinstance(r.get('timestamp'), bool)
+            and 1_000_000_000_000 <= r['timestamp'] <= fetched_at + 5000]
 
         # ---- 更新元信息 ----
         with self._lock:
             self._fetch_time = now_ts
             self._fetch_ms = fetch_ms
             self._fetched_at = fetched_at
+            self._source_timestamp_ms = max(source_times) if source_times else None
             self._symbol_count = len(stock_records)
             self._etf_symbol_count = len(etf_records)
             if replace_index_cache:

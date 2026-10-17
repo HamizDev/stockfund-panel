@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, LoaderCircle, Pause, Play, RefreshCcw, RotateCcw, ShieldCheck } from 'lucide-react'
 import { QK } from '@/lib/queryKeys'
-import { demoBotsApi, type DemoBot, type DemoBotOrder } from './demo-bots-client'
+import { demoBotsApi, type DemoBot, type DemoBotOrder, type DemoBotsPreflight } from './demo-bots-client'
 
 const EXCHANGE = 'okx' as const
 const BUTTON_CLASS = 'inline-flex min-h-9 items-center justify-center gap-2 rounded-btn border border-border px-3 py-2 text-xs font-medium text-secondary transition-colors hover:border-accent hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50'
@@ -39,7 +39,17 @@ const SAFE_REASONS = new Set([
   '官方持仓与本策略记录不一致，不接管手动仓位',
   '官方仓位数量、方向或保证金配置已变化，请人工核对',
   '订单部分成交后结束，请在官方核对仓位；本策略保持待对账',
+  '请先暂停原单策略官方模拟执行，避免共享仓位冲突',
+  '官方模拟USDT可用余额不足策略额度总和',
+  '策略存在待对账订单，请先对账；不会重复发单',
+  '策略标的存在官方活动委托，请先处理',
+  '已有策略仓位不属于当前模拟连接',
+  '启用期间连接已变化或已暂停，本次未启用',
 ])
+
+function actionError(error: unknown, fallback: string) {
+  return error instanceof Error && SAFE_REASONS.has(error.message) ? error.message : fallback
+}
 
 function safeReason(reason: string) {
   return SAFE_REASONS.has(reason)
@@ -253,6 +263,7 @@ export function OfficialDemoBotsPanel() {
   const [pendingAction, setPendingAction] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [preflight, setPreflight] = useState<DemoBotsPreflight | null>(null)
   const queryKey = QK.demoBots(EXCHANGE)
   const statusQuery = useQuery({
     queryKey,
@@ -279,10 +290,10 @@ export function OfficialDemoBotsPanel() {
       await demoBotsApi.setBotEnabled(EXCHANGE, bot.id, { enabled, confirm_demo: enabled })
       setNotice(enabled ? `${bot.name} 已请求启动官方模拟。` : `${bot.name} 已请求暂停；不会自动撤单或平仓。`)
       if (enabled) setConfirmDemo(false)
-    } catch {
-      setError(enabled
+    } catch (failure) {
+      setError(actionError(failure, enabled
         ? '策略启用失败，请检查官方模拟配置；未完整成交时请执行对账。'
-        : '策略暂停失败，请稍后刷新状态并核对官方委托。')
+        : '策略暂停失败，请稍后刷新状态并核对官方委托。'))
     } finally {
       await invalidateStatus()
       setPendingAction(null)
@@ -298,10 +309,10 @@ export function OfficialDemoBotsPanel() {
       await demoBotsApi.setEnabled(EXCHANGE, { enabled, confirm_demo: enabled })
       setNotice(enabled ? '已请求启动全部策略的官方模拟。' : '已请求暂停全部策略；不会自动撤单或平仓。')
       if (enabled) setConfirmDemo(false)
-    } catch {
-      setError(enabled
+    } catch (failure) {
+      setError(actionError(failure, enabled
         ? '批量启用失败，请检查官方模拟配置；未完整成交时请执行对账。'
-        : '批量暂停失败，请稍后刷新状态并核对官方委托。')
+        : '批量暂停失败，请稍后刷新状态并核对官方委托。'))
     } finally {
       await invalidateStatus()
       setPendingAction(null)
@@ -320,6 +331,20 @@ export function OfficialDemoBotsPanel() {
       setError('创建策略预设失败，请稍后刷新重试。')
     } finally {
       await invalidateStatus()
+      setPendingAction(null)
+    }
+  }
+
+  const checkSetup = async () => {
+    if (pendingAction || !status?.connection_ready) return
+    setPendingAction('preflight')
+    setError(null)
+    setPreflight(null)
+    try {
+      setPreflight(await demoBotsApi.preflight(EXCHANGE))
+    } catch (failure) {
+      setError(actionError(failure, '运行条件检查失败，请检查欧易官方模拟连接后重试。'))
+    } finally {
       setPendingAction(null)
     }
   }
@@ -384,6 +409,9 @@ export function OfficialDemoBotsPanel() {
       </label>
 
       <div className="flex flex-wrap gap-2">
+        <button type="button" onClick={() => { void checkSetup() }} disabled={!status.connection_ready || Boolean(pendingAction)} className={BUTTON_CLASS}>
+          {pendingAction === 'preflight' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}检查运行条件（不下单）
+        </button>
         <button type="button" onClick={() => { void toggleAll(true) }} disabled={!canEnable || Boolean(pendingAction) || bots.every(bot => bot.armed)} className={ENABLE_BUTTON_CLASS}>
           {pendingAction === 'all' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}全部启用（官方模拟）
         </button>
@@ -392,6 +420,21 @@ export function OfficialDemoBotsPanel() {
         </button>
         <span className="self-center text-[11px] text-muted">当前读取周期 10 秒 · 暂停仅停止策略执行，不会自动平仓。</span>
       </div>
+
+      {preflight && <div role="region" aria-label="官方模拟运行条件" className="space-y-3 rounded-btn border border-border bg-base p-3 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <strong className={preflight.ready ? 'text-accent' : 'text-amber-300'}>{preflight.ready ? '配置检查通过，尚未启用策略' : '以下条件尚未满足，未启用或下单'}</strong>
+          <span className="text-muted">检查时间：{formatTime(preflight.checked_at_ms)}</span>
+        </div>
+        {[{ id: 'account', name: '账户共用配置', checks: preflight.checks }, ...preflight.bots].map(group => <div key={group.id}>
+          <h4 className="mb-1.5 font-medium text-foreground">{group.name}</h4>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">{group.checks.map(check => <div key={check.label} className={`rounded border p-2 ${check.passed ? 'border-border text-secondary' : 'border-amber-500/35 text-amber-300'}`}>
+            <div>{check.passed ? '✓' : '待处理'} · {check.label}</div>
+            <div className="mt-1">当前：{check.actual}</div><div className="mt-1 text-muted">要求：{check.required}</div>
+          </div>)}</div>
+        </div>)}
+        <p className="leading-relaxed text-muted">在欧易 App 的模拟交易设置中核对账户模式和单向持仓；分别进入 BTC、ETH、SOL 的 USDT 永续，将逐仓杠杆设为 10 倍，再检查。本检查仅查询，不修改官方设置、撤单、平仓或启动策略；实际启用时仍会重新预检。</p>
+      </div>}
 
       {notice && <p role="status" className="rounded-btn border border-accent/25 bg-accent/5 p-3 text-xs text-accent">{notice}</p>}
       {error && <p role="alert" className="rounded-btn border border-danger/25 bg-danger/5 p-3 text-xs text-danger">{error}</p>}

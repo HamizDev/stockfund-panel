@@ -162,6 +162,10 @@ export function useQuoteStream(
               ),
           })
         }
+        // 首页已改用聚合查询；沿用原总览刷新开关，只更新最新页，不扰动历史复盘。
+        if (pages?.['overview-market'] !== false) {
+          void qc.invalidateQueries({ queryKey: QK.dashboardInit(), exact: true })
+        }
         // 焦点股票日K增量刷新: 只取内存中的当日行并合并缓存尾部。
         if (_focusSymbol) {
           const symbol = _focusSymbol
@@ -194,6 +198,7 @@ export function useQuoteStream(
         // 不受实时行情开关限制 — 修正轮询独立于行情轮询, 用户开了修正就想看实时封单。
         qc.invalidateQueries({ queryKey: ['limit-ladder'] })
         qc.invalidateQueries({ queryKey: ['overview-market'] })
+        qc.invalidateQueries({ queryKey: QK.dashboardInit(), exact: true })
       })
 
       es.addEventListener('strategy_alert', (e: MessageEvent) => {

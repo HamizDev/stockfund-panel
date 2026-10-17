@@ -65,7 +65,7 @@ export function mergeLatestKlineRow(
  */
 export function klineMinuteQueryOptions(symbol: string, date?: string, live?: boolean) {
   return {
-    queryKey: QK.klineMinute(symbol, date ?? ''),
+    queryKey: QK.klineMinute(symbol, date ?? '', live),
     queryFn: () => api.klineMinute(symbol, date ?? undefined, live),
   }
 }
@@ -79,13 +79,86 @@ const CLOSE_MINUTE = '15:00'
 const MARKET_ALL_OVER = '15:30'
 
 /** 北京时间今日 YYYY-MM-DD (与后端 cn_today 同口径; 不用 UTC toISOString, 避免傍晚错日)。 */
-function cnToday(): string {
+export function cnToday(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date())
 }
 
 /** 北京时间此刻 'HH:MM'。 */
 function cnNowHHMM(): string {
   return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date())
+}
+
+interface CnClock {
+  year: number
+  month: number
+  day: number
+  hour: number
+  minute: number
+  second: number
+}
+
+function cnClock(now = new Date()): CnClock {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    calendar: 'gregory',
+    numberingSystem: 'latn',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(now)
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]))
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+    second: Number(values.second),
+  }
+}
+
+function cnWallTimeMs(clock: CnClock): number {
+  return Date.UTC(clock.year, clock.month - 1, clock.day, clock.hour, clock.minute, clock.second)
+}
+
+function delayUntilCnTime(hour: number, minute: number, clock = cnClock()): number {
+  const target = Date.UTC(clock.year, clock.month - 1, clock.day, hour, minute)
+  return Math.max(1_000, target - cnWallTimeMs(clock))
+}
+
+/** 周末/收盘后唤醒 latest 查询时跳过周末；不在前端推断节假日。 */
+function nextCnWeekdayOpenDelay(clock = cnClock()): number {
+  const nowMs = cnWallTimeMs(clock)
+  const weekday = new Date(Date.UTC(clock.year, clock.month - 1, clock.day)).getUTCDay()
+  const minutes = clock.hour * 60 + clock.minute
+  const dayOffset = weekday === 0 || weekday === 6 || minutes >= 9 * 60 + 30 ? 1 : 0
+
+  let target = Date.UTC(clock.year, clock.month - 1, clock.day + dayOffset, 9, 30)
+  while ([0, 6].includes(new Date(target).getUTCDay())) target += 24 * 60 * 60 * 1000
+  return Math.max(1_000, target - nowMs)
+}
+
+/** 休盘期间暂停请求，下一次检查安排在午后或下个北京时间工作日开盘。 */
+function cnMarketPauseDelay(clock = cnClock()): number | null {
+  const weekday = new Date(Date.UTC(clock.year, clock.month - 1, clock.day)).getUTCDay()
+  const minutes = clock.hour * 60 + clock.minute
+  if (weekday === 0 || weekday === 6) return nextCnWeekdayOpenDelay(clock)
+  if (minutes < 9 * 60 + 30) return delayUntilCnTime(9, 30, clock)
+  if (minutes >= 11 * 60 + 30 && minutes < 13 * 60) return delayUntilCnTime(13, 0, clock)
+  if (minutes >= 15 * 60 + 30) return nextCnWeekdayOpenDelay(clock)
+  return null
+}
+
+/** 跟随最新日线时按市场时段刷新，休盘时仅在下一次工作日开盘唤醒。 */
+export function marketSessionRefetchInterval(ms?: number) {
+  return (_query: any): number | false => {
+    if (ms == null) return false
+    return cnMarketPauseDelay() ?? ms
+  }
 }
 
 /** 行 datetime ('YYYY-MM-DD HH:MM:SS' 北京墙钟契约) → 'HH:MM'; 非常规格式返回 ''。 */
@@ -98,9 +171,8 @@ function rowMinute(r: { datetime?: string } | undefined): string {
  * 分时轮询停表 — 数据不可变时停止, 消除无效请求 (周末/盘后/翻看历史日期)。
  *
  * - 未传间隔 → 不轮询 (调用方默认关闭)
- * - 无数据 (source=none) → 停
- * - 响应日期 < 北京今天 → 停: 历史日的本地分钟K不可变 (周末"最新"会被
- *   后端回退到上一交易日, 同样命中此规则)
+ * - 显式历史日期 → 停；latest 返回旧日期时休盘到下个工作日开盘再唤醒
+ * - 当日空结果在交易时段继续轮询；休盘时等到午后或下个工作日开盘
  * - 当日: 收盘根 (≥15:00 的K) 已出现 **且** 已过 15:30 → 停。
  *   完整性**只认收盘根, 不按根数** —— 实测本系统全天 241 根 (首根 09:30
  *   竞价根 + 15:00 收盘根), 按根数阈值会在第 240 根 (14:59) 到位时误停,
@@ -113,13 +185,34 @@ function rowMinute(r: { datetime?: string } | undefined): string {
 export function minuteRefetchInterval(ms?: number) {
   return (query: any): number | false => {
     if (ms == null) return false
+    const queryKey = query.queryKey as readonly unknown[] | undefined
+    const requestedDate = typeof queryKey?.[2] === 'string' ? queryKey[2] : ''
+    const latestRequest = requestedDate === ''
+    const today = cnToday()
+    if (requestedDate && requestedDate !== today) return false
+
     const d = query.state.data
-    if (!d) return ms
-    if (d.source === 'none') return false
-    if (typeof d.date === 'string' && d.date < cnToday()) return false
+    const clock = cnClock()
+    const weekday = new Date(Date.UTC(clock.year, clock.month - 1, clock.day)).getUTCDay()
+    const nowMinutes = clock.hour * 60 + clock.minute
+    const afterClose = nowMinutes >= 15 * 60 + 30
+    const weekend = weekday === 0 || weekday === 6
+
+    // 对今天显式选定的日期，只刷新到当天收盘；latest 要跨日保留唤醒计时器。
+    if (!latestRequest && (weekend || afterClose)) return false
+
+    if (typeof d?.date === 'string' && d.date < today) {
+      return latestRequest ? cnMarketPauseDelay(clock) ?? ms : false
+    }
+    if (typeof d?.date === 'string' && d.date > today) return false
+
+    const pause = cnMarketPauseDelay(clock)
+    if (!d || d.source === 'none') return pause ?? ms
     const closeBarArrived = (d.rows ?? []).some((r: { datetime?: string }) => rowMinute(r) >= CLOSE_MINUTE)
-    if (closeBarArrived && cnNowHHMM() >= MARKET_ALL_OVER) return false
-    return ms
+    if (closeBarArrived && cnNowHHMM() >= MARKET_ALL_OVER) {
+      return latestRequest ? nextCnWeekdayOpenDelay(clock) : false
+    }
+    return pause ?? ms
   }
 }
 
