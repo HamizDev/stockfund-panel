@@ -29,8 +29,8 @@ type WeightedItem = {
  * Amount mode only includes finite positive amounts. Equal mode includes every
  * item, including rows with no amount or return.
  *
- * A balanced binary treemap keeps the true area ratios; unlike the DSH helper,
- * it does not lift tiny weights to an artificial minimum. Local normalization
+ * A balanced binary treemap keeps the true area ratios without imposing an
+ * artificial minimum on tiny weights. Local normalization
  * avoids overflow when finite amounts are very large.
  */
 export function layoutCandidateHeatmap(
