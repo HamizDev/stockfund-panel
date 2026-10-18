@@ -8,6 +8,7 @@ import {
   resolveCanvasViewport,
   zoomCanvasViewport,
   type CanvasViewport,
+  type CanvasViewportMemory,
 } from '@/lib/canvas-chart/math'
 
 export type CanvasChartTime = string | number
@@ -51,6 +52,7 @@ export interface CanvasMarketChartProps {
   symbol: string
   title?: string
   contextKey: string
+  viewportMemory?: CanvasViewportMemory
   height?: number
   visibleBars?: number | 'all'
   showControls?: boolean
@@ -181,6 +183,7 @@ export function CanvasMarketChart({
   symbol,
   title = '日K',
   contextKey,
+  viewportMemory,
   height = 480,
   visibleBars = 60,
   showControls = true,
@@ -294,6 +297,12 @@ export function CanvasMarketChart({
       contextChanged,
       visibleBars,
     })
+    const saved = contextChanged || previousCountRef.current === 0 ? viewportMemory?.read(contextKey) : null
+    if (saved && bars.length && Number.isFinite(saved.visibleCount) && saved.visibleCount > 0) {
+      const visibleCount = Math.min(bars.length, Math.max(1, Math.floor(saved.visibleCount)))
+      const end = saved.atLatest ? bars.length - 1 : resolveTimeBoundary(bars, saved.endTime, 'end')
+      viewportRef.current = { visibleCount, endIndex: Math.min(bars.length - 1, Math.max(visibleCount - 1, end)) }
+    }
     if (contextChanged && pendingClickRef.current) {
       window.clearTimeout(pendingClickRef.current.timer)
       pendingClickRef.current = null
@@ -302,7 +311,7 @@ export function CanvasMarketChart({
     previousCountRef.current = bars.length
     previousTimesRef.current = nextTimes
     setHover(null)
-  }, [bars, contextKey, visibleBars])
+  }, [bars, contextKey, visibleBars, viewportMemory])
 
   useEffect(() => () => {
     if (pendingClickRef.current) window.clearTimeout(pendingClickRef.current.timer)
@@ -594,8 +603,16 @@ export function CanvasMarketChart({
     return { x, y, plotLeft, plotRight, plotTop, priceBottom }
   }
 
+  const rememberViewport = () => {
+    const view = viewportRef.current
+    if (!viewportMemory || !bars.length || !bars[view.endIndex]) return
+    viewportMemory.write(contextKey, { endTime: bars[view.endIndex].time,
+      visibleCount: view.visibleCount, atLatest: view.endIndex === bars.length - 1 })
+  }
+
   const fitContent = () => {
     viewportRef.current = defaultCanvasViewport(bars.length, 'all')
+    rememberViewport()
     setHover(null)
     setViewportRevision(value => value + 1)
   }
@@ -647,6 +664,7 @@ export function CanvasMarketChart({
     if (!drag) return
     dragRef.current = null
     if (drag.moved) {
+      rememberViewport()
       suppressNextClickRef.current = true
       setHover(null)
       setViewportRevision(value => value + 1)
@@ -655,6 +673,7 @@ export function CanvasMarketChart({
   }
 
   const handlePointerCancel = () => {
+    rememberViewport()
     dragRef.current = null
     suppressNextClickRef.current = true
     clearPendingClick()
@@ -704,6 +723,7 @@ export function CanvasMarketChart({
     const ratio = Math.min(1, Math.max(0, (point.x - point.plotLeft) / Math.max(1, point.plotRight - point.plotLeft)))
     viewportRef.current = zoomCanvasViewport(viewportRef.current,
       event.deltaY < 0 ? 1.2 : 1 / 1.2, bars.length, ratio)
+    rememberViewport()
     setHover(null)
     setViewportRevision(value => value + 1)
   }

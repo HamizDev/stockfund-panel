@@ -1164,6 +1164,17 @@ class KlineRepository:
             self._name_map_cache = None
             logger.info("ETF instruments 缓存已加载: %d 只", len(df_all))
 
+    def peek_enriched_latest(self) -> tuple[pl.DataFrame, date | None]:
+        """Read the published stock snapshot only; never warm caches or scan disk."""
+        cached = self._enriched_cache
+        if cached is None:
+            return pl.DataFrame(), None
+        snapshot = cached.clone()
+        # Derive its date from the same immutable frame, avoiding a separate
+        # cache-date read racing with publication of the next trading day.
+        as_of = snapshot['date'].max() if not snapshot.is_empty() and 'date' in snapshot.columns else None
+        return snapshot, as_of
+
     def get_enriched_latest(self) -> tuple[pl.DataFrame, date | None]:
         """返回缓存的 enriched 最新日 DataFrame + 日期。如无缓存则懒加载。
 

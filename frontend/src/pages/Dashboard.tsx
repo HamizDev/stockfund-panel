@@ -1,8 +1,12 @@
-import { useState, useEffect, useRef, type ReactNode } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { lazy, Suspense, useState, useEffect, useRef } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Activity, ArrowDownRight, ArrowUpRight, BarChart3, BellRing, Database, Flame, Gauge, Info, LineChart, Loader2, Play, RefreshCw, Sparkles, Target, Timer } from 'lucide-react'
+import { ArrowDownRight, ArrowUpRight, BarChart3, BellRing, Database, Flame, Gauge, Info, LineChart, Loader2, Play, RefreshCw, Sparkles, Target, Timer } from 'lucide-react'
+import { SectionTitle, KpiCell } from '@/components/dashboard/Primitives'
+import { MarketBoardTabs } from '@/components/dashboard/MarketBoardTabs'
+import { GlobalIndustryPanel } from '@/custom/global_markets/GlobalIndustryPanel'
+import { storage } from '@/lib/storage'
 import { DatePicker } from '@/components/DatePicker'
 import { api, type DashboardDataSummary, type DashboardInit, type MarketSnapshotRow, type OverviewDimensionRankItem, type OverviewMarket, type AlertEvent } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -73,19 +77,6 @@ function compactCount(v: number | null | undefined) {
   if (x == null) return '—'
   if (x >= 1000) return `${(x / 1000).toFixed(1)}k`
   return x.toFixed(0)
-}
-
-function SectionTitle({ icon: Icon, title, hint }: { icon: typeof Activity; title: string; hint?: ReactNode }) {
-  return (
-    <div className="mb-2 flex items-center justify-between gap-2">
-      <div className="flex items-center gap-1.5">
-        <span className="h-3 w-0.5 rounded-full bg-gradient-to-b from-accent to-accent/30" />
-        <Icon className="h-3.5 w-3.5 text-accent" />
-        <h2 className="text-xs font-semibold text-foreground">{title}</h2>
-      </div>
-      {hint && <span className="font-mono text-[10px] text-muted">{hint}</span>}
-    </div>
-  )
 }
 
 // 看板监控中心小组件 — 显示前 10 条触发记录 + 更多按钮
@@ -235,18 +226,6 @@ function MonitorWidget({ onStockClick, activeSymbol }: {
         })}
       </div>
     </>
-  )
-}
-
-function KpiCell({ label, value, sub, tone = 'neutral' }: { label: ReactNode; value: ReactNode; sub?: string; tone?: 'bull' | 'bear' | 'accent' | 'neutral' }) {
-  const isPlain = typeof value === 'string' || typeof value === 'number'
-  const color = tone === 'bull' ? 'text-bull' : tone === 'bear' ? 'text-bear' : tone === 'accent' ? 'text-accent' : 'text-foreground'
-  return (
-    <div className="min-w-0 overflow-hidden rounded-lg border border-border bg-surface/80 px-2 py-1 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-all hover:border-accent/30 hover:shadow-[0_2px_8px_hsl(var(--accent)/0.15)]">
-      <div className="flex items-center gap-1 text-[11px] text-muted">{label}</div>
-      <div className={`mt-1 truncate font-mono text-lg font-semibold leading-none tabular-nums ${isPlain ? color : 'text-foreground'}`}>{value}</div>
-      {sub && <div className="mt-1 truncate text-[10px] text-muted">{sub}</div>}
-    </div>
   )
 }
 
@@ -656,9 +635,23 @@ export function dashboardHasNoData(summary: DashboardDataSummary | null | undefi
     && (summary.daily?.trading_days ?? 0) === 0
 }
 
+const GlobalDashboard = lazy(() => import('@/custom/global_markets/GlobalDashboard'))
+
 export function Dashboard() {
+  const [params] = useSearchParams()
+  const market = params.get('market')
+  return market === 'hk' || market === 'us'
+    ? <Suspense fallback={<DashboardSkeleton />}><GlobalDashboard key={market} market={market} /></Suspense>
+    : <ChinaDashboard />
+}
+
+function ChinaDashboard() {
   const qc = useQueryClient()
-  const [selectedDate, setSelectedDate] = useState<string | undefined>()
+  const [selectedDate, setSelectedDate] = useState<string | undefined>(() => {
+    const saved = storage.pageView.dashboardCn.get(null)
+    return typeof saved === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(saved) ? saved : undefined
+  })
+  useEffect(() => storage.pageView.dashboardCn.set(selectedDate ?? null), [selectedDate])
   const [manualFetching, setManualFetching] = useState(false)
   const [previewStock, setPreviewStock] = useState<{
     symbol: string
@@ -784,6 +777,7 @@ export function Dashboard() {
         <div className="rounded-card border border-border bg-surface p-6 text-center">
           <div className="text-sm text-danger">看板加载失败</div>
           <button onClick={() => overview.refetch()} className="mt-3 rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-white">重试</button>
+          <div className="mt-3"><MarketBoardTabs market="cn" /></div>
         </div>
       </div>
     )
@@ -836,7 +830,7 @@ export function Dashboard() {
         <div className="pointer-events-none absolute left-0 top-0 h-full w-1 bg-gradient-to-b from-accent to-accent/20" aria-hidden />
         <div className="flex items-center gap-2">
           <Gauge className="h-4 w-4 text-accent" />
-          <h1 className="text-[16px] leading-6 font-semibold text-foreground">市场看板</h1>
+          <h1 className="text-[16px] leading-6 font-semibold text-foreground">A股看板</h1>
           <span
             className="rounded-full border px-2 py-0.5 text-[10px] font-medium"
             style={{
@@ -848,6 +842,7 @@ export function Dashboard() {
             {data.emotion.label} · {score}
           </span>
         </div>
+        <MarketBoardTabs market="cn" />
         <div className="flex flex-wrap items-center justify-end gap-3 text-[11px] text-muted">
           {currentDate ? (
             <DatePicker
@@ -905,6 +900,7 @@ export function Dashboard() {
         <KpiCell label="换手 / 量比" value={`${fmtPrice(data.activity.avg_turnover, 1)}% / ${fmtPrice(data.activity.vol_ratio, 2)}`} sub={`高换手 ${data.activity.high_turnover} · 放量占比 ${fmtPrice(data.activity.high_vol_ratio, 1)}%`} tone="accent" />
       </div>
 
+      <GlobalIndustryPanel />
       <div className="grid grid-cols-1 gap-1.5 xl:grid-cols-[minmax(0,1fr)_20rem]">
         <main className="min-w-0 space-y-1.5">
           <div className="grid grid-cols-1 gap-1.5 lg:grid-cols-3">

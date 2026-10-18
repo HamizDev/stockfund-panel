@@ -3,6 +3,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { CanvasMarketChart } from './CanvasMarketChart'
+import { sessionViewportMemory } from '@/lib/canvas-chart/viewportMemory'
 
 const canvasContext = {
   setTransform: vi.fn(), clearRect: vi.fn(), fillRect: vi.fn(), strokeRect: vi.fn(),
@@ -15,11 +16,39 @@ let root: Root
 let host: HTMLDivElement
 
 beforeEach(() => {
+  sessionStorage.clear()
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(canvasContext)
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
+})
+
+it('restores opt-in zoom and pan per context after unmount, rather than resetting to defaults', async () => {
+  const bars = Array.from({ length: 100 }, (_, i) => ({ time: i + 1, open: 10, high: 12, low: 9, close: 11, volume: 10 }))
+  const renderChart = async (contextKey: string) => act(async () => root.render(<CanvasMarketChart
+    bars={bars} symbol="TEST" contextKey={contextKey} visibleBars={80} viewportMemory={sessionViewportMemory} />))
+  await renderChart('hk:^HSI:1d')
+  let canvas = host.querySelector('canvas')!
+  await act(async () => canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -1, clientX: 500, clientY: 100, cancelable: true })))
+  await act(async () => {
+    canvas.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 200, clientY: 100 }))
+    canvas.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, button: 0, clientX: 300, clientY: 100 }))
+    canvas.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 300, clientY: 100 }))
+  })
+  const saved = sessionViewportMemory.read('hk:^HSI:1d')!
+  expect(saved.visibleCount).toBe(67)
+  expect(saved.atLatest).toBe(false)
+  expect(saved.endTime).toBeLessThan(100)
+  await act(async () => root.render(<div />))
+  await renderChart('us:^GSPC:1d')
+  expect(sessionViewportMemory.read('us:^GSPC:1d')).toBeNull()
+  await act(async () => root.render(<div />))
+  await renderChart('hk:^HSI:1d')
+  canvas = host.querySelector('canvas')!
+  await act(async () => canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -1, clientX: 500, clientY: 100, cancelable: true })))
+  expect(sessionViewportMemory.read('hk:^HSI:1d')?.visibleCount).toBe(56)
+  expect(sessionViewportMemory.read('hk:^HSI:1d')?.endTime).toBeLessThan(100)
 })
 
 afterEach(async () => {

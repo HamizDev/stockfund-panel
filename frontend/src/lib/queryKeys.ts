@@ -1,3 +1,5 @@
+import type { GlobalMarket, GlobalMarketChartInterval } from '@/custom/global_markets/types'
+
 /**
  * 集中管理所有 React Query key。
  *
@@ -11,6 +13,12 @@ export const QK = {
   marketMembershipStatus: ['market-membership-status'] as const,
   newsFeed: ['news-feed'] as const,
   jevosStatus: ['jevos-status'] as const,
+  globalMarketCatalog: (market: GlobalMarket, q: string) => ['global-market', 'catalog', market, q] as const,
+  globalMarketChart: (market: GlobalMarket, symbol: string, interval: GlobalMarketChartInterval) =>
+    ['global-market', 'chart', market, symbol, interval] as const,
+  globalMarketResources: ['global-market', 'resources'] as const,
+  globalMarketOverview: (market: GlobalMarket) => ['global-market', 'overview', market] as const,
+  globalIndustries: (mode: 'auto' | 'cn' | 'us') => ['global-market', 'industries', mode] as const,
   newsAnalysis: (id: string) => ['news-analysis', id] as const,
   newsDirectionJob: (id: string) => ['news-direction-job', id] as const,
   cryptoMarketQuote: (symbol: string) => ['crypto-market-quote', 'bitget', 'usdm', symbol] as const,

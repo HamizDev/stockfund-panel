@@ -4,6 +4,17 @@ export interface CanvasViewport {
   visibleCount: number
 }
 
+export interface StoredCanvasViewport {
+  endTime: string | number
+  visibleCount: number
+  atLatest: boolean
+}
+
+export interface CanvasViewportMemory {
+  read: (key: string) => StoredCanvasViewport | null
+  write: (key: string, value: StoredCanvasViewport) => void
+}
+
 export interface CanvasPriceRange {
   startIndex: number
   endIndex: number

@@ -94,7 +94,7 @@ const nav = [
   { to: '/screener',   label: '策略',   icon: ScanSearch },
   { to: '/factors',    label: '因子', icon: Sigma },
   { to: '/backtest',   label: '回测', icon: History },
-  { to: '/stock-analysis',    label: '股票 / ETF 分析', icon: TrendingUp },
+  { to: '/stock-analysis',    label: 'A股 / ETF 分析', icon: TrendingUp },
   { to: '/limit-ladder', label: '连板梯队', icon: Flame },
   { to: '/concept-analysis', label: '概念分析', icon: Layers3 },
   { to: '/industry-analysis', label: '行业分析', icon: Landmark },

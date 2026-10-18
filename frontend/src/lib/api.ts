@@ -5,6 +5,16 @@
 
 import { toast } from '@/components/Toast'
 import type { JevosStatus } from '@/custom/jevos/types'
+import type {
+  GlobalMarket,
+  GlobalMarketCatalogResponse,
+  GlobalMarketChartInterval,
+  GlobalMarketChartResponse,
+  GlobalMarketResourcesResponse,
+  GlobalMarketOverview,
+  GlobalIndustryResponse,
+  IndustryMode,
+} from '@/custom/global_markets/types'
 
 const BASE = ''
 
@@ -2475,7 +2485,61 @@ export interface SectorRotationUniverseItem {
 
 // ===== API surface =====
 export const api = {
+  globalIndustries: (mode: IndustryMode, signal?: AbortSignal) => request<GlobalIndustryResponse>(
+    `/api/custom/global-markets/industries?${new URLSearchParams({ mode })}`, { signal, quiet: true },
+  ).then(result => {
+      if (result?.mode !== mode || !['cn', 'us'].includes(result.market) || result.basis !== 'equal_weight_representative_basket'
+        || (mode !== 'auto' && result.market !== mode) || result.currency !== (result.market === 'cn' ? 'CNY' : 'USD')
+        || !Array.isArray(result.themes)) throw new Error('全球产业数据上下文不匹配')
+    return result
+  }),
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
+
+  globalMarketOverview: (market: GlobalMarket, signal?: AbortSignal) => request<GlobalMarketOverview>(
+    `/api/custom/global-markets/overview?${new URLSearchParams({ market })}`, { signal, quiet: true },
+  ).then(result => {
+    if (result?.market !== market || result.scope !== 'fixed_watchlist'
+      || result.currency !== (market === 'hk' ? 'HKD' : 'USD')
+      || result.timezone !== (market === 'hk' ? 'Asia/Hong_Kong' : 'America/New_York')
+      || !Array.isArray(result.items) || result.items.some(item => item.market !== market
+          || !['stock', 'etf', 'index'].includes(item.kind))
+        || (result.market_snapshot?.data && (result.market_snapshot.data.market !== market
+          || result.market_snapshot.data.currency !== result.currency || result.market_snapshot.data.timezone !== result.timezone))) throw new Error('市场看板响应格式无效')
+    return result
+  }),
+
+  globalMarketCatalog: (market: GlobalMarket, q = '', signal?: AbortSignal) => {
+    const query = new URLSearchParams({ market })
+    if (q.trim()) query.set('q', q.trim())
+    return request<GlobalMarketCatalogResponse>(`/api/custom/global-markets/catalog?${query}`, { signal, quiet: true }).then(result => {
+      if (result?.market !== market || !Array.isArray(result.items) || !Array.isArray(result.warnings)
+        || result.items.some(item => item.market !== market
+          || !['stock', 'etf', 'index'].includes(item.kind))) {
+        throw new Error('港美股标的目录响应格式无效')
+      }
+      return result
+    })
+  },
+  globalMarketChart: (market: GlobalMarket, symbol: string, interval: GlobalMarketChartInterval, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ market, symbol, interval })
+    return request<GlobalMarketChartResponse>(`/api/custom/global-markets/chart?${query}`, { signal, quiet: true }).then(result => {
+      const currency = market === 'hk' ? 'HKD' : 'USD'
+      const timezone = market === 'hk' ? 'Asia/Hong_Kong' : 'America/New_York'
+      if (result?.market !== market || result.symbol !== symbol || result.interval !== interval
+        || result.currency !== currency || result.timezone !== timezone || result.price_basis !== 'source_ohlc'
+        || !Array.isArray(result.bars)
+        || !Array.isArray(result.warnings)) {
+        throw new Error('港美股行情响应格式无效')
+      }
+      return result
+    })
+  },
+  globalMarketResources: (signal?: AbortSignal) => request<GlobalMarketResourcesResponse>(
+    '/api/custom/global-markets/resources', { signal, quiet: true },
+  ).then(result => {
+    if (!Array.isArray(result?.items)) throw new Error('港美股研究资源响应格式无效')
+    return result
+  }),
 
   newsFeed: (refresh = false) => request<NewsFeedResponse>(`/api/custom/news/feed${refresh ? '?refresh=true' : ''}`, { quiet: true }),
   jevosStatus: (signal?: AbortSignal) => request<JevosStatus>('/api/custom/jevos/status', { signal, quiet: true }),

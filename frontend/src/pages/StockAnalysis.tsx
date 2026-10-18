@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, AlertTriangle } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
+import { MarketRegionTabs } from '@/custom/global_markets/MarketRegionTabs'
 import { EmptyState } from '@/components/EmptyState'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -105,11 +106,12 @@ export function StockAnalysis() {
   return (
     <>
       <PageHeader
-        title="股票 / ETF 分析"
+        title="A股 / ETF 分析"
         className="flex-wrap gap-2 pl-14 pr-3 md:px-5 [&>div:first-child]:flex-wrap [&>div:first-child]:min-w-0"
         subtitle="日K · 分时 / 分钟K · 关键价位 · AI研究解读"
         right={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <MarketRegionTabs activeMarket="cn" />
             <LastStockChip stock={lastStock?.symbol === symbol ? { symbol, name: resolvedName } : lastStock} onSelect={onSelect} />
           </div>
         }

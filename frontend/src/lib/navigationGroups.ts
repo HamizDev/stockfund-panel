@@ -1,6 +1,6 @@
 export const NAVIGATION_GROUPS = [
   { id: 'overview', label: '总览', paths: ['/', '/indices'] },
-  { id: 'market', label: '市场研究', paths: ['/market', '/concept-analysis', '/industry-analysis', '/regime', '/limit-ladder', '/stock-analysis', '/financials'] },
+  { id: 'market', label: '市场研究', paths: ['/market', '/concept-analysis', '/industry-analysis', '/regime', '/limit-ladder', '/stock-analysis', '/financials', '/markets/hk', '/markets/us'] },
   { id: 'ai', label: 'AI选品', paths: ['/ai-screener', '/ai-fund-screener'] },
   { id: 'holdings', label: '自选与持仓', paths: ['/watchlist', '/lots', '/fund'] },
   { id: 'strategy', label: '策略实验室', paths: ['/screener', '/backtest', '/paper', '/review', '/factors', '/signals', '/crypto-paper'] },

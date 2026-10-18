@@ -57,10 +57,17 @@ export interface DefaultStrategyBasicFilter {
 }
 
 export const storage = {
+  chartViewports: kv<unknown>('chart-viewports', 'session'),
+  globalIndustryView: kv<unknown>('global-industries-view', 'session'),
   /** 只读页面的选择/筛选；按标签页保存，不包含账户操作表单或实时行情快照。 */
   pageView: {
     indices: kv<unknown>('page-view:indices', 'session'),
     stockAnalysis: kv<unknown>('page-view:stock-analysis', 'session'),
+    dashboardCn: kv<unknown>('page-view:dashboard:cn', 'session'),
+    globalMarketsHk: kv<unknown>('page-view:global-markets:hk', 'session'),
+    globalMarketsUs: kv<unknown>('page-view:global-markets:us', 'session'),
+    globalDashboardHk: kv<unknown>('page-view:global-dashboard:hk', 'session'),
+    globalDashboardUs: kv<unknown>('page-view:global-dashboard:us', 'session'),
     cryptoMarket: kv<unknown>('page-view:crypto-market', 'session'),
     cryptoExpandedAccount: kv<unknown>('page-view:crypto-expanded-account', 'session'),
     aiScreener: kv<unknown>('page-view:ai-screener', 'session'),
