@@ -6,11 +6,21 @@ import math
 import httpx
 import pytest
 
-from app.custom.jevos.client import JevosError, LocalJevosClient, ModelInfo
+from app.custom.jevos.client import ChoiceResult, JevosError, LocalJevosClient, ModelInfo
 
 _FINGERPRINT = "a" * 64
 _IDENTITY = ModelInfo(model="jevos-v5", fingerprint=_FINGERPRINT)
 _QUESTIONS = {"positive": "Does the evidence support a positive classification?"}
+_CHOICE_QUESTIONS = {
+    "direction": {
+        "type": "choice",
+        "instructions": "Classify the stated effect, without guessing beyond the text.",
+        "criteria": {
+            "positive": "The text describes a clearly favorable effect.",
+            "negative": "The text describes a clearly harmful effect.",
+        },
+    },
+}
 
 
 def _health(**overrides):
@@ -33,6 +43,21 @@ def _answer(**overrides):
     }
 
 
+def _choice_answer(**overrides):
+    return {
+        "model": "jevos-v5",
+        "answers": {
+            "direction": {
+                "type": "choice",
+                "choice": "positive",
+                "probabilities": {"positive": 0.8, "negative": 0.2},
+                "confidence": 0.75,
+            },
+        },
+        **overrides,
+    }
+
+
 def _client(handler):
     requests = []
 
@@ -47,6 +72,8 @@ def _raise_for(category: str, client: LocalJevosClient, method: str = "health"):
     with pytest.raises(JevosError) as caught:
         if method == "health":
             client.health()
+        elif method == "choose":
+            client.choose({"untrusted_news_text": "Example"}, _CHOICE_QUESTIONS, _IDENTITY)
         else:
             client.judge({"price": 1.0}, _QUESTIONS, _IDENTITY)
     assert caught.value.category == category
@@ -127,7 +154,161 @@ def test_judge_posts_bounded_noul_schema_to_fixed_loopback_endpoint():
     }
 
 
-@pytest.mark.parametrize("method", ["health", "judge"])
+def test_choose_posts_bounded_choice_schema_and_returns_validated_probabilities():
+    client, requests = _client(lambda _request: httpx.Response(200, json=_choice_answer()))
+
+    result = client.choose(
+        {"untrusted_news_text": "公司净利润增长120%。"},
+        _CHOICE_QUESTIONS,
+        _IDENTITY,
+    )
+
+    assert result == {
+        "direction": ChoiceResult(
+            choice="positive",
+            probabilities={"positive": 0.8, "negative": 0.2},
+            confidence=0.75,
+        ),
+    }
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.method == "POST"
+    assert str(request.url) == "http://127.0.0.1:8017/v1/systemone"
+    assert not any(key.lower() in {"authorization", "x-api-key"} for key in request.headers)
+    assert json.loads(request.content) == {
+        "model": "jev-latest",
+        "state": {"untrusted_news_text": "公司净利润增长120%。"},
+        "questions": _CHOICE_QUESTIONS,
+    }
+
+
+def test_choose_accepts_a_tied_most_likely_choice():
+    client, _ = _client(lambda _request: httpx.Response(200, json=_choice_answer(answers={
+        "direction": {
+            "type": "choice",
+            "choice": "negative",
+            "probabilities": {"positive": 0.5, "negative": 0.5},
+            "confidence": 0.5,
+        },
+    })))
+
+    result = client.choose({}, _CHOICE_QUESTIONS, _IDENTITY)
+
+    assert result["direction"].choice == "negative"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _choice_answer(answers={}),
+        _choice_answer(answers={
+            "direction": _choice_answer()["answers"]["direction"],
+            "unexpected": _choice_answer()["answers"]["direction"],
+        }),
+        _choice_answer(model="jevos-v4"),
+        _choice_answer(answers={"direction": {**_choice_answer()["answers"]["direction"], "type": "noul"}}),
+        _choice_answer(answers={"direction": {
+            **_choice_answer()["answers"]["direction"], "choice": "unknown",
+        }}),
+        _choice_answer(answers={"direction": {
+            **_choice_answer()["answers"]["direction"],
+            "probabilities": {"positive": 0.8},
+        }}),
+        _choice_answer(answers={"direction": {
+            **_choice_answer()["answers"]["direction"],
+            "probabilities": {"positive": 0.7, "negative": 0.3, "neutral": 0.0},
+        }}),
+        _choice_answer(answers={"direction": {
+            **_choice_answer()["answers"]["direction"], "surprise": "not allowed",
+        }}),
+        _choice_answer(answers={"direction": {
+            **_choice_answer()["answers"]["direction"],
+            "choice": "negative",
+            "probabilities": {"positive": 0.8, "negative": 0.2},
+        }}),
+        _choice_answer(answers={"direction": {
+            **_choice_answer()["answers"]["direction"],
+            "probabilities": {"positive": 0.7, "negative": 0.2},
+        }}),
+    ],
+)
+def test_choose_rejects_wrong_model_question_answer_or_choice_contract(payload):
+    client, _ = _client(lambda _request: httpx.Response(200, json=payload))
+    _raise_for("invalid_response", client, "choose")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, float("nan"), float("inf"), float("-inf"), -0.01, 1.01, "0.5", None],
+)
+def test_choose_rejects_invalid_probability_and_confidence_values(value):
+    base = _choice_answer()["answers"]["direction"]
+    for answer in (
+        {**base, "probabilities": {"positive": value, "negative": 0.2}},
+        {**base, "confidence": value},
+    ):
+        client, _ = _client(lambda _request, answer=answer: httpx.Response(
+            200, json=_choice_answer(answers={"direction": answer}),
+        ))
+        _raise_for("invalid_response", client, "choose")
+
+
+def test_choose_rejects_invalid_identity_and_state_before_http():
+    client, requests = _client(lambda _request: pytest.fail("Invalid input must fail before HTTP"))
+    invalid_identity = ModelInfo(model="wrong-model", fingerprint=_FINGERPRINT)
+    with pytest.raises(JevosError) as caught:
+        client.choose({}, _CHOICE_QUESTIONS, invalid_identity)
+    assert caught.value.category == "invalid_response"
+    with pytest.raises(JevosError):
+        client.choose({"text": "x" * (16 * 1024)}, _CHOICE_QUESTIONS, _IDENTITY)
+    with pytest.raises(JevosError):
+        client.choose({"value": math.nan}, _CHOICE_QUESTIONS, _IDENTITY)
+    assert requests == []
+
+
+def test_choose_rejects_invalid_question_shapes_and_limits_before_http():
+    oversized_questions = {
+        f"question_{question_index}": {
+            "type": "choice",
+            "instructions": "Choose one.",
+            "criteria": {f"option_{option_index}": "x" * 1000 for option_index in range(12)},
+        }
+        for question_index in range(3)
+    }
+    invalid_questions = [
+        {},
+        {str(index): _CHOICE_QUESTIONS["direction"] for index in range(9)},
+        {"bad name": _CHOICE_QUESTIONS["direction"]},
+        {"direction": {**_CHOICE_QUESTIONS["direction"], "extra": "no"}},
+        {"direction": {**_CHOICE_QUESTIONS["direction"], "type": "noul"}},
+        {"direction": {**_CHOICE_QUESTIONS["direction"], "instructions": " "}},
+        {"direction": {**_CHOICE_QUESTIONS["direction"], "instructions": "x" * 1001}},
+        {"direction": {**_CHOICE_QUESTIONS["direction"], "criteria": {"only": "one"}}},
+        {"direction": {**_CHOICE_QUESTIONS["direction"], "criteria": {
+            f"option_{index}": "valid" for index in range(13)
+        }}},
+        {"direction": {**_CHOICE_QUESTIONS["direction"], "criteria": {
+            "bad option": "valid", "other": "also valid",
+        }}},
+        {"direction": {**_CHOICE_QUESTIONS["direction"], "criteria": {
+            "positive": " ", "negative": "valid",
+        }}},
+        {"direction": {**_CHOICE_QUESTIONS["direction"], "criteria": {
+            "positive": "x" * 1001, "negative": "valid",
+        }}},
+        oversized_questions,
+    ]
+    client, requests = _client(lambda _request: pytest.fail("Invalid questions must fail before HTTP"))
+
+    for questions in invalid_questions:
+        with pytest.raises(JevosError) as caught:
+            client.choose({}, questions, _IDENTITY)
+        assert caught.value.category == "invalid_response"
+
+    assert requests == []
+
+
+@pytest.mark.parametrize("method", ["health", "judge", "choose"])
 def test_network_and_timeout_errors_are_fixed_and_do_not_leak(method):
     def offline(request):
         raise httpx.ConnectError("FAKE_NETWORK_SECRET", request=request)

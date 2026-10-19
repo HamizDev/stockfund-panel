@@ -66,6 +66,79 @@ it('renders empty input safely and exposes an empty chart status', async () => {
   expect(HTMLCanvasElement.prototype.getContext).toHaveBeenCalled()
 })
 
+it('reports the hovered candle close and clears it on pointer exit, context/data changes, and unmount', async () => {
+  const onPriceHover = vi.fn()
+  const bars = [{ time: '2026-10-16', open: 10, high: 12, low: 9, close: 11, volume: 10 }]
+  const renderChart = async (contextKey = 'TEST', nextBars = bars) => act(async () => root.render(<CanvasMarketChart
+    bars={nextBars} symbol="TEST" contextKey={contextKey} showControls={false}
+    onPriceHover={price => onPriceHover(price)}
+  />))
+  await renderChart()
+  const canvas = host.querySelector('canvas')!
+
+  await act(async () => canvas.dispatchEvent(new MouseEvent('pointermove', {
+    bubbles: true, clientX: 292, clientY: 100,
+  })))
+  expect(onPriceHover).toHaveBeenLastCalledWith(11)
+
+  // A new callback identity on an ordinary parent render must not replay the current value.
+  const callsAfterHover = onPriceHover.mock.calls.length
+  await renderChart()
+  expect(onPriceHover).toHaveBeenCalledTimes(callsAfterHover)
+
+  await act(async () => canvas.dispatchEvent(new MouseEvent('pointerout', { bubbles: true, relatedTarget: null })))
+  expect(onPriceHover).toHaveBeenLastCalledWith(null)
+
+  await act(async () => canvas.dispatchEvent(new MouseEvent('pointermove', {
+    bubbles: true, clientX: 292, clientY: 100,
+  })))
+  expect(onPriceHover).toHaveBeenLastCalledWith(11)
+  await act(async () => canvas.dispatchEvent(new MouseEvent('pointermove', {
+    bubbles: true, clientX: 0, clientY: 100,
+  })))
+  expect(onPriceHover).toHaveBeenLastCalledWith(null)
+
+  await act(async () => {
+    canvas.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 292, clientY: 100 }))
+    canvas.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 292, clientY: 100 }))
+    canvas.dispatchEvent(new MouseEvent('pointercancel', { bubbles: true, button: 0, clientX: 292, clientY: 100 }))
+  })
+  expect(onPriceHover).toHaveBeenLastCalledWith(null)
+
+  await act(async () => canvas.dispatchEvent(new MouseEvent('pointermove', {
+    bubbles: true, clientX: 292, clientY: 100,
+  })))
+  expect(onPriceHover).toHaveBeenLastCalledWith(11)
+  await renderChart('OTHER')
+  expect(onPriceHover).toHaveBeenLastCalledWith(null)
+
+  const changedBars = [{ ...bars[0], close: 10.5 }]
+  await act(async () => host.querySelector('canvas')!.dispatchEvent(new MouseEvent('pointermove', {
+    bubbles: true, clientX: 292, clientY: 100,
+  })))
+  expect(onPriceHover).toHaveBeenLastCalledWith(11)
+  await renderChart('OTHER', changedBars)
+  expect(onPriceHover).toHaveBeenLastCalledWith(null)
+
+  await act(async () => host.querySelector('canvas')!.dispatchEvent(new MouseEvent('pointermove', {
+    bubbles: true, clientX: 292, clientY: 100,
+  })))
+  expect(onPriceHover).toHaveBeenLastCalledWith(10.5)
+  await act(async () => root.unmount())
+  expect(onPriceHover).toHaveBeenLastCalledWith(null)
+  root = createRoot(host)
+})
+
+it('labels the linked price line with the formatted price', async () => {
+  const fillText = vi.spyOn(canvasContext, 'fillText')
+  await act(async () => root.render(<CanvasMarketChart
+    bars={[{ time: 1, open: 0.5, high: 0.51, low: 0.49, close: 0.5, volume: 10 }]}
+    symbol="TEST" contextKey="TEST" linkedPrice={0.525} showControls={false}
+    formatPrice={value => typeof value === 'number' ? value.toFixed(3) : '—'}
+  />))
+  expect(fillText.mock.calls.some(([text]) => text === '分时价 0.525')).toBe(true)
+})
+
 it('keeps missing volume visible, delays single clicks, and routes real double-clicks only to price selection', async () => {
   const onBarClick = vi.fn()
   const onPriceDoubleClick = vi.fn()

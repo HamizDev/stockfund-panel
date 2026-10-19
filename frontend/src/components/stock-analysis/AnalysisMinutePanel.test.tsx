@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { AnalysisMinutePanel } from './AnalysisMinutePanel'
+import { QK } from '@/lib/queryKeys'
 
 const mocks = vi.hoisted(() => ({
   klineMinute: vi.fn(),
@@ -220,4 +221,47 @@ it('waits without issuing a query until the asset type is recognized', async () 
   expect(host.textContent).toContain('资产类型待识别')
   expect(mocks.klineMinute).not.toHaveBeenCalled()
   expect(mocks.indexMinute).not.toHaveBeenCalled()
+})
+
+it.each(['stock', 'etf'] as const)('refreshes an already-selected latest day for %s and displays its actual date', async assetType => {
+  await render(baseProps({ assetType }))
+  const latest = [...host.querySelectorAll('button')].find(button => button.textContent === '最新交易日')!
+  await act(async () => latest.click())
+  await settle()
+  expect(mocks.klineMinute).toHaveBeenCalledTimes(2)
+  expect(mocks.klineMinute).toHaveBeenLastCalledWith('600000.SH', undefined, true)
+  expect(host.querySelector<HTMLInputElement>('input[type="date"]')?.value).toBe('2020-01-02')
+  expect(latest.getAttribute('aria-pressed')).toBe('true')
+  expect(host.textContent).toContain('最新交易日模式')
+})
+
+it('refreshes latest index price points without issuing a stock request', async () => {
+  await render(baseProps({ symbol: '000001.SH', assetType: 'index' }))
+  const latest = [...host.querySelectorAll('button')].find(button => button.textContent === '最新交易日')!
+  await act(async () => latest.click())
+  await settle()
+  expect(mocks.indexMinute).toHaveBeenCalledTimes(2)
+  expect(mocks.indexMinute).toHaveBeenLastCalledWith('000001.SH', undefined)
+  expect(mocks.klineMinute).not.toHaveBeenCalled()
+})
+
+it('invalidates only the exact latest cache before switching away from a historical date', async () => {
+  const symbol = '600000.SH'
+  const latestKey = QK.analysisMinute(symbol, '', 'stock')
+  client.setQueryData(latestKey, stockResponse(symbol, '2020-01-02'))
+  const untouchedKey = QK.klineMinute('000002.SZ', '', true)
+  client.setQueryData(untouchedKey, stockResponse('000002.SZ'))
+  mocks.klineMinute.mockImplementation(async (_symbol: string, date?: string) => stockResponse(symbol, date ?? '2020-01-03'))
+  const onDateChange = vi.fn()
+  await render(baseProps({ date: '2020-01-01', onDateChange }))
+  const latest = [...host.querySelectorAll('button')].find(button => button.textContent === '最新交易日')!
+  await act(async () => latest.click())
+  expect(onDateChange).toHaveBeenCalledWith(null)
+  expect(client.getQueryState(latestKey)?.isInvalidated).toBe(true)
+  expect(client.getQueryState(untouchedKey)?.isInvalidated).toBe(false)
+  expect(mocks.klineMinute).toHaveBeenCalledTimes(1)
+  await render(baseProps({ date: null }))
+  expect(mocks.klineMinute).toHaveBeenCalledTimes(2)
+  expect(mocks.klineMinute).toHaveBeenLastCalledWith(symbol, undefined, true)
+  expect(host.textContent).toContain('实际日期：2020-01-03')
 })

@@ -181,11 +181,15 @@ def fetch_quote(market: str, symbol: str) -> dict:
 
 
 def search(market: str, query: str) -> list[dict]:
+    query = query.strip()
+    if not query:
+        return []
     payload = _json("/v1/finance/search", {"q": query, "quotesCount": 15, "newsCount": 0})
     rows = payload.get("quotes")
     if not isinstance(rows, list) or len(rows) > 50:
         raise MarketDataError("名称检索暂不可用，请尝试股票代码")
     items = []
+    seen: set[str] = set()
     for row in rows:
         if (not isinstance(row, dict) or not isinstance(row.get("quoteType"), str)
                 or row["quoteType"] not in {"EQUITY", "ETF"}
@@ -199,6 +203,10 @@ def search(market: str, query: str) -> list[dict]:
             symbol = normalize_symbol(market, row["symbol"])
         except (ValueError, KeyError, AttributeError):
             continue
+        # Upstream may return the same instrument more than once via aliases.
+        if symbol in seen:
+            continue
+        seen.add(symbol)
         items.append({"symbol": symbol, "market": market,
                       "name": display_name(market, symbol, row.get("longname") or row.get("shortname") or symbol),
                       "kind": "etf" if row["quoteType"] == "ETF" else "stock"})

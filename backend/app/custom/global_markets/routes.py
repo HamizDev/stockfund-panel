@@ -5,13 +5,27 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from . import industries, overview, service
+from . import etf_shares, industries, macro, overview, service
 from .catalog import MarketDataError
 from .resources import RESOURCES
 
 
 def build_router() -> APIRouter:
     router = APIRouter(prefix="/api/custom/global-markets", tags=["global-markets"])
+
+    @router.get('/etf-shares')
+    def official_etf_shares(symbol: str = Query(..., max_length=12), date: str | None = None) -> dict:
+        try:
+            return etf_shares.get(symbol, date)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+
+    @router.get('/macro')
+    def macro_reference(market: Literal['cn', 'us']) -> dict:
+        try:
+            return macro.get(market)
+        except MarketDataError as error:
+            raise HTTPException(503, str(error)) from error
 
     @router.get('/industries')
     def global_industries(request: Request, mode: Literal['auto', 'cn', 'us'] = 'auto') -> dict:

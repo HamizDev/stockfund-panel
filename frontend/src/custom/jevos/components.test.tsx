@@ -54,10 +54,20 @@ it('shows local service state and separates model probabilities from win rate', 
   await render(<><JevosNewsStatus status={status({ news: { [item.id]: item } })} isLoading={false} isError={false} /><JevosNewsReview review={item} /></>)
   expect(host.textContent).toContain('Jevos 本地初筛')
   expect(host.textContent).toContain('本机服务就绪')
-  expect(host.textContent).toContain('正面线索')
+  expect(host.textContent).toContain('偏利好')
   expect(host.textContent).toContain('模型判断概率（不是胜率）')
   expect(host.textContent).toContain('关注 / 登记持仓')
   expect(host.textContent).toContain('不代表相关标的一定受益')
+})
+
+it('shows exact news evidence and weak classification without presenting calibration as accuracy', async () => {
+  await render(<JevosNewsReview review={review({ label: 'neutral', method: 'choice-v2', tentative: true,
+    confidence: 0.45, reason: '原文未见明确方向变化：召开例行股东大会', evidence: ['召开例行股东大会'],
+    probabilities: { positive: 0.1, negative: 0.1, neutral: 0.6, mixed: 0.1, uncertain: 0.1 } })} />)
+  expect(host.textContent).toContain('中性')
+  expect(host.textContent).toContain('判断较弱')
+  expect(host.textContent).toContain('原文：召开例行股东大会')
+  expect(host.textContent).toContain('模型区分度 45%（未经市场准确率校准）')
 })
 
 it('marks an old strategy review as historical against the current closed candle', async () => {

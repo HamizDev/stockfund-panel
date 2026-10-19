@@ -1,11 +1,12 @@
-import { useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useEffect, useMemo, useRef } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { CanvasMarketChart, type CanvasChartBar } from '@/components/CanvasMarketChart'
 import { EChartsIntraday } from '@/components/EChartsIntraday'
 import { api, type IndexMinuteRow, type MinuteKlineRow } from '@/lib/api'
 import { chartPrice } from '@/lib/chartPrice'
 import { klineMinuteQueryOptions, minuteRefetchInterval } from '@/lib/kline'
 import { QK } from '@/lib/queryKeys'
+import { INSTRUMENT_VIEW_GC_MS } from '@/lib/useInstrumentViewCache'
 
 type AssetType = 'stock' | 'etf' | 'index' | undefined
 type View = 'intraday' | 'candles'
@@ -17,6 +18,7 @@ interface Props {
   onDateChange: (date: string | null) => void
   view: View
   onViewChange: (view: View) => void
+  onPriceHover?: (price: number | null) => void
   height?: number
 }
 
@@ -75,23 +77,30 @@ export function AnalysisMinutePanel({
   onDateChange,
   view,
   onViewChange,
+  onPriceHover,
   height = 480,
 }: Props) {
+  const queryClient = useQueryClient()
   const stockOptions = klineMinuteQueryOptions(symbol, date ?? undefined, true)
   const stockQuery = useQuery({
     ...stockOptions,
+    queryKey: QK.analysisMinute(symbol, date ?? '', 'stock'),
     queryFn: async () => matchesContext(await stockOptions.queryFn(), symbol, date),
     enabled: !!symbol && (assetType === 'stock' || assetType === 'etf'),
     retry: false,
     staleTime: REFRESH_MS,
+    gcTime: INSTRUMENT_VIEW_GC_MS,
+    meta: { instrumentView: 'analysis', symbol, minuteDate: date ?? '' },
     refetchInterval: minuteRefetchInterval(REFRESH_MS),
   })
   const indexQuery = useQuery({
-    queryKey: QK.indexMinute(symbol, date ?? ''),
+    queryKey: QK.analysisMinute(symbol, date ?? '', 'index'),
     queryFn: async () => matchesContext(await api.indexMinute(symbol, date ?? undefined), symbol, date),
     enabled: !!symbol && assetType === 'index',
     retry: false,
     staleTime: REFRESH_MS,
+    gcTime: INSTRUMENT_VIEW_GC_MS,
+    meta: { instrumentView: 'analysis', symbol, minuteDate: date ?? '' },
     refetchInterval: minuteRefetchInterval(REFRESH_MS),
   })
 
@@ -104,6 +113,12 @@ export function AnalysisMinutePanel({
     ? response
     : undefined
   const rows = currentResponse?.rows ?? []
+  const hoverRef = useRef(onPriceHover)
+  hoverRef.current = onPriceHover
+  useEffect(() => {
+    hoverRef.current?.(null)
+    return () => hoverRef.current?.(null)
+  }, [symbol, date, view, currentResponse?.date])
   const provider = isIndex && currentResponse && 'provider' in currentResponse
     ? currentResponse.provider
     : undefined
@@ -128,10 +143,25 @@ export function AnalysisMinutePanel({
   }, [isIndex, rows])
 
   const retry = () => { void activeQuery.refetch() }
+  const selectLatest = () => {
+    if (!assetType) return
+    if (date == null) retry()
+    else {
+      // Invalidate the destination before switching keys. Refetching the current
+      // observer here would request the historical date again.
+      void queryClient.invalidateQueries({
+        queryKey: QK.analysisMinute(symbol, '', isIndex ? 'index' : 'stock'),
+        exact: true,
+        refetchType: 'none',
+      })
+    }
+    onDateChange(null)
+  }
   const error = activeQuery.isError
   const hasData = !!currentResponse
   const showCandles = view === 'candles' && !isIndex
   const latestTime = rows.length ? String(rows[rows.length - 1].datetime).slice(11, 16) : '—'
+  const reference = !isIndex ? currentResponse as StockMinuteResponse | undefined : undefined
 
   return <section aria-label="日内行情" className="w-full min-w-0 space-y-3 overflow-hidden rounded-lg border border-border/50 bg-surface/40 p-3 sm:p-4">
     <h2 className="text-sm font-medium text-foreground">分时 / 分钟 K</h2>
@@ -142,19 +172,22 @@ export function AnalysisMinutePanel({
           <input
             type="date"
             aria-label="分钟数据日期"
-            value={date ?? ''}
+            value={date ?? currentResponse?.date ?? ''}
             onChange={event => onDateChange(event.target.value || null)}
             className="min-w-0 max-w-40 rounded border border-border/60 bg-base px-2 py-1 text-xs text-foreground"
           />
         </label>
-        <button type="button" onClick={() => onDateChange(null)} className="shrink-0 rounded border border-border/60 px-2.5 py-1 text-xs text-secondary hover:text-foreground">最新交易日</button>
+        <button type="button" onClick={selectLatest} aria-pressed={date == null}
+          disabled={!assetType || (date == null && activeQuery.isFetching)}
+          title="重新查询最新交易日；休市时数据日期可能保持不变"
+          className={`shrink-0 rounded border px-2.5 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-40 ${date == null ? 'border-blue-400/50 bg-blue-500/10 text-blue-200' : 'border-border/60 text-secondary hover:text-foreground'}`}>最新交易日</button>
         <button
           type="button"
           onClick={retry}
           disabled={!assetType || activeQuery.isFetching}
           aria-label="刷新分钟数据"
           className="shrink-0 rounded border border-border/60 px-2.5 py-1 text-xs text-secondary hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-        >刷新</button>
+        >{activeQuery.isFetching ? '刷新中…' : '刷新'}</button>
       </div>
       <div className="flex shrink-0 items-center gap-1 self-start sm:self-auto" role="group" aria-label="分钟图表类型">
         <button type="button" aria-pressed={view === 'intraday' || isIndex} onClick={() => onViewChange('intraday')}
@@ -172,11 +205,14 @@ export function AnalysisMinutePanel({
 
     {assetType != null && hasData && currentResponse ? <>
       <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted" aria-label="分钟数据状态">
+        <span className="text-blue-300">{date == null ? '最新交易日模式' : '历史日期模式'}</span>
         <span>来源：{sourceLabel(currentResponse.source)}{provider && provider !== currentResponse.source ? ` · ${provider}` : ''}</span>
         <span>实际日期：{currentResponse.date ?? '—'}</span>
         <span>最后分钟：{latestTime}</span>
+        {reference?.prev_close != null && <span>昨收基准：{chartPrice(reference.prev_close, symbol)}{reference.prev_close_date ? ` · ${reference.prev_close_date}` : ''}</span>}
         {activeQuery.isFetching && <span className="text-blue-300">刷新中</span>}
       </div>
+      {reference?.prev_close_warning && rows.length > 0 && <p role="status" className="text-[11px] text-amber-300">{reference.prev_close_warning}</p>}
       {rows.length === 0 ? <div role="status" className="flex items-center justify-center rounded-md border border-border/40 bg-base/30 text-sm text-muted" style={{ height }}>暂无分钟数据</div>
         : showCandles && invalidCandles ? <div role="status" className="flex flex-col items-center justify-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-4 text-center text-sm text-amber-200" style={{ height }}>
           <span>缺少有效的真实分钟 OHLC，无法绘制 1 分钟 K。</span>
@@ -191,12 +227,14 @@ export function AnalysisMinutePanel({
             visibleBars="all"
             formatPrice={value => chartPrice(value, symbol)}
             formatTime={time => String(time)}
+            onPriceHover={onPriceHover}
           />
             : isIndex ? <EChartsIntraday
               data={currentResponse.rows as IndexMinuteRow[]}
               height={height}
               date={currentResponse.date ?? undefined}
               pricePointsOnly
+              onPriceHover={onPriceHover}
             />
               : <EChartsIntraday
                 data={currentResponse.rows as MinuteKlineRow[]}
@@ -204,6 +242,7 @@ export function AnalysisMinutePanel({
                 prevClose={(currentResponse as StockMinuteResponse).prev_close ?? undefined}
                 priceLimit={(currentResponse as StockMinuteResponse).price_limit ?? undefined}
                 date={currentResponse.date ?? undefined}
+                onPriceHover={onPriceHover}
               />}
     </> : null}
     {assetType != null && !activeQuery.isPending && !error && !hasData ? <div role="status" className="flex items-center justify-center rounded-md border border-border/40 bg-base/30 text-sm text-muted" style={{ height }}>暂无分钟数据</div> : null}

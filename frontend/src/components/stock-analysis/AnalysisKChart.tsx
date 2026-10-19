@@ -1,5 +1,5 @@
 import { chartPrice } from '@/lib/chartPrice'
-import { useEffect, useRef, useMemo, useState } from 'react'
+import { useCallback, useEffect, useRef, useMemo, useState } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
@@ -113,12 +113,16 @@ interface Props {
   seriesDates?: string[]
   /** 默认开启的价位组 */
   defaultLevelTypes?: LevelType[]
+  /** 可选的标的上下文 key；提供后仅持久化当前图表的小型视图状态。 */
+  persistenceKey?: string
   /** 预留:新闻/暴雷/利好日期标记 */
   markers?: ChartMarker[]
   /** 预留:事件区间高亮 */
   ranges?: ChartRange[]
   /** 预留:点击某根 K 线 */
   onDateClick?: (date: string) => void
+  /** Actual price selected in the paired intraday chart, in this chart's price basis. */
+  linkedPrice?: number | null
   height?: number
   className?: string
 }
@@ -132,34 +136,168 @@ const RANGE_PRESETS: { key: ChartRangePreset; label: string; description: string
   { key: 'all', label: '全部', description: '全部已加载日K' },
 ]
 const EMPTY_DATE_RANGE: ChartDateRange = { start: '', end: '' }
+const DEFAULT_LEVEL_TYPES: LevelType[] = ['sr', 'pivot', 'keltner_s']
+const VIEW_STATE_STORAGE_KEY = 'analysis-k-chart:view-state:v1'
+const RANGE_PRESET_KEYS = new Set<ChartRangePreset>(['1m', '3m', '6m', '1y', 'all'])
+const LEVEL_TYPE_KEYS = new Set<LevelType>(LEVEL_GROUPS.map(group => group.key))
+
+interface ChartViewState {
+  persistenceKey: string | undefined
+  activeTypes: Set<LevelType>
+  pivotRank: 1 | 2 | 3
+  visibleDateRange: ChartDateRange
+  activeRangePreset: ChartRangePreset | null
+}
+
+function defaultChartViewState(
+  persistenceKey: string | undefined,
+  defaultLevelTypes: LevelType[],
+  dates: string[],
+): ChartViewState {
+  const initialRange = presetToIndexRange(dates, '6m')
+  return {
+    persistenceKey,
+    activeTypes: new Set(defaultLevelTypes),
+    pivotRank: 1,
+    visibleDateRange: indexRangeToDateRange(dates, initialRange ?? { start: 0, end: 0 }) ?? EMPTY_DATE_RANGE,
+    activeRangePreset: dates.length > 1 ? '6m' : null,
+  }
+}
+
+function readChartViewState(
+  persistenceKey: string,
+  fallback: ChartViewState,
+  dates: string[],
+): ChartViewState {
+  try {
+    const raw = window.sessionStorage.getItem(VIEW_STATE_STORAGE_KEY)
+    if (!raw) return fallback
+
+    const saved = JSON.parse(raw) as Record<string, unknown>
+    if (saved.version !== 1 || saved.persistenceKey !== persistenceKey) return fallback
+    if (!Array.isArray(saved.activeTypes) || !saved.activeTypes.every(type => typeof type === 'string')) return fallback
+    if (saved.pivotRank !== 1 && saved.pivotRank !== 2 && saved.pivotRank !== 3) return fallback
+    if (saved.activeRangePreset !== null && !RANGE_PRESET_KEYS.has(saved.activeRangePreset as ChartRangePreset)) return fallback
+
+    const savedRange = saved.visibleDateRange as ChartDateRange | undefined
+    if (!savedRange || typeof savedRange.start !== 'string' || typeof savedRange.end !== 'string') return fallback
+    if (savedRange.start && !/^\d{4}-\d{2}-\d{2}$/.test(savedRange.start)) return fallback
+    if (savedRange.end && !/^\d{4}-\d{2}-\d{2}$/.test(savedRange.end)) return fallback
+    if (savedRange.start && savedRange.end && savedRange.start > savedRange.end) return fallback
+
+    const activeTypes = new Set((saved.activeTypes as string[]).filter((type): type is LevelType => LEVEL_TYPE_KEYS.has(type as LevelType)))
+    const preset = saved.activeRangePreset as ChartRangePreset | null
+    const indices = preset
+      ? presetToIndexRange(dates, preset)
+      : savedRange.start && savedRange.end
+        ? dateRangeToIndexRange(dates, savedRange)
+        : null
+    const needsDefaultRange = dates.length > 0 && !preset && !indices
+
+    return {
+      persistenceKey,
+      activeTypes,
+      pivotRank: saved.pivotRank,
+      visibleDateRange: needsDefaultRange
+        ? fallback.visibleDateRange
+        : indices ? indexRangeToDateRange(dates, indices) ?? savedRange : savedRange,
+      activeRangePreset: needsDefaultRange ? fallback.activeRangePreset : preset,
+    }
+  } catch {
+    return fallback
+  }
+}
+
+function persistChartViewState(state: ChartViewState): void {
+  if (!state.persistenceKey) return
+  try {
+    window.sessionStorage.setItem(VIEW_STATE_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      persistenceKey: state.persistenceKey,
+      activeTypes: [...state.activeTypes],
+      pivotRank: state.pivotRank,
+      visibleDateRange: state.visibleDateRange,
+      activeRangePreset: state.activeRangePreset,
+    }))
+  } catch {
+    // Storage can be unavailable in restricted browser contexts; chart controls still work in memory.
+  }
+}
 
 export function AnalysisKChart({
   rows,
   levels,
   series,
   seriesDates,
-  defaultLevelTypes = ['sr', 'pivot', 'keltner_s'],
+  defaultLevelTypes = DEFAULT_LEVEL_TYPES,
+  persistenceKey,
   markers,
   ranges,
   onDateClick,
+  linkedPrice,
   height = 460,
   className,
 }: Props) {
   const chartRef = useRef<HTMLDivElement>(null)
   const chartInstRef = useRef<ECharts | null>(null)
+  const linkedPriceRef = useRef<number | null>(null)
+  linkedPriceRef.current = typeof linkedPrice === 'number' && Number.isFinite(linkedPrice) && linkedPrice > 0
+    ? linkedPrice : null
+  const appliedLinkedPriceRef = useRef<number | null>(null)
+  const linkedPriceMarkLine = () => ({
+    silent: true,
+    symbol: 'none',
+    animation: false,
+    data: linkedPriceRef.current == null ? [] : [{
+      yAxis: linkedPriceRef.current,
+      lineStyle: { color: '#3B82F6', type: 'dashed', width: 1, opacity: 0.85 },
+      label: {
+        show: true, formatter: `分时价 ${chartPrice(linkedPriceRef.current)}`,
+        position: 'insideEndTop', color: '#60A5FA', fontSize: 10,
+        fontFamily: 'JetBrains Mono, monospace',
+        backgroundColor: CT().tooltipBg, borderColor: '#3B82F6', borderWidth: 1,
+        padding: [2, 5], borderRadius: 2,
+      },
+    }],
+  })
   /** seriesIndex → levelKey 映射, buildOption 填充, ECharts hover 事件反查 */
   const seriesKeyMapRef = useRef<Map<number, string>>(new Map())
   // 主题: buildOption 内部用 CT() 动态取色, 这里只负责切换时触发重建
   const theme = useTheme()
-  const [activeTypes, setActiveTypes] = useState<Set<LevelType>>(new Set(defaultLevelTypes))
+  const activePersistenceKey = persistenceKey || undefined
+  const dates = useMemo(
+    () => rows.map(row => (typeof row.date === 'string' ? row.date.slice(0, 10) : String(row.date))),
+    [rows],
+  )
+  const [storedViewState, setStoredViewState] = useState<ChartViewState>(() => {
+    const fallback = defaultChartViewState(activePersistenceKey, defaultLevelTypes, dates)
+    return activePersistenceKey ? readChartViewState(activePersistenceKey, fallback, dates) : fallback
+  })
+  const viewState = storedViewState.persistenceKey === activePersistenceKey
+    ? storedViewState
+    : defaultChartViewState(activePersistenceKey, defaultLevelTypes, dates)
+  const { activeTypes, pivotRank, visibleDateRange, activeRangePreset } = viewState
+  const updateViewState = useCallback((update: (current: ChartViewState) => ChartViewState) => {
+    setStoredViewState(previous => {
+      const current = previous.persistenceKey === activePersistenceKey
+        ? previous
+        : defaultChartViewState(activePersistenceKey, defaultLevelTypes, dates)
+      return update(current)
+    })
+  }, [activePersistenceKey, defaultLevelTypes, dates])
+
+  useEffect(() => {
+    if (!activePersistenceKey) return
+    persistChartViewState(viewState)
+    if (storedViewState.persistenceKey !== activePersistenceKey) setStoredViewState(viewState)
+  }, [activePersistenceKey, storedViewState.persistenceKey, viewState])
+
   /** 枢轴点显示到第几档:1=只P+R1/S1, 2=到R2/S2, 3=全档(R3/S3) */
-  const [pivotRank, setPivotRank] = useState<1 | 2 | 3>(1)
   /** 双向联动高亮: hover 价位标签 ↔ hover 下方文字行。值为 levelKey, null=无高亮 */
   const [hoveredKey, setHoveredKey] = useState<string | null>(null)
 
   // 数据预处理 + 带状曲线序列对齐(后端 series 的日期范围可能与 rows 不同,需映射)
-  const { dates, candle, vols, dateIndex, alignedSeries } = useMemo(() => {
-    const dates = rows.map(r => (typeof r.date === 'string' ? r.date.slice(0, 10) : String(r.date)))
+  const { candle, vols, dateIndex, alignedSeries } = useMemo(() => {
     const candle = rows.map(r => [r.open, r.close, r.low, r.high])
     const vols = rows.map(r => ({
       value: r.volume ?? 0,
@@ -203,23 +341,20 @@ export function AnalysisKChart({
       }
     }
 
-    return { dates, candle, vols, dateIndex, alignedSeries }
-  }, [rows, series, seriesDates])
+    return { candle, vols, dateIndex, alignedSeries }
+  }, [rows, dates, series, seriesDates])
 
-  const initialIndexRange = presetToIndexRange(dates, '6m')
-  const [visibleDateRange, setVisibleDateRange] = useState<ChartDateRange>(() =>
-    indexRangeToDateRange(dates, initialIndexRange ?? { start: 0, end: 0 }) ?? EMPTY_DATE_RANGE,
-  )
-  const [activeRangePreset, setActiveRangePreset] = useState<ChartRangePreset | null>(
-    dates.length > 1 ? '6m' : null,
-  )
   const visibleDateRangeRef = useRef(visibleDateRange)
   const activeRangePresetRef = useRef(activeRangePreset)
+  visibleDateRangeRef.current = visibleDateRange
+  activeRangePresetRef.current = activeRangePreset
   const rangeDatesRef = useRef(dates)
   rangeDatesRef.current = dates
+  const currentIndices = dateRangeToIndexRange(dates, visibleDateRange) ?? { start: 0, end: 0 }
   const zoomRangeRef = useRef<ChartZoomRange>(
-    indexRangeToZoomRange(initialIndexRange ?? { start: 0, end: 0 }, dates.length),
+    indexRangeToZoomRange(currentIndices, dates.length),
   )
+  zoomRangeRef.current = indexRangeToZoomRange(currentIndices, dates.length)
   const datesKey = dates.join('|')
   const previousDatesKeyRef = useRef(datesKey)
 
@@ -233,8 +368,7 @@ export function AnalysisKChart({
       visibleDateRangeRef.current = EMPTY_DATE_RANGE
       activeRangePresetRef.current = null
       zoomRangeRef.current = { start: 0, end: 100 }
-      setVisibleDateRange(EMPTY_DATE_RANGE)
-      setActiveRangePreset(null)
+      updateViewState(previous => ({ ...previous, visibleDateRange: EMPTY_DATE_RANGE, activeRangePreset: null }))
       return
     }
 
@@ -255,9 +389,8 @@ export function AnalysisKChart({
     visibleDateRangeRef.current = nextRange
     activeRangePresetRef.current = nextPreset
     zoomRangeRef.current = indexRangeToZoomRange(nextIndices, dates.length)
-    setVisibleDateRange(nextRange)
-    setActiveRangePreset(nextPreset)
-  }, [datesKey, dates])
+    updateViewState(previous => ({ ...previous, visibleDateRange: nextRange, activeRangePreset: nextPreset }))
+  }, [datesKey, dates, updateViewState])
 
   // 构建 option
   const buildOption = (): EChartsOption => {
@@ -296,7 +429,7 @@ export function AnalysisKChart({
 
     const series: any[] = [
       {
-        name: 'K', type: 'candlestick', data: candle, animation: false,
+        id: 'analysis-candles', name: 'K', type: 'candlestick', data: candle, animation: false,
         // z=2 让蜡烛始终在价位线(z=1)之上, hover 高亮价位线时不会被遮挡/变淡
         z: 2,
         itemStyle: {
@@ -305,6 +438,7 @@ export function AnalysisKChart({
         },
         markPoint: markPointData.length ? { data: markPointData, animation: false } : undefined,
         markArea: markAreaData.length ? { silent: true, data: markAreaData } : undefined,
+        markLine: linkedPriceMarkLine(),
       },
       {
         name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1,
@@ -462,11 +596,11 @@ export function AnalysisKChart({
       })
       // hover 价位线/曲线 endLabel → 联动高亮(与下方文字行双向联动)
       chartInstRef.current.on('mouseover', (params: any) => {
-        if (params.componentType === 'series') {
-          const k = seriesKeyMapRef.current.get(params.seriesIndex as number)
-          if (k) setHoveredKey(k)
-        }
+        const key = params.componentType === 'series'
+          ? seriesKeyMapRef.current.get(params.seriesIndex as number) : undefined
+        setHoveredKey(key ?? null)
       })
+      chartInstRef.current.on('mouseout', () => setHoveredKey(null))
       chartInstRef.current.on('globalout', () => setHoveredKey(null))
       chartInstRef.current.on('dataZoom', () => {
         const chart = chartInstRef.current
@@ -487,29 +621,53 @@ export function AnalysisKChart({
         zoomRangeRef.current = indexRangeToZoomRange(indices, currentDates.length)
         visibleDateRangeRef.current = nextRange
         activeRangePresetRef.current = nextPreset
-        setVisibleDateRange(previous => previous.start === nextRange.start && previous.end === nextRange.end ? previous : nextRange)
-        setActiveRangePreset(previous => previous === nextPreset ? previous : nextPreset)
+        updateViewState(previous => {
+          const rangeIsUnchanged = previous.visibleDateRange.start === nextRange.start
+            && previous.visibleDateRange.end === nextRange.end
+          if (rangeIsUnchanged && previous.activeRangePreset === nextPreset) return previous
+          return {
+            ...previous,
+            visibleDateRange: rangeIsUnchanged ? previous.visibleDateRange : nextRange,
+            activeRangePreset: nextPreset,
+          }
+        })
       })
     }
     chartInstRef.current.setOption(buildOption(), true)
+    appliedLinkedPriceRef.current = linkedPriceRef.current
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, levels, series, seriesDates, activeTypes, pivotRank, markers, ranges, height, theme, hoveredKey])
+  }, [rows, levels, series, seriesDates, activeTypes, pivotRank, markers, ranges, height, theme, hoveredKey, activePersistenceKey])
+
+  useEffect(() => {
+    if (!chartInstRef.current || appliedLinkedPriceRef.current === linkedPriceRef.current) return
+    // Hover updates only the guide. Preserve the user's zoom and indicator data.
+    chartInstRef.current.setOption({ series: [{ id: 'analysis-candles', markLine: linkedPriceMarkLine() }] } as EChartsOption,
+      { lazyUpdate: true })
+    appliedLinkedPriceRef.current = linkedPriceRef.current
+  }, [linkedPrice])
 
   // resize
   useEffect(() => {
     const inst = chartInstRef.current
     if (!inst) return
     const onResize = () => inst.resize()
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(onResize)
+    if (chartRef.current) observer?.observe(chartRef.current)
     window.addEventListener('resize', onResize)
-    return () => { window.removeEventListener('resize', onResize); inst.dispose(); chartInstRef.current = null }
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', onResize)
+      inst.dispose()
+      chartInstRef.current = null
+    }
   }, [])
 
   const toggleType = (t: LevelType) => {
-    setActiveTypes(prev => {
-      const next = new Set(prev)
+    updateViewState(current => {
+      const next = new Set(current.activeTypes)
       if (next.has(t)) next.delete(t)
       else next.add(t)
-      return next
+      return { ...current, activeTypes: next }
     })
   }
 
@@ -520,8 +678,7 @@ export function AnalysisKChart({
     visibleDateRangeRef.current = nextRange
     activeRangePresetRef.current = preset
     zoomRangeRef.current = nextZoom
-    setVisibleDateRange(nextRange)
-    setActiveRangePreset(preset)
+    updateViewState(previous => ({ ...previous, visibleDateRange: nextRange, activeRangePreset: preset }))
     chartInstRef.current?.dispatchAction({ type: 'dataZoom', ...nextZoom })
   }
 
@@ -642,7 +799,7 @@ export function AnalysisKChart({
               {([1, 2, 3] as const).map(r => (
                 <button
                   key={r}
-                  onClick={() => setPivotRank(r)}
+                  onClick={() => updateViewState(previous => ({ ...previous, pivotRank: r }))}
                   title={r === 1 ? 'P + R1/S1(3 个)' : r === 2 ? '到 R2/S2(5 个)' : '全档 R3/S3(7 个)'}
                   className={`h-6 px-2 rounded-md text-[10px] font-mono border transition-all ${
                     pivotRank === r

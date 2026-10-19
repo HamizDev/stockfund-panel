@@ -6,6 +6,7 @@ import { ArrowDownRight, ArrowUpRight, BarChart3, BellRing, Database, Flame, Gau
 import { SectionTitle, KpiCell } from '@/components/dashboard/Primitives'
 import { MarketBoardTabs } from '@/components/dashboard/MarketBoardTabs'
 import { GlobalIndustryPanel } from '@/custom/global_markets/GlobalIndustryPanel'
+import { MacroReferencePanel } from '@/custom/global_markets/MacroReferencePanel'
 import { storage } from '@/lib/storage'
 import { DatePicker } from '@/components/DatePicker'
 import { api, type DashboardDataSummary, type DashboardInit, type MarketSnapshotRow, type OverviewDimensionRankItem, type OverviewMarket, type AlertEvent } from '@/lib/api'
@@ -901,6 +902,7 @@ function ChinaDashboard() {
       </div>
 
       <GlobalIndustryPanel />
+      <MacroReferencePanel market="cn" />
       <div className="grid grid-cols-1 gap-1.5 xl:grid-cols-[minmax(0,1fr)_20rem]">
         <main className="min-w-0 space-y-1.5">
           <div className="grid grid-cols-1 gap-1.5 lg:grid-cols-3">

@@ -1,7 +1,7 @@
 export type JevosServiceStatus = 'starting' | 'ready' | 'offline' | 'not_ready' | 'invalid_response'
 
 export type JevosReviewLabel =
-  | 'positive_clue' | 'risk_clue' | 'mixed' | 'unclear'
+  | 'positive_clue' | 'risk_clue' | 'neutral' | 'mixed' | 'unclear'
   | 'support' | 'wait' | 'conflict' | 'insufficient'
 
 export interface JevosReview {
@@ -16,6 +16,11 @@ export interface JevosReview {
   original_signal: string | null
   probabilities: Record<string, number>
   related_names: string[]
+  method?: 'noul-v1' | 'choice-v2'
+  confidence?: number | null
+  tentative?: boolean
+  reason?: string
+  evidence?: string[]
 }
 
 export interface JevosStatus {

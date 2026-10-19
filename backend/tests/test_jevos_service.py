@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 import app.custom.jevos.routes as jevos_routes
 import app.custom.jevos.service as jevos_service
-from app.custom.jevos.client import JevosError, ModelInfo
+from app.custom.jevos.client import ChoiceResult, JevosError, ModelInfo
 
 _FINGERPRINT_A = "a" * 64
 _FINGERPRINT_B = "b" * 64
@@ -73,6 +73,15 @@ class FakeClient:
     def set_identity(self, identity: ModelInfo) -> None:
         with self._lock:
             self.identity = identity
+
+    def choose(self, state, questions, identity):
+        self.judge(state, {}, identity)
+        with self._lock:
+            self.judgements[-1]['questions'] = copy.deepcopy(questions)
+        return {
+            'direction': ChoiceResult('positive', {'positive': .9, 'negative': .02, 'neutral': .03, 'mixed': .03, 'uncertain': .02}, .875),
+            'evidence': ChoiceResult('e0', {key: float(key == 'e0') for key in questions['evidence']['criteria']}, 1.0),
+        }
 
     def fail_next_judge(self, error: JevosError) -> None:
         with self._lock:
@@ -167,21 +176,6 @@ def _protected_files(data_dir: Path) -> tuple[Path, bytes, Path, bytes]:
 @pytest.mark.parametrize(
     ("values", "expected"),
     [
-        ({"positive": 0.8, "risk": 0.25}, "positive_clue"),
-        ({"positive": 0.8, "risk": 0.8}, "mixed"),
-        ({"positive": 0.5, "risk": 0.8}, "risk_clue"),
-        ({"positive": 0.5001, "risk": 0.8}, "unclear"),
-        ({"positive": 0.8, "risk": 0.2501}, "unclear"),
-        ({"positive": 0.7999, "risk": 0.1}, "unclear"),
-    ],
-)
-def test_news_label_uses_conservative_inclusive_thresholds(values: dict, expected: str):
-    assert jevos_service.news_label(values) == expected
-
-
-@pytest.mark.parametrize(
-    ("values", "expected"),
-    [
         ({"supports_signal": 1, "conflict": 1, "sufficient": 0.2}, "insufficient"),
         ({"supports_signal": 0.1, "conflict": 0.8, "sufficient": 0.21}, "conflict"),
         ({"supports_signal": 0.8, "conflict": 0.2, "sufficient": 0.8}, "support"),
@@ -262,6 +256,7 @@ def _cached_review(index: int) -> tuple[str, dict]:
         label="unclear",
         original_signal=None,
         probabilities={"positive": 0.4, "risk": 0.4, "material": 0.4},
+        method="choice-v2",
     )
     return key, review.model_dump()
 
@@ -304,7 +299,7 @@ def test_persisted_cache_hit_after_restart_does_not_repeat_inference(tmp_path: P
     row = _wait_news(first, "article-1")
     _wait_persisted(first, row)
     first.stop()
-    assert len(client.judgements) == 1
+    assert len(client.judgements) == 2
 
     second = make_service(tmp_path, client)
     _start_ready(second)
@@ -312,7 +307,7 @@ def test_persisted_cache_hit_after_restart_does_not_repeat_inference(tmp_path: P
 
     assert second.snapshot()["queued"] == 0
     assert second.snapshot()["news"]["article-1"]["fingerprint"] == _FINGERPRINT_A
-    assert len(client.judgements) == 1
+    assert len(client.judgements) == 2
 
 
 def test_news_content_association_and_model_changes_recompute(tmp_path: Path, make_service):
@@ -326,18 +321,18 @@ def test_news_content_association_and_model_changes_recompute(tmp_path: Path, ma
     service.offer_news([item], ["BTC-USDT-SWAP"])
     _wait_until(lambda: service.snapshot()["queued"] == 0)
     assert service.snapshot()["queued"] == 0
-    assert len(client.judgements) == 1
+    assert len(client.judgements) == 2
 
     changed_content = _news(title="A different policy report")
     service.offer_news([changed_content], ["BTC-USDT-SWAP"])
     second = _wait_news(service, "article-1", lambda row: row["input_key"] != first["input_key"])
-    assert len(client.judgements) == 2
+    assert len(client.judgements) == 4
 
     changed_association = _news(title="A different policy report", symbol="ETH-USDT-SWAP", name="Ethereum")
     service.offer_news([changed_association], ["ETH-USDT-SWAP"])
     third = _wait_news(service, "article-1", lambda row: row["input_key"] != second["input_key"])
     assert third["related_names"] == ["Ethereum"]
-    assert len(client.judgements) == 3
+    assert len(client.judgements) == 6
 
     client.set_identity(_MODEL_B)
     with service.condition:
@@ -352,7 +347,39 @@ def test_news_content_association_and_model_changes_recompute(tmp_path: Path, ma
     )
 
     assert fourth["model"] == "jevos-v5"
-    assert len(client.judgements) == 4
+    assert len(client.judgements) == 8
+
+
+def test_cached_first_batch_does_not_starve_later_news(tmp_path: Path, make_service):
+    client = FakeClient()
+    service = make_service(tmp_path, client)
+    _start_ready(service)
+    items = [_news(identifier=f'next-{index}') for index in range(jevos_service.MAX_NEWS + 2)]
+    service.offer_news(items, [])
+    _wait_until(lambda: service.snapshot()['queued'] == 0)
+    assert len(service.snapshot()['news']) == jevos_service.MAX_NEWS
+    service.offer_news(items, [])
+    _wait_news(service, items[-1]['id'])
+    _wait_until(lambda: service.snapshot()['queued'] == 0)
+    assert len(client.judgements) == len(items) * 2
+    service.offer_news(items, [])
+    assert service.snapshot()['queued'] == 0
+
+
+def test_news_rule_upgrade_discards_only_old_news_cache(tmp_path: Path, make_service):
+    key, news = _cached_review(1)
+    news['method'] = 'noul-v1'
+    strategy_key = 'd' * 64
+    strategy = {**news, 'kind': 'strategy', 'id': 'bot-1', 'input_key': strategy_key,
+                'label': 'support', 'original_signal': 'long'}
+    cache = tmp_path / 'jevos' / 'advisories.json'
+    cache.parent.mkdir()
+    cache.write_text(json.dumps({'version': jevos_service.VERSION, 'records': {key: news, strategy_key: strategy},
+        'latest': {'news': {news['id']: key}, 'strategy': {'bot-1': strategy_key}}}), encoding='utf-8')
+    service = make_service(tmp_path, FakeClient())
+    assert key not in service.records
+    assert service.records[strategy_key]['original_signal'] == 'long'
+    assert service.latest == {'news': {}, 'strategy': {'bot-1': strategy_key}}
 
 
 def test_offline_service_keeps_news_and_ledger_untouched(tmp_path: Path, make_service):

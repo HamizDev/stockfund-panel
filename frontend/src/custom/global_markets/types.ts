@@ -164,7 +164,6 @@ export interface GlobalSnapshotState {
   stale: boolean
   error: string | null
 }
-
 export type IndustryMode = 'auto' | 'cn' | 'us'
 export interface GlobalIndustryResponse {
   market: 'cn' | 'us'
@@ -183,4 +182,34 @@ export interface GlobalIndustryResponse {
   themes: { id: string; name: string; note: string; change_pct: number | null; covered: number; total: number;
     members: { symbol: string; name: string; price: number | null; change_pct: number | null; quote_at_ms: number | null;
       quote_date: string | null; basis: 'source_quote' | 'daily_reference' | 'source_reported_date'; included: boolean }[] }[]
+}
+export type MacroMarket = 'cn' | 'us'
+export interface EtfShareSnapshot {
+  symbol: string
+  name: string
+  date: string | null
+  shares_10k: number | null
+  exchange: 'SH' | 'SZ'
+  source: string
+  source_url: string
+  fetched_at_ms: number | null
+  cached: boolean
+  stale: boolean
+  error: string | null
+}
+export interface MacroReference {
+  market: MacroMarket
+  currency: 'CNY' | 'USD'
+  date: string
+  previous_date: string | null
+  unit: 'percent'
+  frequency: 'business_daily'
+  items: { id: string; label: string; value: number | null; previous_value: number | null; change_bp: number | null }[]
+  spread_bp: number | null
+  source: string
+  source_url: string
+  fetched_at_ms: number
+  cached: boolean
+  stale: boolean
+  error: string | null
 }

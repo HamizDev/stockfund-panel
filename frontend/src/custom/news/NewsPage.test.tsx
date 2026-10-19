@@ -13,6 +13,7 @@ const state = vi.hoisted(() => ({
   data: {} as NewsFeedResponse,
   jevosStatus: null as null | Record<string, unknown>,
   refreshes: [] as boolean[], analyses: [] as string[], directionStarts: [] as string[], directionPolls: [] as string[],
+  jevosStatusCalls: 0,
   directionStartResult: {} as { id: string; status: string; total: number; completed: number; error: string | null; model: string; reasoning_effort: string; cache_hit: boolean },
   directionJobResult: {} as { id: string; status: string; total: number; completed: number; error: string | null; model: string; reasoning_effort: string; cache_hit: boolean },
   busy: false, feedError: '', directionPollError: 0,
@@ -23,7 +24,7 @@ vi.mock('@/lib/api', () => {
     constructor(message: string, readonly status: number) { super(message) }
   }
   return { ApiError: MockApiError, api: {
-  jevosStatus: async () => state.jevosStatus,
+  jevosStatus: async () => { state.jevosStatusCalls += 1; return state.jevosStatus },
   newsFeed: async (refresh = false) => {
     state.refreshes.push(refresh)
     if (!refresh && state.feedError) throw new Error(state.feedError)
@@ -54,7 +55,7 @@ let client: QueryClient
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   sessionStorage.clear()
-  state.refreshes = []; state.analyses = []; state.directionStarts = []; state.directionPolls = []; state.busy = false; state.feedError = ''; state.directionPollError = 0
+  state.refreshes = []; state.analyses = []; state.directionStarts = []; state.directionPolls = []; state.jevosStatusCalls = 0; state.busy = false; state.feedError = ''; state.directionPollError = 0
   state.jevosStatus = { mode: 'shadow', status: 'offline', model: null, fingerprint: null, last_check_ms: null, queued: 0, completed: 0, news: {}, strategies: {}, strategy_history: [] }
   state.directionStartResult = { id: 'direction-job-1', status: 'running', total: 240, completed: 0, error: null, model: 'gpt-6-luna', reasoning_effort: 'high', cache_hit: false }
   state.directionJobResult = { ...state.directionStartResult }
@@ -88,6 +89,11 @@ function button(label: string) {
   if (!el) throw new Error(`Missing ${label}`)
   return el
 }
+function directionBadge(row = 0) {
+  const badge = host.querySelectorAll('article')[row]?.querySelector('[aria-label="快讯方向"]')
+  if (!badge) throw new Error(`Missing news direction badge for row ${row}`)
+  return badge
+}
 async function click(label: string) { await act(async () => button(label).click()); await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)) }) }
 async function chooseDirectionEffort(effort: 'high' | 'max') {
   const select = host.querySelector<HTMLSelectElement>('select[aria-label="AI方向推理档位"]')
@@ -106,6 +112,12 @@ it('renders source failure independently, original links and explicit model acti
   expect(host.querySelector('a[href="https://www.cls.cn/detail/123"]')?.getAttribute('rel')).toContain('noreferrer')
   expect(state.analyses).toEqual([])
   expect(state.directionStarts).toEqual([])
+  expect(directionBadge(0).textContent).toBe('待判断')
+  expect(directionBadge(0).getAttribute('title')).toContain('正向词：回购')
+  expect(directionBadge(1).textContent).toBe('待判断')
+  expect(directionBadge(1).getAttribute('title')).toContain('负向词：处罚')
+  expect(host.textContent).not.toContain('中性')
+  expect(state.jevosStatusCalls).toBe(1)
   expect(sessionStorage.getItem('stockfund.news-direction-job.v1')).toBeNull()
 })
 
@@ -124,10 +136,85 @@ it('adds a Jevos opinion only to its matching news row and keeps the existing fe
 
   const rows = host.querySelectorAll('article')
   expect(rows).toHaveLength(2)
-  expect(rows[0].textContent).toContain('Jevos 初筛 · 正面线索')
+  expect(rows[0].textContent).toContain('Jevos 初筛')
+  expect(directionBadge(0).textContent).toBe('偏利好 · Jevos 初筛')
   expect(rows[0].textContent).toContain('关注 / 登记持仓')
+  expect(directionBadge(1).textContent).toBe('待判断')
   expect(rows[1].textContent).not.toContain('Jevos 初筛')
   expect(host.textContent).toContain('公司遭处罚')
+})
+
+it('uses Jevos mixed and unclear news labels in the card header', async () => {
+  const firstId = '1'.repeat(24)
+  const secondId = '2'.repeat(24)
+  const review = (id: string, label: 'mixed' | 'unclear') => ({
+    kind: 'news' as const, id, input_key: 'a'.repeat(64), model: 'jevos-v5', fingerprint: 'b'.repeat(64),
+    generated_at_ms: 1_800_000_000_000, source_at_ms: null, label, original_signal: null,
+    probabilities: { positive: 0.45, risk: 0.4, material: 0.8 }, related_names: [],
+  })
+  state.jevosStatus = {
+    mode: 'shadow', status: 'ready', model: 'jevos-v5', fingerprint: 'b'.repeat(64), last_check_ms: 1_800_000_000_000,
+    queued: 0, completed: 2, strategies: {}, strategy_history: [],
+    news: { [firstId]: review(firstId, 'mixed'), [secondId]: review(secondId, 'unclear') },
+  }
+  await render()
+
+  expect(directionBadge(0).textContent).toBe('正负混合 · Jevos 初筛')
+  expect(directionBadge(0).className).toContain('amber')
+  expect(directionBadge(0).getAttribute('title')).toContain('展开查看概率与详情')
+  expect(directionBadge(0).getAttribute('title')).not.toContain('positive')
+  expect(directionBadge(1).textContent).toBe('信息不足 · Jevos 初筛')
+  expect(directionBadge(1).getAttribute('title')).toContain('信息不足')
+  expect(directionBadge(1).textContent).not.toContain('中性')
+})
+
+it('shows tentative Jevos direction with its source excerpt and maps model neutral explicitly', async () => {
+  const firstId = '1'.repeat(24)
+  const secondId = '2'.repeat(24)
+  const review = (id: string, fields: Record<string, unknown>) => ({
+    kind: 'news' as const, id, input_key: 'a'.repeat(64), model: 'jevos-v5', fingerprint: 'b'.repeat(64),
+    generated_at_ms: 1_800_000_000_000, source_at_ms: null, label: 'positive_clue', original_signal: null,
+    probabilities: { positive: 0.45, negative: 0.1, neutral: 0.05, mixed: 0.1, uncertain: 0.3 }, related_names: [],
+    ...fields,
+  })
+  state.jevosStatus = {
+    mode: 'shadow', status: 'ready', model: 'jevos-v5', fingerprint: 'b'.repeat(64), last_check_ms: 1_800_000_000_000,
+    queued: 0, completed: 2, strategies: {}, strategy_history: [],
+    news: {
+      [firstId]: review(firstId, { label: 'risk_clue', tentative: true, reason: '模型选取的相关原文片段：公司受到行政处罚', evidence: ['公司受到行政处罚'] }),
+      [secondId]: review(secondId, { label: 'neutral', reason: '日常事项未见明确经营影响。' }),
+    },
+  }
+  await render()
+
+  expect(directionBadge(0).textContent).toBe('偏利空（较弱） · Jevos 初筛')
+  const firstRow = host.querySelectorAll('article')[0]
+  expect(firstRow?.querySelector('[aria-label="Jevos方向摘要"]')?.textContent)
+    .toContain('模型选取的相关原文片段：公司受到行政处罚')
+  expect(firstRow?.querySelector('details')?.textContent).toContain('公司受到行政处罚')
+  expect(directionBadge(1).textContent).toBe('中性 · Jevos 初筛')
+})
+
+it('keeps Luna uncertain ahead of a conflicting Jevos positive clue', async () => {
+  const id = '1'.repeat(24)
+  state.jevosStatus = {
+    mode: 'shadow', status: 'ready', model: 'jevos-v5', fingerprint: 'b'.repeat(64), last_check_ms: 1_800_000_000_000,
+    queued: 0, completed: 1, strategies: {}, strategy_history: [],
+    news: { [id]: {
+      kind: 'news', id, input_key: 'a'.repeat(64), model: 'jevos-v5', fingerprint: 'b'.repeat(64),
+      generated_at_ms: 1_800_000_000_000, source_at_ms: null, label: 'positive_clue', original_signal: null,
+      probabilities: { positive: 0.9, risk: 0.05, material: 0.8 }, related_names: [],
+    } },
+  }
+  state.data.items[0].ai_direction = {
+    status: 'complete', direction: 'uncertain', reason: '暂无充分证据判断方向。', evidence: [],
+    scope: 'unclear', model: 'gpt-6-luna', reasoning_effort: 'high', generated_at: `${beijingNewsDay()}T10:10:00+08:00`,
+  }
+  await render()
+
+  expect(directionBadge(0).textContent).toBe('信息不足 · Luna 判断')
+  expect(directionBadge(0).getAttribute('title')).toContain('暂无充分证据判断方向。')
+  expect(directionBadge(0).textContent).not.toContain('偏利好')
 })
 
 it('starts the selected Luna effort only after a button click and stores only job coordinates', async () => {
@@ -191,17 +278,21 @@ it('keeps polling and blocks duplicate starts after a temporary direction-job ne
   expect(interval?.(jobQuery)).toBe(2_000)
 })
 
-it('shows public AI direction details and labels the fallback as a word-list signal', async () => {
+it('shows public AI direction in the header while keeping the fallback word-list clue in its tooltip', async () => {
   state.data.items[0].ai_direction = {
     status: 'complete', direction: 'positive', reason: '回购公告提供公司层面的正向证据。', evidence: ['公告披露回购计划'],
     scope: 'company', model: 'gpt-6-luna', reasoning_effort: 'high', generated_at: `${beijingNewsDay()}T10:10:00+08:00`,
   }
   await render()
 
-  expect(host.textContent).toContain('AI 偏正向')
+  expect(directionBadge(0).textContent).toBe('偏利好 · Luna 判断')
+  const summary = host.querySelectorAll('article')[0]?.querySelector('[aria-label="AI方向摘要"]')
+  expect(summary?.textContent).toContain('公司 · 回购公告提供公司层面的正向证据。')
+  expect(host.querySelectorAll('article')[0]?.querySelector('details')?.hasAttribute('open')).toBe(false)
   expect(host.textContent).toContain('回购公告提供公司层面的正向证据。')
   expect(host.textContent).toContain('gpt-6-luna · high')
-  expect(host.querySelectorAll('article')[1]?.textContent).toContain('词表')
+  expect(directionBadge(1).textContent).toBe('待判断')
+  expect(directionBadge(1).getAttribute('title')).toContain('负向词：处罚')
 })
 
 it('labels an in-progress source check as cached', async () => {
@@ -239,7 +330,7 @@ it('refreshes the feed after a completed direction job and clears its session ma
   expect(state.directionStarts).toEqual(['high'])
   expect(state.refreshes).toEqual([false, false])
   expect(sessionStorage.getItem('stockfund.news-direction-job.v1')).toBeNull()
-  expect(host.textContent).toContain('AI 偏正向')
+  expect(directionBadge(0).textContent).toBe('偏利好 · Luna 判断')
 })
 
 it('returns to same-day cached query data without requesting the feed again', async () => {

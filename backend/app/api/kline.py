@@ -18,7 +18,7 @@ from app.market_time import cn_now, cn_today, in_continuous_session
 from app.price_limits import is_no_limit_day, is_risk_warning_name, parse_listing_date, price_limit_pct
 from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync, trading_day
-from app.services import minute_adjust
+from app.services import minute_adjust, minute_reference
 
 logger = logging.getLogger(__name__)
 
@@ -381,7 +381,12 @@ def _get_previous_closes(
     trade_dates: list[date],
     asset_type: str,
 ) -> dict[date, float | None]:
-    """Return the previous trading day's adjusted close for each session."""
+    """Use local closes only when they immediately precede the requested session.
+
+    A stale instrument partition must not masquerade as yesterday's close. A
+    holiday/suspension gap is resolved by the selected-instrument online lookup,
+    rather than guessing that every intervening weekday was a market holiday.
+    """
     if not trade_dates:
         return {}
     start = min(trade_dates) - timedelta(days=45)
@@ -409,8 +414,11 @@ def _get_previous_closes(
 
     result: dict[date, float | None] = {}
     for trade_date in trade_dates:
+        expected = trade_date - timedelta(days=1)
+        while expected.weekday() >= 5:
+            expected -= timedelta(days=1)
         result[trade_date] = next(
-            (close for daily_date, close in reversed(closes) if daily_date < trade_date),
+            (close for daily_date, close in reversed(closes) if daily_date == expected),
             None,
         )
     return result
@@ -1098,7 +1106,7 @@ def get_minute(
                 "source": "live" if not df.is_empty() else "none",
                 "asset_type": asset_type,
                 "price_limit": price_limit,
-                "prev_close": prev_close,
+                **minute_reference.resolve(repo, capset, symbol, trade_date, asset_type, df, prev_close),
             },
             pref_key="minute_batch_compress",
         )
@@ -1128,7 +1136,8 @@ def get_minute(
                     "symbol": symbol, "name": stock_name, "stock_info": stock_info,
                     "date": str(trade_date), "rows": live_df.to_dicts(),
                     "source": "live", "asset_type": asset_type,
-                    "price_limit": price_limit, "prev_close": prev_close,
+                    "price_limit": price_limit,
+                    **minute_reference.resolve(repo, capset, symbol, trade_date, asset_type, live_df, prev_close),
                 },
                 pref_key="minute_batch_compress",
             )
@@ -1162,7 +1171,7 @@ def get_minute(
                 "date": str(trade_date), "rows": df.to_dicts(), "source": "local",
                 "asset_type": asset_type,
                 "price_limit": price_limit,
-                "prev_close": prev_close,
+                **minute_reference.resolve(repo, capset, symbol, trade_date, asset_type, df, prev_close),
             },
             pref_key="minute_batch_compress",
         )
@@ -1184,7 +1193,7 @@ def get_minute(
             "source": "live" if not live_df.is_empty() else "none",
             "asset_type": asset_type,
             "price_limit": price_limit,
-            "prev_close": prev_close,
+            **minute_reference.resolve(repo, capset, symbol, trade_date, asset_type, live_df, prev_close),
         },
         pref_key="minute_batch_compress",
     )

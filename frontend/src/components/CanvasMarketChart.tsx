@@ -66,6 +66,7 @@ export interface CanvasMarketChartProps {
   formatTime?: (time: CanvasChartTime, includeYear?: boolean) => string
   extraSummary?: (barIndex: number) => string | null
   onBarClick?: (time: CanvasChartTime) => void
+  onPriceHover?: (price: number | null) => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
 }
 
@@ -78,6 +79,8 @@ interface ChartDimensions {
 interface HoverPoint {
   index: number
   y: number
+  contextKey: string
+  bars: readonly CanvasChartBar[]
 }
 
 const EMPTY_SERIES: readonly CanvasChartSeries[] = []
@@ -197,6 +200,7 @@ export function CanvasMarketChart({
   formatTime = defaultFormatTime,
   extraSummary,
   onBarClick,
+  onPriceHover,
   onPriceDoubleClick,
 }: CanvasMarketChartProps) {
   const hostRef = useRef<HTMLDivElement>(null)
@@ -210,6 +214,14 @@ export function CanvasMarketChart({
   const suppressNextClickRef = useRef(false)
   const plotRightRef = useRef(574)
   const wheelHandlerRef = useRef<(event: globalThis.WheelEvent) => void>(() => {})
+  const onPriceHoverRef = useRef(onPriceHover)
+  const lastPriceHoverRef = useRef<{
+    contextKey: string
+    bars: readonly CanvasChartBar[]
+    index: number | null
+    price: number | null
+  } | null>(null)
+  onPriceHoverRef.current = onPriceHover
   const seriesDefaultsRef = useRef(new Map<string, boolean>(series.map(item =>
     [item.id, item.visibleByDefault ?? true] as const)))
   const [dimensions, setDimensions] = useState<ChartDimensions>({ width: 640, height: safeHeight(height), pixelRatio: 1 })
@@ -315,7 +327,23 @@ export function CanvasMarketChart({
 
   useEffect(() => () => {
     if (pendingClickRef.current) window.clearTimeout(pendingClickRef.current.timer)
+    onPriceHoverRef.current?.(null)
   }, [])
+
+  useEffect(() => {
+    const hoveredBar = hover?.contextKey === contextKey && hover.bars === bars
+      ? bars[hover.index]
+      : undefined
+    const price = hoveredBar && Number.isFinite(hoveredBar.close) && hoveredBar.close > 0
+      ? hoveredBar.close
+      : null
+    const index = price == null ? null : hover?.index ?? null
+    const previous = lastPriceHoverRef.current
+    if (previous?.contextKey === contextKey && previous.bars === bars
+      && previous.index === index && Object.is(previous.price, price)) return
+    lastPriceHoverRef.current = { contextKey, bars, index, price }
+    onPriceHoverRef.current?.(price)
+  }, [bars, contextKey, hover])
 
   const timeIndex = useMemo(() => new Map(bars.map((bar, index) => [timeKey(bar.time), index])), [bars])
   const currentIndex = hover?.index ?? bars.length - 1
@@ -387,8 +415,11 @@ export function CanvasMarketChart({
       priceFormatter(priceRange.high - (priceSpan * step) / 4))
     const axisLineLabels = visiblePriceLines.filter(({ line }) => line.label != null)
       .map(({ line }) => line.label ?? '')
+    const linkedPriceLabel = typeof linkedPrice === 'number' && Number.isFinite(linkedPrice) && linkedPrice > 0
+      ? `分时价 ${priceFormatter(linkedPrice)}`
+      : null
     const axisLabels = [...axisTickLabels, ...axisLineLabels,
-      ...(typeof linkedPrice === 'number' && Number.isFinite(linkedPrice) && linkedPrice > 0 ? ['分时关联价格'] : [])]
+      ...(linkedPriceLabel ? [linkedPriceLabel] : [])]
     const widestAxisLabel = axisLabels.reduce((widest, label) => Math.max(widest, ctx.measureText(label).width), 0)
     const axisWidth = Math.max(66, Math.ceil(widestAxisLabel) + 12)
     right = Math.max(left + 1, width - Math.min(axisWidth, Math.max(1, width - left - 1)))
@@ -517,7 +548,7 @@ export function CanvasMarketChart({
       drawPriceLine(line.value, line.color ?? '#FACC15', line.label ?? '', line.dash ?? 'dashed', firstIndex, lastIndex)
     }
     if (typeof linkedPrice === 'number' && Number.isFinite(linkedPrice) && linkedPrice > 0) {
-      drawPriceLine(linkedPrice, '#60A5FA', '分时关联价格', 'dotted', 0, bars.length - 1)
+      drawPriceLine(linkedPrice, '#60A5FA', linkedPriceLabel ?? '', 'dotted', 0, bars.length - 1)
     }
 
     const markerOffsets = new Map<string, number>()
@@ -656,7 +687,7 @@ export function CanvasMarketChart({
       startIndex: Math.max(0, viewportRef.current.endIndex - viewportRef.current.visibleCount + 1),
       endIndex: Math.min(bars.length - 1, viewportRef.current.endIndex),
     })
-    setHover(relative == null ? null : { index: relative, y: point.y })
+    setHover(relative == null ? null : { index: relative, y: point.y, contextKey, bars })
   }
 
   const handlePointerUp = () => {

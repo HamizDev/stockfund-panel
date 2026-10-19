@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from app.indicators.levels import compute_levels, summarize_levels
 from app.market_time import cn_today
-from app.services import stock_reports
+from app.services import analysis_snapshot, stock_reports
 from app.services.ndjson_heartbeat import with_heartbeat
 from app.services.stock_analyzer import analyze_stock_stream
 
@@ -104,6 +104,29 @@ def _build_series(df: pl.DataFrame) -> dict:
     return out
 
 
+def _levels_payload(df: pl.DataFrame, symbol: str) -> dict:
+    if df.is_empty():
+        return {"levels": {key: [] for key in ("sr", "pivot", "extreme", "boll", "keltner_s",
+                "keltner_m", "keltner_l", "atr_stop", "gap", "fib", "round")},
+                "close": None, "summary": "无数据", "symbol": symbol, "dates": [], "series": {}}
+    levels = compute_levels(df)
+    close = float(df["close"][-1])
+    return {"levels": levels, "close": close, "summary": summarize_levels(levels, close),
+            "symbol": symbol, "dates": [str(d) for d in df["date"].to_list()],
+            "series": _build_series(df)}
+
+
+@router.get("/snapshot")
+def get_snapshot(
+    request: Request,
+    symbol: str = Query(..., pattern=r"^\d{6}\.(SH|SZ|BJ)$"),
+    days: int = Query(250, ge=30, le=500),
+):
+    frame, payload = analysis_snapshot.load_snapshot(
+        request.app.state.repo, getattr(request.app.state, "capabilities", None), symbol, days)
+    return {**payload, "analysis": _levels_payload(frame, symbol)}
+
+
 @router.get("/levels")
 def get_levels(
     request: Request,
@@ -125,26 +148,7 @@ def get_levels(
     start = end - timedelta(days=days * 2)
     # 按资产类型分流: ETF/指数走独立 enriched 存储, 股票保持原路径
     df = repo.get_daily_asset(repo.resolve_asset_type(symbol), symbol, start, end)
-    if df.is_empty():
-        return {"levels": {"sr": [], "pivot": [], "extreme": [],
-                           "boll": [], "keltner_s": [], "keltner_m": [], "keltner_l": [],
-                           "atr_stop": [], "gap": [], "fib": [], "round": []},
-                "close": None, "summary": "无数据", "symbol": symbol,
-                "dates": [], "series": {}}
-
-    levels = compute_levels(df)
-    close = float(df.tail(1)["close"][0]) if "close" in df.columns else None
-    # 日期 + 带状曲线序列(供前端画 Keltner/ATR/布林带曲线)
-    dates = df["date"].to_list()
-    series = _build_series(df)
-    return {
-        "levels": levels,
-        "close": close,
-        "summary": summarize_levels(levels, close),
-        "symbol": symbol,
-        "dates": [str(d) for d in dates],
-        "series": series,
-    }
+    return _levels_payload(df, symbol)
 
 
 class AnalyzeRequest(BaseModel):

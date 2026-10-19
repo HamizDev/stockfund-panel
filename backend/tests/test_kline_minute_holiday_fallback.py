@@ -23,6 +23,11 @@ from app.market_time import CN_TZ
 from app.services import preferences, trading_day
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
+
+@pytest.fixture(autouse=True)
+def isolate_reference_lookup(monkeypatch):
+    monkeypatch.setattr('app.services.minute_reference._online_daily', lambda *_: None)
+
 HOLIDAY = date(2026, 10, 1)          # 周四, 国庆休市
 LAST_SESSION = date(2026, 9, 30)      # 节前最后一个交易日
 MORNING = datetime(2026, 10, 1, 10, 0, tzinfo=CN_TZ)

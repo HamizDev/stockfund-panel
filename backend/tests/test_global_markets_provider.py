@@ -140,6 +140,22 @@ def test_malformed_search_rows_cannot_break_catalog(monkeypatch):
     assert provider.search("us", "ibm") == [{"symbol": "IBM", "name": "IBM", "market": "us", "kind": "stock"}]
 
 
+def test_us_search_deduplicates_ads_and_excludes_korean_common_shares(monkeypatch):
+    monkeypatch.setattr(provider, "_json", lambda *args: {"quotes": [
+        {"symbol": "SKHY", "quoteType": "EQUITY", "exchange": "NMS", "longname": "SK hynix Inc."},
+        {"symbol": "SKHY", "quoteType": "EQUITY", "exchange": "NMS", "longname": "SK Hynix"},
+        {"symbol": "000660.KS", "quoteType": "EQUITY", "exchange": "KSC", "longname": "SK hynix Inc."},
+    ]})
+    assert provider.search("us", "Hynix") == [{
+        "symbol": "SKHY", "name": "SK海力士（Nasdaq ADS）", "market": "us", "kind": "stock",  # noqa: RUF001
+    }]
+
+
+def test_empty_source_search_does_not_issue_request(monkeypatch):
+    monkeypatch.setattr(provider, "_json", lambda *args: pytest.fail("empty query must not call upstream"))
+    assert provider.search("us", "  ") == []
+
+
 def test_null_symbol_and_quote_containers_are_safe_upstream_errors():
     for is_symbol in (True, False):
         payload = fixture()

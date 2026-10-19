@@ -6,6 +6,7 @@ import { EChartsCandlestick, type OHLC } from './EChartsCandlestick'
 
 const chart = vi.hoisted(() => ({
   handlers: {} as Record<string, (event?: any) => void>,
+  state: { zoomRange: { start: 0, end: 100 } },
   setOption: vi.fn(),
   on: vi.fn(),
   off: vi.fn(),
@@ -13,7 +14,7 @@ const chart = vi.hoisted(() => ({
   resize: vi.fn(),
   dispose: vi.fn(),
   getZr: () => ({ on: vi.fn(), off: vi.fn() }),
-  getOption: () => ({ dataZoom: [{ start: 0, end: 100 }] }),
+  getOption: () => ({ dataZoom: [chart.state.zoomRange] }),
   containPixel: () => false,
   convertFromPixel: () => [0, 0],
 }))
@@ -34,8 +35,14 @@ beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
   chart.handlers = {}
   chart.setOption.mockClear()
+  chart.dispatchAction.mockClear()
   chart.on.mockImplementation((name: string, callback: (event?: any) => void) => {
     chart.handlers[name] = callback
+  })
+  chart.dispatchAction.mockImplementation((action: any) => {
+    if (action?.type === 'dataZoom') {
+      chart.state.zoomRange = { start: action.start, end: action.end }
+    }
   })
   host = document.createElement('div')
   document.body.appendChild(host)
@@ -112,4 +119,65 @@ it('切股后鼠标未离开图表, 竖虚线重新命中即恢复「至今/周�
   // 移出图表区 → 重新收起
   await act(async () => { surface.dispatchEvent(new MouseEvent('mouseleave')) })
   expect(host.textContent).not.toContain('至今')
+})
+
+it('联动价只更新K线价线, 不重建主图或重派缩放, 并保留其他价线和标记', async () => {
+  const marker = { date: DAYS[10], kind: 'buy' as const, label: 'BUY-MARK' }
+  const markers = [marker]
+  const priceLines = [{ value: 12, label: '支撑', color: '#38bdf8' }]
+  const baseData = rows(10)
+  const render = async (linkedPrice: number | null, data = baseData) => act(async () => root.render(
+    <EChartsCandlestick
+      data={data}
+      markers={markers}
+      priceLines={priceLines}
+      linkedPrice={linkedPrice}
+      height={400}
+      showInfoBar={false}
+      visibleBars="all"
+      activeIndicators={['vol']}
+    />,
+  ))
+  const fullOptions = () => chart.setOption.mock.calls.filter(([, replace]) => replace === true)
+  const candleSeries = (option: any) => option?.series?.find((series: any) =>
+    series.id === 'daily-candles' || series.name === 'K')
+
+  await render(null)
+  const initialFullOptionCount = fullOptions().length
+  const initialOption = fullOptions().at(-1)?.[0]
+  expect(candleSeries(initialOption)?.markLine.data).toHaveLength(1)
+  expect(JSON.stringify(candleSeries(initialOption)?.markPoint)).toContain('BUY-MARK')
+
+  // Simulate a user-selected zoom and let the chart's normal handler remember it.
+  chart.state.zoomRange = { start: 35, end: 72 }
+  await act(async () => { chart.handlers.dataZoom?.() })
+  const userZoom = { ...chart.state.zoomRange }
+  const zoomActionsBeforeHover = chart.dispatchAction.mock.calls.filter(([action]) => action?.type === 'dataZoom').length
+
+  await render(10.5)
+  expect(fullOptions()).toHaveLength(initialFullOptionCount)
+  expect(chart.dispatchAction.mock.calls.filter(([action]) => action?.type === 'dataZoom')).toHaveLength(zoomActionsBeforeHover)
+  expect(chart.state.zoomRange).toEqual(userZoom)
+  const linkedPatch = chart.setOption.mock.calls.at(-1)
+  expect(linkedPatch?.[1]).toEqual({ lazyUpdate: true })
+  expect(linkedPatch?.[0].series).toHaveLength(1)
+  expect(linkedPatch?.[0].series[0]).toMatchObject({ id: 'daily-candles' })
+  expect(linkedPatch?.[0].series[0].data).toBeUndefined()
+  expect(linkedPatch?.[0].series[0].markLine.data).toHaveLength(2)
+  expect(linkedPatch?.[0].series[0].markLine.data[0].yAxis).toBe(12)
+  expect(linkedPatch?.[0].series[0].markLine.data[1].yAxis).toBe(10.5)
+  expect(JSON.stringify(linkedPatch?.[0].series[0].markLine.data[0])).toContain('支撑')
+
+  await render(null)
+  const clearPatch = chart.setOption.mock.calls.at(-1)
+  expect(fullOptions()).toHaveLength(initialFullOptionCount)
+  expect(clearPatch?.[0].series[0].markLine.data).toHaveLength(1)
+  expect(clearPatch?.[0].series[0].markLine.data[0].yAxis).toBe(12)
+
+  // A normal data change still rebuilds the chart, including the currently linked guide and marker.
+  await render(10.8, rows(20))
+  const rebuiltOption = fullOptions().at(-1)?.[0]
+  expect(fullOptions()).toHaveLength(initialFullOptionCount + 1)
+  expect(candleSeries(rebuiltOption)?.markLine.data.map((item: any) => item.yAxis)).toEqual([12, 10.8])
+  expect(JSON.stringify(candleSeries(rebuiltOption)?.markPoint)).toContain('BUY-MARK')
 })

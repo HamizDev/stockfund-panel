@@ -9,6 +9,7 @@ import { usePageState } from '@/lib/usePageState'
 import { dailyChartRows } from '@/lib/dailyChartRows'
 import { EChartsCandlestick } from '@/components/EChartsCandlestick'
 import { EChartsIntraday } from '@/components/EChartsIntraday'
+import { INSTRUMENT_VIEW_GC_MS, useInstrumentViewCache } from '@/lib/useInstrumentViewCache'
 
 function defaultRange() {
   const end = cnToday()
@@ -108,6 +109,7 @@ export function Indices() {
   }))
 
   const selectedSymbol = validSymbolParam || selected
+  useInstrumentViewCache('indices', selectedSymbol)
   const previousSymbol = useRef(selectedSymbol)
 
   useEffect(() => {
@@ -128,6 +130,8 @@ export function Indices() {
   const daily = useQuery({
     queryKey: QK.indexDaily(selectedSymbol, range.start, dailyEnd),
     queryFn: () => api.indexDaily(selectedSymbol, 180, { start: range.start, end: dailyEnd }),
+    meta: { instrumentView: 'indices', symbol: selectedSymbol },
+    gcTime: INSTRUMENT_VIEW_GC_MS,
     enabled: !!selectedSymbol,
     refetchInterval: wantsFollowLatest ? marketSessionRefetchInterval(INDEX_REFRESH_MS) : false,
   })

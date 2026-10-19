@@ -390,6 +390,9 @@ const COMPACT_THRESHOLD = 60
 
 /** 加入自选日竖线颜色 (蓝色虚线, 与同花顺的标注观感一致) */
 const ADDED_DATE_COLOR = '#3B82F6'
+const DAILY_CANDLE_SERIES_ID = 'daily-candles'
+const EMPTY_ACTIVE_INDICATORS: string[] = []
+const DEFAULT_VOLUME_COMPARE: VolumeCompareConfig = { enabled: true, days: 1 }
 
 /** 子图上方信息栏高度 (px) */
 const INFO_BAR_H = 16
@@ -486,6 +489,64 @@ function buildSubInfoGraphics(
   })
 
   return graphics
+}
+
+function buildMarkLineData(
+  priceLines: ChartPriceLine[] | undefined,
+  dateIndexMap: Map<string, number>,
+  linkedPrice: number | null | undefined,
+): any[] {
+  const markLineData: any[] = (priceLines ?? [])
+    .filter(line => Number.isFinite(line.value))
+    .map(line => {
+      const lineStyle = {
+        color: line.color ?? CT().text,
+        type: 'dashed' as const,
+        width: 1,
+        opacity: 0.92,
+      }
+      const label = {
+        show: !!line.label,
+        formatter: line.label ?? '',
+        position: 'insideEndTop' as const,
+        color: line.color ?? CT().text,
+        backgroundColor: CT().tooltipBg,
+        borderRadius: 4,
+        padding: [2, 6],
+        fontSize: 10,
+        fontFamily: 'JetBrains Mono, monospace',
+      }
+      if (line.start && line.end && dateIndexMap.has(line.start) && dateIndexMap.has(line.end)) {
+        return [
+          { xAxis: line.start, yAxis: line.value },
+          { xAxis: line.end, yAxis: line.value, lineStyle, label, symbol: 'none' },
+        ]
+      }
+      return { yAxis: line.value, lineStyle, label, symbol: 'none' }
+    })
+
+  if (linkedPrice != null) {
+    markLineData.push({
+      yAxis: linkedPrice,
+      lineStyle: { color: '#3B82F6', type: 'dashed', width: 1, opacity: 0.7 },
+      label: {
+        show: true,
+        formatter: chartPrice(linkedPrice),
+        position: 'insideEndTop',
+        color: '#3B82F6',
+        fontSize: 10,
+        fontFamily: 'JetBrains Mono, monospace',
+        backgroundColor: CT().tooltipBg,
+        borderColor: '#3B82F6',
+        borderWidth: 1,
+        padding: [1, 4],
+        borderRadius: 2,
+      },
+      symbol: 'none',
+    })
+  }
+
+  return markLineData
 }
 
 function buildOption(
@@ -646,58 +707,10 @@ function buildOption(
       { xAxis: r.end },
     ]))
 
-  const markLineData: any[] = (priceLines ?? [])
-    .filter(line => Number.isFinite(line.value))
-    .map(line => {
-      const lineStyle = {
-        color: line.color ?? CT().text,
-        type: 'dashed' as const,
-        width: 1,
-        opacity: 0.92,
-      }
-      const label = {
-        show: !!line.label,
-        formatter: line.label ?? '',
-        position: 'insideEndTop' as const,
-        color: line.color ?? CT().text,
-        backgroundColor: CT().tooltipBg,
-        borderRadius: 4,
-        padding: [2, 6],
-        fontSize: 10,
-        fontFamily: 'JetBrains Mono, monospace',
-      }
-      if (line.start && line.end && dateIndexMap.has(line.start) && dateIndexMap.has(line.end)) {
-        return [
-          { xAxis: line.start, yAxis: line.value },
-          { xAxis: line.end, yAxis: line.value, lineStyle, label, symbol: 'none' },
-        ]
-      }
-      return { yAxis: line.value, lineStyle, label, symbol: 'none' }
-    })
-
-  if (linkedPrice != null) {
-    markLineData.push({
-      yAxis: linkedPrice,
-      lineStyle: { color: '#3B82F6', type: 'dashed', width: 1, opacity: 0.7 },
-      label: {
-        show: true,
-        formatter: chartPrice(linkedPrice),
-        position: 'insideEndTop',
-        color: '#3B82F6',
-        fontSize: 10,
-        fontFamily: 'JetBrains Mono, monospace',
-        backgroundColor: CT().tooltipBg,
-        borderColor: '#3B82F6',
-        borderWidth: 1,
-        padding: [1, 4],
-        borderRadius: 2,
-      },
-      symbol: 'none',
-    })
-  }
+  const markLineData = buildMarkLineData(priceLines, dateIndexMap, linkedPrice)
 
   series.push({
-    name: 'K', type: 'candlestick', data: candleData,
+    id: DAILY_CANDLE_SERIES_ID, name: 'K', type: 'candlestick', data: candleData,
     animation: false,
     itemStyle: {
       color: THEME.bull, color0: THEME.bear,
@@ -915,13 +928,16 @@ export function EChartsCandlestick({
   onDateClick,
   onPriceDoubleClick,
   visibleBars = 60,
-  activeIndicators = [],
-  volumeCompare = { enabled: true, days: 1 },
+  activeIndicators = EMPTY_ACTIVE_INDICATORS,
+  volumeCompare = DEFAULT_VOLUME_COMPARE,
   addedDate,
 }: Props) {
   const hoverSurfaceRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
+  const linkedPriceRef = useRef(linkedPrice)
+  linkedPriceRef.current = linkedPrice
+  const appliedLinkedPriceRef = useRef<number | null | undefined>(undefined)
   const dataRef = useRef(data)
   dataRef.current = data
   const onDateClickRef = useRef(onDateClick)
@@ -930,6 +946,12 @@ export function EChartsCandlestick({
   onPriceDoubleClickRef.current = onPriceDoubleClick
   // 主题: buildOption/信息栏内部通过 CT() 动态取调色板, 这里只负责切换时触发重建
   const theme = useTheme()
+  const activeIndicatorsKey = JSON.stringify(activeIndicators)
+  const stableActiveIndicators = useMemo(() => activeIndicators, [activeIndicatorsKey])
+  const stableVolumeCompare = useMemo(
+    () => volumeCompare,
+    [volumeCompare.enabled, volumeCompare.days],
+  )
 
   // --- 全部用 ref，避免高频交互触发 React 重渲染 ---
   const infoIdxRef = useRef<number>(data.length - 1)
@@ -943,10 +965,10 @@ export function EChartsCandlestick({
   const hoverActiveRef = useRef(false)
 
   // 需要在闭包中访问最新值的变量 — 先声明占位，后面赋值
-  const activeIndicatorsRef = useRef(activeIndicators)
-  activeIndicatorsRef.current = activeIndicators
-  const volumeCompareRef = useRef(volumeCompare)
-  volumeCompareRef.current = volumeCompare
+  const activeIndicatorsRef = useRef(stableActiveIndicators)
+  activeIndicatorsRef.current = stableActiveIndicators
+  const volumeCompareRef = useRef(stableVolumeCompare)
+  volumeCompareRef.current = stableVolumeCompare
   const chartHeightRef = useRef(300)
   const subTotalHRef = useRef(0)
   const getInfoBarHTMLRef = useRef<() => string>(() => '')
@@ -974,7 +996,7 @@ export function EChartsCandlestick({
   }).current
 
   // 计算子图总高度
-  const activeSubDefs = activeIndicators
+  const activeSubDefs = stableActiveIndicators
     .map(key => SUB_CHARTS.find(s => s.key === key))
     .filter((d): d is SubChartDef => !!d)
 
@@ -996,6 +1018,8 @@ export function EChartsCandlestick({
     dates.forEach((d, i) => m.set(d, i))
     return m
   }, [dates])
+  const markLineInputsRef = useRef({ priceLines, dateIndexMap })
+  markLineInputsRef.current = { priceLines, dateIndexMap }
 
   // dataZoom 初始范围: 'all' = 显示整段数据, 否则取末尾 visibleBars 根
   const initialZoom = useMemo(() => {
@@ -1064,14 +1088,14 @@ export function EChartsCandlestick({
       if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${chartPrice(d.ma10, _symbol)}</span>`
       if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${chartPrice(d.ma20, _symbol)}</span>`
       if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${chartPrice(d.ma60, _symbol)}</span>`
-      if (d.boll_upper != null && activeIndicators.includes('boll')) {
+      if (d.boll_upper != null && stableActiveIndicators.includes('boll')) {
         html += `<span style="color:#E879F9">BOLL:${chartPrice(d.boll_upper, _symbol)}/${chartPrice(d.ma20, _symbol)}/${chartPrice(d.boll_lower, _symbol)}</span>`
       }
       html += `</div>`
     }
 
     return html
-  }, [data, stockInfo, showMA, activeIndicators])
+  }, [data, stockInfo, showMA, stableActiveIndicators])
   getInfoBarHTMLRef.current = getInfoBarHTML
 
   // data/symbol 变化时重置 infoIdx:
@@ -1281,14 +1305,15 @@ export function EChartsCandlestick({
       ranges,
       priceLines,
       showMA, compactRef.current,
-      activeIndicators, chartHeight,
+      stableActiveIndicators, chartHeight,
       infoIdxRef.current,
-      linkedPrice,
-      volumeCompare,
+      linkedPriceRef.current,
+      stableVolumeCompare,
       addedDate,
     )
 
     chart.setOption(option, true)
+    appliedLinkedPriceRef.current = linkedPriceRef.current
 
     // 恢复用户缩放位置
     const zoom = userZoomRef.current
@@ -1303,7 +1328,23 @@ export function EChartsCandlestick({
     if (infoEl) {
       infoEl.innerHTML = getInfoBarHTML()
     }
-  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, addedDate, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+  }, [data, markers, ranges, priceLines, showMA, showMarkersProp, stableActiveIndicators, stableVolumeCompare, addedDate, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+
+  useEffect(() => {
+    const chart = chartRef.current
+    const currentLinkedPrice = linkedPriceRef.current
+    if (!chart || Object.is(appliedLinkedPriceRef.current, currentLinkedPrice)) return
+
+    const { priceLines: currentPriceLines, dateIndexMap: currentDateIndexMap } = markLineInputsRef.current
+    const markLineData = buildMarkLineData(currentPriceLines, currentDateIndexMap, currentLinkedPrice)
+    chart.setOption({
+      series: [{
+        id: DAILY_CANDLE_SERIES_ID,
+        markLine: { silent: true, symbol: 'none', data: markLineData, animation: false },
+      }],
+    } as EChartsOption, { lazyUpdate: true })
+    appliedLinkedPriceRef.current = currentLinkedPrice
+  }, [linkedPrice])
 
   // 渲染信息栏容器 (内容由 JS 直接写入)
   const initialHTML = useMemo(() => {

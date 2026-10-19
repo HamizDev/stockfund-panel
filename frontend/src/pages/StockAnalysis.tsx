@@ -1,7 +1,7 @@
 import { chartPrice } from '@/lib/chartPrice'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, AlertTriangle } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { MarketRegionTabs } from '@/custom/global_markets/MarketRegionTabs'
@@ -11,13 +11,15 @@ import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { LastStockChip } from '@/components/LastStockChip'
 import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/stock-analysis/AnalysisKChart'
 import { AnalysisMinutePanel } from '@/components/stock-analysis/AnalysisMinutePanel'
+import { EtfSharesPanel } from '@/components/stock-analysis/EtfSharesPanel'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
 import { TechnicalSummary } from '@/components/research/TechnicalSummary'
-import { api } from '@/lib/api'
+import { api, type AnalysisSnapshot } from '@/lib/api'
 import { useLastStock } from '@/lib/useLastStock'
 import { usePageState } from '@/lib/usePageState'
 import { usePaperInstrumentNames } from '@/lib/usePaperInstrumentNames'
 import { QK } from '@/lib/queryKeys'
+import { useInstrumentViewCache, INSTRUMENT_VIEW_GC_MS } from '@/lib/useInstrumentViewCache'
 import { toast } from '@/components/Toast'
 import {
   startAnalysis, findTodayReport, useHistoryReports,
@@ -155,7 +157,7 @@ export function StockAnalysis() {
         </div>
 
         {/* 主体:左侧当前个股看板 + 右侧常驻历史报告 */}
-        <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_288px] gap-6 items-start">
+        <div className="grid grid-cols-1 min-[1720px]:grid-cols-[minmax(0,1fr)_288px] gap-6 items-start">
           <div className="min-w-0">
             {!symbol ? (
               <EmptyState
@@ -216,6 +218,19 @@ function isAnalysisView(value: unknown): value is AnalysisView {
 export function StockAnalysisBoard({ symbol }: { symbol: string }) {
   const [view, setView] = usePageState<AnalysisView>('stockAnalysis', () => ({ symbol, date: null, view: 'intraday' }), isAnalysisView)
   const selectedDate = view.symbol === symbol ? view.date : null
+  const selectedView = view.symbol === symbol ? view.view : 'intraday'
+  const linkContext = `${symbol}:${selectedDate ?? 'latest'}:${selectedView}`
+  const [priceLink, setPriceLink] = useState<{ context: string; price: number } | null>(null)
+  const linkedPrice = priceLink?.context === linkContext ? priceLink.price : null
+  const onPriceHover = useCallback((price: number | null) => {
+    const valid = price != null && Number.isFinite(price) && price > 0
+    setPriceLink(previous => !valid ? previous == null ? previous : null
+      : previous?.context === linkContext && previous.price === price ? previous : { context: linkContext, price })
+  }, [linkContext])
+  useInstrumentViewCache('analysis', symbol, selectedDate)
+  useEffect(() => {
+    if (view.symbol !== symbol) setView({ symbol, date: null, view: 'intraday' })
+  }, [symbol, view.symbol, setView])
   const metadata = useQuery({
     queryKey: QK.instrumentSearch(symbol.slice(0, 6), 'stock,etf,index'),
     queryFn: () => api.instrumentSearch(symbol.slice(0, 6), 20, 'stock,etf,index'),
@@ -227,51 +242,68 @@ export function StockAnalysisBoard({ symbol }: { symbol: string }) {
   const assetType = foundType === 'stock' || foundType === 'etf' || foundType === 'index' ? foundType : undefined
   const selectDate = (date: string | null) => setView(previous => ({ ...previous, symbol, date }))
   const selectView = (next: 'intraday' | 'candles') => setView({ symbol, date: selectedDate, view: next })
-  return <div className="grid min-w-0 grid-cols-1 items-start gap-4 min-[1800px]:grid-cols-2">
-    <DailyAnalysisCard symbol={symbol} onDateClick={selectDate} />
+  return <section aria-label="日K与分时分析" className="grid min-w-0 grid-cols-1 items-start gap-4 xl:grid-cols-2">
+    <DailyAnalysisCard symbol={symbol} onDateClick={selectDate} linkedPrice={linkedPrice}
+      minuteDate={selectedDate} assetType={assetType} />
+    <div className="min-w-0 space-y-3">
     {!assetType && (metadata.isError || metadata.isSuccess) ? <section className="rounded-card border border-border bg-surface p-4" aria-label="日内行情">
       <p role="alert" className="text-xs text-danger">暂时无法识别标的类型，分钟行情未发起。请刷新重试。</p>
       <button type="button" onClick={() => { void metadata.refetch() }} className="mt-3 rounded-btn border border-border px-3 py-2 text-xs text-accent">重新识别标的</button>
     </section> : <AnalysisMinutePanel
       symbol={symbol} assetType={assetType} date={selectedDate} onDateChange={selectDate}
-      view={assetType === 'index' ? 'intraday' : view.view} onViewChange={selectView} height={480}
+      view={assetType === 'index' ? 'intraday' : selectedView} onViewChange={selectView} height={480}
+      onPriceHover={onPriceHover}
     />}
-  </div>
+    {assetType === 'etf' && /^(5\d{5}\.SH|15\d{4}\.SZ)$/.test(symbol) && <EtfSharesPanel symbol={symbol} date={selectedDate} />}
+    </div>
+  </section>
 }
 
 // ===== 日 K + 关键价位 =====
-function DailyAnalysisCard({ symbol, onDateClick }: { symbol: string; onDateClick: (date: string) => void }) {
+function DailyAnalysisCard({ symbol, onDateClick, linkedPrice, minuteDate, assetType }: {
+  symbol: string; onDateClick: (date: string) => void; linkedPrice?: number | null
+  minuteDate: string | null; assetType?: 'stock' | 'etf' | 'index'
+}) {
+  const client = useQueryClient()
+  const key = QK.stockAnalysisSnapshot(symbol, 250)
   const kline = useQuery({
-    queryKey: QK.stockAnalysisDaily(symbol, 250),
-    queryFn: () => api.klineDaily(symbol, 250),
+    queryKey: key,
+    queryFn: async ({ signal }) => {
+      const result = await api.stockAnalysisSnapshot(symbol, 250, signal)
+      if (result.symbol !== symbol || result.analysis.symbol !== symbol) throw new Error('标的日线响应不匹配')
+      const previous = client.getQueryData<AnalysisSnapshot>(key)
+      if (previous?.symbol === symbol && previous.rows.length && previous.as_of
+        && (!result.as_of || result.as_of < previous.as_of
+          || (result.source === 'local' && previous.source === 'online' && result.as_of === previous.as_of))) {
+        return { ...previous, checked_at: result.checked_at,
+          warning: result.warning || '数据源返回较旧记录，保留上次有效图表。' }
+      }
+      return result
+    },
     enabled: !!symbol,
     staleTime: 60_000,
-  })
-
-  const levelsQ = useQuery({
-    queryKey: QK.stockLevels(symbol, 250),
-    queryFn: () => api.stockAnalysisLevels(symbol, 250),
-    enabled: !!symbol,
-    staleTime: 60_000,
+    gcTime: INSTRUMENT_VIEW_GC_MS,
+    meta: { instrumentView: 'analysis', symbol },
+    retry: false,
   })
 
   if (kline.isLoading) {
-    return <div className="flex items-center justify-center py-20"><Loader2 className="h-5 w-5 animate-spin text-muted" /></div>
+    return <div className="flex items-center justify-center gap-2 py-20 text-xs text-muted"><Loader2 className="h-5 w-5 animate-spin" />正在查询所选标的最新日线…</div>
   }
 
-  if (kline.isError) {
+  if (kline.isError && !kline.data) {
     return (
-      <EmptyState
+      <div><EmptyState
         icon={AlertTriangle}
         title="日 K 数据加载失败"
         hint="请检查网络或数据源配置后重试。"
-      />
+      /><button onClick={() => { void kline.refetch() }} className="block mx-auto text-xs text-accent">重试日线查询</button></div>
     )
   }
 
   const rows = kline.data?.rows ?? []
   if (rows.length === 0) {
-    return <EmptyState icon={LineChart} title="暂无日 K 数据" hint="该标的尚未同步日 K,请先在数据页或自选页同步。" />
+    return <div><EmptyState icon={LineChart} title="暂无日 K 数据" hint={kline.data?.warning || '当前数据源未返回该标的日线。'} /><button type="button" onClick={() => { void kline.refetch() }} className="block mx-auto text-xs text-accent">重新查询日线</button></div>
   }
   const summaryRows = rows.map(row => ({
     time: row.date,
@@ -282,13 +314,34 @@ function DailyAnalysisCard({ symbol, onDateClick }: { symbol: string; onDateClic
     volume: row.volume ?? null,
   }))
 
-  const levels = (levelsQ.data?.levels ?? {}) as Record<LevelType, PriceLevel[]>
+  const levelsQ = kline.data?.analysis
+  const levels = (levelsQ?.levels ?? {}) as Record<LevelType, PriceLevel[]>
 
   // 涨跌色:最后一根 K 线收 vs 前一根收(无前日则按开收判断)
   const last = rows[rows.length - 1]
   const prev = rows[rows.length - 2]
-  const curClose = levelsQ.data?.close ?? last.close
+  const curClose = levelsQ?.close ?? last.close
   const isUp = prev ? (last.close >= prev.close) : (last.close >= last.open)
+
+  // Reuse the paired query's current rows, without fetching or converting prices.
+  // Historical raw minutes must never be marked against an adjusted daily scale.
+  const minute = linkedPrice == null ? undefined : client.getQueryData<
+    Awaited<ReturnType<typeof api.klineMinute>> | Awaited<ReturnType<typeof api.indexMinute>>
+  >(QK.analysisMinute(symbol, minuteDate ?? '', assetType === 'index' ? 'index' : 'stock'))
+  let samePriceBasis = false
+  if (minute?.symbol === symbol && minute.date && (minuteDate == null || minute.date === minuteDate)) {
+    const closing = minute.rows.findLast(row => String(row.datetime).slice(11, 16) === '15:00')
+    const day = rows.find(row => row.date === minute.date)
+    const equalPrice = (a: number, b: number) => Number.isFinite(a) && Number.isFinite(b)
+      && a > 0 && b > 0 && Math.abs(a - b) <= 1e-8 * Math.max(1, a, b)
+    if (assetType === 'index') samePriceBasis = true
+    else if (closing && day) samePriceBasis = equalPrice(closing.close, day.close)
+    else if ('prev_close' in minute && typeof minute.prev_close === 'number') {
+      const previous = rows.filter(row => row.date < minute.date!).at(-1)
+      samePriceBasis = !!previous && equalPrice(previous.close, minute.prev_close)
+        && (!minute.prev_close_date || previous.date === minute.prev_close_date)
+    }
+  }
 
   return (
     <div className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
@@ -309,16 +362,27 @@ function DailyAnalysisCard({ symbol, onDateClick }: { symbol: string; onDateClic
         </div>
       </div>
       <div className="p-3">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted">
+          <span>日线截至 {kline.data?.as_of ?? last.date} · {kline.data?.source === 'online' ? '在线查询' : '本地快照'} · {kline.data?.price_basis === 'unadjusted' ? '未复权' : '本地指标口径'}</span>
+          <button type="button" disabled={kline.isFetching} onClick={() => { void kline.refetch() }} className="rounded-btn border border-border px-2.5 py-1 text-xs text-accent hover:bg-elevated disabled:opacity-50">
+            {kline.isFetching ? '正在更新日线…' : '更新日线'}
+          </button>
+        </div>
+        {(kline.data?.warning || kline.isError) && <p role="alert" className="mb-3 text-xs text-amber-400">{kline.isError ? '日线更新失败，保留上次有效图表。' : kline.data?.warning}</p>}
         <AnalysisKChart
           key={symbol}
+          persistenceKey={symbol}
           rows={rows}
           levels={levels}
-          series={levelsQ.data?.series}
-          seriesDates={levelsQ.data?.dates}
-          defaultLevelTypes={['sr', 'pivot', 'keltner_s']}
+          series={levelsQ?.series}
+          seriesDates={levelsQ?.dates}
           height={480}
           onDateClick={onDateClick}
+          linkedPrice={samePriceBasis ? linkedPrice : null}
         />
+        {linkedPrice != null && !samePriceBasis && <p role="status" className="mt-2 text-[11px] text-amber-300">
+          未能核验日 K 与分时价格是否一致，暂不叠加关联线。
+        </p>}
         <TechnicalSummary rows={summaryRows} contextLabel="当前日线研究快照" symbol={symbol} />
         <p className="mt-2 text-[11px] text-muted">点击某根日 K，可查看对应日期的分时 / 分钟 K；默认展示最新日内行情。</p>
       </div>

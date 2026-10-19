@@ -17,17 +17,19 @@ const CATEGORIES = {
   wojianshan: [['risk', '排雷·规避'], ['policy', '政策·国家级'], ['local_policy', '政策·行业地方'], ['event', '事件·重大'],
     ['theme', '产业·题材'], ['company', '公司·公告'], ['capital', '资本运作'], ['other', '其他']],
 } as const
-const DIRECTIONS = { positive: '正向词', negative: '负向词', mixed: '正负混合', neutral: '方向待核对' }
-const AI_DIRECTIONS = {
-  positive: 'AI 偏正向', negative: 'AI 偏负向', neutral: 'AI 中性', mixed: 'AI 正负混合', uncertain: 'AI 证据不足',
+const DIRECTION_LABELS = {
+  positive: '偏利好', negative: '偏利空', neutral: '中性', mixed: '正负混合', uncertain: '信息不足',
 } as const
-const AI_SCOPES = { market: '市场', industry: '行业', company: '公司', unclear: '范围待核对' } as const
+const AI_SCOPES = { market: '市场', industry: '行业', company: '公司', unclear: '范围未明' } as const
 const timeText = (value: string | null) => value ? value.slice(5, 16).replace('T', ' ') : '尚未取得'
 const badge = 'inline-flex items-center rounded border px-1.5 py-0.5 text-xs'
 const NEWS_PAGE_SIZE = 50
 const DIRECTION_JOB_STORAGE_KEY = 'stockfund.news-direction-job.v1'
+type NewsDirection = keyof typeof DIRECTION_LABELS
+interface NewsDirectionBadge { label: string; source: string; color: string; title: string }
 type NewsDirectionEffort = 'high' | 'max'
 interface NewsDirectionSession { id: string; effort: NewsDirectionEffort }
+type NewsJevosReview = import('@/custom/jevos/types').JevosReview
 
 function readNewsDirectionSession(): NewsDirectionSession | null {
   try {
@@ -50,6 +52,45 @@ function saveNewsDirectionSession(value: NewsDirectionSession) {
 
 function clearNewsDirectionSession() {
   try { window.sessionStorage.removeItem(DIRECTION_JOB_STORAGE_KEY) } catch { /* Session storage is optional. */ }
+}
+
+function directionColor(direction: NewsDirection): string {
+  if (direction === 'positive') return 'border-emerald-400/25 text-emerald-400'
+  if (direction === 'negative') return 'border-red-400/25 text-red-400'
+  if (direction === 'mixed') return 'border-amber-400/30 text-amber-300'
+  return 'border-border text-muted'
+}
+
+function newsDirectionBadge(item: NewsItem, review?: NewsJevosReview): NewsDirectionBadge {
+  const ai = item.ai_direction
+  if (ai) return {
+    label: DIRECTION_LABELS[ai.direction],
+    source: ai.model.toLowerCase().includes('luna') ? 'Luna 判断' : 'AI 判断',
+    color: directionColor(ai.direction),
+    title: `${ai.model} · ${ai.reason}`,
+  }
+
+  if (review?.kind === 'news') {
+    const directions: Record<string, NewsDirection> = {
+      positive_clue: 'positive', risk_clue: 'negative', mixed: 'mixed', neutral: 'neutral', unclear: 'uncertain',
+    }
+    const direction = directions[String(review.label)]
+    if (direction) {
+      const tentative = review.tentative === true && direction !== 'uncertain'
+      return {
+        label: `${DIRECTION_LABELS[direction]}${tentative ? '（较弱）' : ''}`, source: 'Jevos 初筛', color: directionColor(direction),
+        title: `Jevos 本地初筛 · ${review.model} · ${direction === 'uncertain' ? '信息不足，展开查看概率与详情。' : tentative ? '当前倾向较弱，展开查看概率与详情。' : '仅供研究，展开查看概率与详情。'}`,
+      }
+    }
+  }
+
+  const clue = item.sentiment.direction === 'positive' ? `正向词：${item.sentiment.matched.join('、') || '无'}`
+    : item.sentiment.direction === 'negative' ? `负向词：${item.sentiment.matched.join('、') || '无'}`
+      : item.sentiment.direction === 'mixed' ? `正负词命中：${item.sentiment.matched.join('、') || '无'}` : '无词表命中'
+  return {
+    label: '待判断', source: '', color: 'border-border text-muted',
+    title: `尚无模型方向判断。词表仅提供原始线索，不代表利好利空或个股受益。${clue}`,
+  }
 }
 
 function sourceStatusLabel(item: { status: string; reason: string | null }, refreshing: boolean | undefined): string {
@@ -354,18 +395,26 @@ function NewsRow({ item, classification, jevosReview, onAnalyze, analyzing, onPr
 }) {
   const cls = item.classifications[classification]
   const aiDirection = item.ai_direction
+  const newsReview = jevosReview?.kind === 'news' ? jevosReview as NewsJevosReview : undefined
+  const finalDirection = newsDirectionBadge(item, newsReview)
   return <article className="border-b border-border/70 px-4 py-3.5 last:border-b-0 sm:px-5">
     <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
       {item.origins.map((origin, index) => <span key={`${origin.source}-${index}`} title={`该来源发布于 ${timeText(origin.published_at)}`} className={cn(badge, origin.source === 'cls' ? 'border-red-400/30 text-red-400' : 'border-amber-400/30 text-amber-400')}>{origin.label}</span>)}
       <span className={cn(badge, cls.category === 'risk' ? 'border-red-400/30 text-red-400' : cls.category === 'other' ? 'border-border' : 'border-cyan-400/25 text-cyan-400')}>{cls.label}</span>
       <span title="词表相关度，不是 AI 置信度、胜率或收益" className="font-mono">{cls.score}</span><time dateTime={item.published_at} className="font-mono">{timeText(item.published_at)}</time>
-      <span className={cn(badge, aiDirection?.direction === 'positive' ? 'border-emerald-400/25 text-emerald-400' : aiDirection?.direction === 'negative' ? 'border-red-400/25 text-red-400' : 'border-border')}
-        title={aiDirection ? aiDirection.reason : `本标签来自本地词表，不是 AI 方向判断。命中词：${item.sentiment.matched.join('、')}`}>
-        {aiDirection ? AI_DIRECTIONS[aiDirection.direction] : `${DIRECTIONS[item.sentiment.direction]} · 词表`}
+      <span aria-label="快讯方向" className={cn(badge, finalDirection.color)} title={finalDirection.title}>
+        {finalDirection.source ? `${finalDirection.label} · ${finalDirection.source}` : finalDirection.label}
       </span>
       <button onClick={onAnalyze} disabled={analyzing} className="ml-auto inline-flex items-center gap-1 text-muted hover:text-accent disabled:opacity-40"><Sparkles size={14} />解读</button>
     </div>
     <h3 className="mt-2 text-sm font-semibold leading-relaxed sm:text-[15px]">{item.title}</h3>
+    {aiDirection && <p aria-label="AI方向摘要" className="mt-1 text-xs leading-5 text-violet-200/80">
+      <span className="text-muted">影响：</span>
+      {AI_SCOPES[aiDirection.scope]} · {aiDirection.reason}
+    </p>}
+    {!aiDirection && newsReview?.reason && <p aria-label="Jevos方向摘要" className="mt-1 text-xs leading-5 text-violet-200/80">
+      {newsReview.reason}
+    </p>}
     {item.summary && item.summary !== item.title && <p className="mt-1 line-clamp-3 text-xs leading-6 text-muted">{item.summary}</p>}
     {aiDirection && <details className="mt-2 rounded border border-violet-400/20 bg-violet-400/5 px-3 py-2 text-xs">
       <summary className="cursor-pointer text-violet-300">AI 判断依据与范围</summary>

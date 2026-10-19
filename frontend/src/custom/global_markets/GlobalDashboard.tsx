@@ -15,6 +15,7 @@ import type { GlobalMarket, GlobalMarketChartInterval, GlobalMarketOverviewItem,
 import type { MarketSnapshotItem } from './types'
 import { BroadMarketSummary, CoreTechnicalPanels } from './MarketBreadthPanels'
 import { GlobalIndustryPanel } from './GlobalIndustryPanel'
+import { MacroReferencePanel } from './MacroReferencePanel'
 
 const defaults = { hk: '^HSI', us: '^GSPC' } as const
 const intervals = [['1d', '日K'], ['5m', '5分钟'], ['1m', '1分钟']] as const
@@ -136,6 +137,7 @@ export default function GlobalDashboard({ market }: { market: GlobalMarket }) {
     </div>
 
     <GlobalIndustryPanel />
+    {market === 'us' && <MacroReferencePanel market="us" />}
     <BroadMarketSummary state={data?.market_snapshot} onSelect={chooseRank} />
     <CoreTechnicalPanels market={market} items={items} onSelect={choose} />
     <div className="mb-1.5 grid grid-cols-2 gap-1.5 lg:grid-cols-4">

@@ -8,7 +8,7 @@ import time
 from collections import OrderedDict
 from concurrent.futures import Future, TimeoutError
 
-from . import provider
+from . import provider, symbol_directory
 from .catalog import MARKETS, MarketDataError, local_catalog, normalize_symbol
 
 _LOCK = threading.RLock()
@@ -115,6 +115,16 @@ def catalog(market: str, query: str = "") -> dict:
     except MarketDataError:
         remote = []
         warnings.append("名称检索暂不可用，可尝试英文名称或完整股票代码")
+    directory_used = False
+    if not remote and market == "us":
+        try:
+            remote = symbol_directory.search(query)
+            directory_used = bool(remote)
+        except MarketDataError:
+            if not warnings:
+                warnings.append("名称检索暂不可用，可尝试英文名称或完整股票代码")
+    if directory_used:
+        warnings.append("候选来自 Nasdaq Trader 定期更新的证券目录；是否有行情仍需由行情源核验")
     if not remote:
         try:
             symbol = normalize_symbol(market, query)
@@ -122,4 +132,6 @@ def catalog(market: str, query: str = "") -> dict:
             warnings.append("代码将在读取行情时核验；该项尚未确认收录")
         except ValueError:
             pass
+        if not remote and market == "us" and not warnings:
+            warnings.append("Nasdaq Trader证券目录未找到匹配名称，可尝试英文名称或代码")
     return {"market": market, "items": remote[:20], "warnings": warnings}

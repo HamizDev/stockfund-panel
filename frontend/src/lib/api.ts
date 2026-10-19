@@ -14,6 +14,9 @@ import type {
   GlobalMarketOverview,
   GlobalIndustryResponse,
   IndustryMode,
+  MacroMarket,
+  MacroReference,
+  EtfShareSnapshot,
 } from '@/custom/global_markets/types'
 
 const BASE = ''
@@ -426,6 +429,17 @@ export interface KlineDailyResponse {
   stock_info?: { name?: string; total_shares?: number; float_shares?: number; ext?: Record<string, unknown> }
   rows: KlineRow[]
   source?: string
+}
+
+export interface AnalysisSnapshot extends KlineDailyResponse {
+  asset_type: 'stock' | 'etf' | 'index'
+  source: 'online' | 'local'
+  price_basis: 'unadjusted' | 'local_enriched'
+  provider: string
+  as_of: string | null
+  checked_at: string
+  warning: string | null
+  analysis: StockLevels
 }
 
 export interface KlineDailyLatestResponse {
@@ -2485,6 +2499,26 @@ export interface SectorRotationUniverseItem {
 
 // ===== API surface =====
 export const api = {
+  etfShares: (symbol: string, date: string | null = null, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ symbol })
+    if (date) query.set('date', date)
+    return request<EtfShareSnapshot>(`/api/custom/global-markets/etf-shares?${query}`, { signal, quiet: true }).then(result => {
+      if (result?.symbol !== symbol || result.exchange !== symbol.slice(-2)
+        || (result.shares_10k != null && (!Number.isFinite(result.shares_10k) || result.shares_10k < 0))) {
+        throw new Error('ETF官方份额响应标的不匹配')
+      }
+      return result
+    })
+  },
+  macroReference: (market: MacroMarket, signal?: AbortSignal) => request<MacroReference>(
+    `/api/custom/global-markets/macro?${new URLSearchParams({ market })}`, { signal, quiet: true },
+  ).then(result => {
+    if (result?.market !== market || result.currency !== (market === 'us' ? 'USD' : 'CNY')
+      || result.unit !== 'percent' || result.frequency !== 'business_daily' || !Array.isArray(result.items)) {
+      throw new Error('利率参考响应上下文不匹配')
+    }
+    return result
+  }),
   globalIndustries: (mode: IndustryMode, signal?: AbortSignal) => request<GlobalIndustryResponse>(
     `/api/custom/global-markets/industries?${new URLSearchParams({ mode })}`, { signal, quiet: true },
   ).then(result => {
@@ -3008,6 +3042,9 @@ export const api = {
       asset_type?: 'stock' | 'etf' | 'index'
       price_limit?: PriceLimitInfo | null
       prev_close?: number | null
+      prev_close_source?: 'local_daily' | 'online_daily' | 'none'
+      prev_close_date?: string
+      prev_close_warning?: string
     }>(
       `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}${live ? '&live=1' : ''}`,
     ),
@@ -3871,6 +3908,20 @@ export const api = {
   },
 
   // ===== 个股分析 =====
+  stockAnalysisSnapshot: async (symbol: string, days = 250, signal?: AbortSignal) => {
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
+    const timer = window.setTimeout(abort, 60_000)
+    try {
+      return await request<AnalysisSnapshot>(`/api/stock-analysis/snapshot?symbol=${encodeURIComponent(symbol)}&days=${days}`,
+        { signal: controller.signal, quiet: true })
+    } finally {
+      window.clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
+    }
+  },
   stockAnalysisLevels: (symbol: string, days = 120) =>
     request<StockLevels>(`/api/stock-analysis/levels?symbol=${encodeURIComponent(symbol)}&days=${days}`),
 

@@ -5,6 +5,8 @@ import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { Indices } from './Indices'
+import { QK } from '@/lib/queryKeys'
+import { INSTRUMENT_VIEW_GC_MS } from '@/lib/useInstrumentViewCache'
 
 type MinuteResponse = {
   symbol: string
@@ -342,4 +344,40 @@ it('refreshes current-day index minutes every 30 seconds while retaining the las
   await resolveDay('2026-09-14', 15)
   expect(host.querySelector('[data-chart]')?.textContent).toBe('2026-09-14|2026-09-14 09:35:00|15')
   expect(host.querySelector<HTMLElement>('[data-chart]')?.dataset.mount).toBe(mount)
+})
+
+it('removes the previous inactive index daily cache and reuses the selected cache after route remount', async () => {
+  client.setQueryDefaults(['index-daily'], { gcTime: 0 })
+
+  const renderIndices = () => root.render(
+    <MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>,
+  )
+  await act(async () => renderIndices())
+  await settle()
+
+  const oldEntry = client.getQueryCache().getAll().find(query =>
+    query.queryKey[0] === 'index-daily' && query.queryKey[1] === '000001.SH',
+  )
+  expect(oldEntry).toBeDefined()
+  expect(oldEntry?.meta).toMatchObject({ instrumentView: 'indices', symbol: '000001.SH' })
+  expect(oldEntry?.options.gcTime).toBe(INSTRUMENT_VIEW_GC_MS)
+  const oldKey = oldEntry!.queryKey as ReturnType<typeof QK.indexDaily>
+  const nextKey = QK.indexDaily('399001.SZ', oldKey[2], oldKey[3])
+
+  const nextIndex = [...host.querySelectorAll('button')].find(button => button.textContent?.includes('399001.SZ'))
+  expect(nextIndex).toBeDefined()
+  await act(async () => nextIndex!.click())
+  await settle()
+
+  expect(client.getQueryCache().find({ queryKey: oldKey, exact: true })).toBeUndefined()
+  expect(client.getQueryCache().find({ queryKey: nextKey, exact: true })).toBeDefined()
+  const callsAfterSwitch = fixtures.dailyCalls.length
+
+  await act(async () => root.render(null))
+  await settle()
+  expect(client.getQueryCache().find({ queryKey: nextKey, exact: true })).toBeDefined()
+
+  await act(async () => renderIndices())
+  await settle()
+  expect(fixtures.dailyCalls).toHaveLength(callsAfterSwitch)
 })

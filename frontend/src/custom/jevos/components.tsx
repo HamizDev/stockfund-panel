@@ -4,13 +4,14 @@ import { jevosApi } from './client'
 import type { JevosReview, JevosStatus } from './types'
 
 const NEWS_LABELS = {
-  positive_clue: '正面线索', risk_clue: '风险线索', mixed: '正负混合', unclear: '待核对',
+  positive_clue: '偏利好', risk_clue: '偏利空', neutral: '中性', mixed: '正负混合', unclear: '信息不足',
 } as const
 const STRATEGY_LABELS = {
   support: '原信号获支持', wait: '建议等待', conflict: '信号冲突', insufficient: '信息不足',
 } as const
 const NEWS_PROBABILITIES: Record<string, string> = {
-  positive: '正面线索', risk: '风险线索', material: '事件实质性',
+  positive: '偏利好', negative: '偏利空', neutral: '中性', mixed: '正负混合', uncertain: '信息不足',
+  risk: '风险线索', material: '事件实质性',
 }
 const STRATEGY_PROBABILITIES: Record<string, string> = {
   supports_signal: '支持原信号', conflict: '与原信号冲突', sufficient: '信息充分度',
@@ -27,7 +28,7 @@ function probabilityText(review: JevosReview, labels: Record<string, string>) {
 }
 
 function reviewLabel(review: JevosReview) {
-  if (review.kind === 'news') return NEWS_LABELS[review.label as keyof typeof NEWS_LABELS] ?? '待核对'
+  if (review.kind === 'news') return NEWS_LABELS[review.label as keyof typeof NEWS_LABELS] ?? '信息不足'
   return STRATEGY_LABELS[review.label as keyof typeof STRATEGY_LABELS] ?? '信息不足'
 }
 
@@ -66,12 +67,12 @@ export function JevosNewsStatus({ status, isLoading, isError }: {
 }) {
   const count = Object.keys(status?.news ?? {}).length
   return <section aria-label="Jevos 本地快讯初筛" className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border bg-surface px-4 py-2.5 text-xs">
-    <span className="font-semibold text-foreground">Jevos 本地初筛</span>
+    <span className="font-semibold text-foreground" title="优先关注标的，自动初筛最近最多200条；每批最多40条，复用本机缓存。">Jevos 本地初筛</span>
     <span className={status?.status === 'ready' ? 'text-emerald-300' : 'text-muted'}>{statusLabel(status?.status, isError)}</span>
     <span className="text-muted">已记录 {count} 条 · 队列 {status?.queued ?? '—'} · 完成 {status?.completed ?? '—'}</span>
     {status?.model && <span className="text-muted" title={`模型状态更新时间：${timestamp(status.last_check_ms)}`}>{status.model}</span>}
     {isLoading && !status && <span className="text-muted">正在连接本机辅助服务…</span>}
-    <span className="ml-auto text-[11px] text-muted">本地辅助意见；不会替代原文核对或参与交易</span>
+    <span className="ml-auto text-[11px] text-muted">判断原文所述事件；不代表全市场方向，不参与交易</span>
   </section>
 }
 
@@ -82,6 +83,10 @@ export function JevosNewsReview({ review }: { review?: JevosReview }) {
     <summary className="cursor-pointer font-medium">Jevos 初筛 · {reviewLabel(review)}</summary>
     <div className="mt-2 space-y-1.5 leading-relaxed text-secondary">
       <p>模型 {review.model} · 判断于 {timestamp(review.generated_at_ms)}</p>
+      {review.reason && <p>{review.reason}</p>}
+      {review.tentative && <p className="text-amber-300">判断较弱，保留方向倾向供筛选。</p>}
+      {review.evidence?.map((quote, index) => <blockquote key={index} className="border-l-2 border-border pl-2 text-muted">原文：{quote}</blockquote>)}
+      {review.confidence != null && <p className="text-muted">模型区分度 {Math.round(review.confidence * 100)}%（未经市场准确率校准）</p>}
       {probabilities.length > 0 && <p><span className="text-muted">模型判断概率（不是胜率）：</span>{probabilities.join(' · ')}</p>}
       {review.related_names.length > 0 && <div>
         <span className="text-muted">关联关注 / 登记持仓：</span>

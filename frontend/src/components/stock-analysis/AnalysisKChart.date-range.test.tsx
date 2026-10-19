@@ -41,6 +41,7 @@ beforeEach(() => {
   document.body.append(host)
   root = createRoot(host)
   rows = makeRows(400)
+  sessionStorage.clear()
   mock.handlers.clear()
   mock.option = undefined
   const chart = {
@@ -63,14 +64,17 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount())
   host.remove()
+  sessionStorage.clear()
   vi.clearAllMocks()
+  vi.unstubAllGlobals()
 })
 
-async function render(chartRows = rows, key = 'symbol-a') {
+async function render(chartRows = rows, key = 'symbol-a', persistenceKey?: string) {
   const levels = chartRows.length ? {
     sr: [{ value: 1.2, label: '压力位', type: 'sr', side: 'resistance' }],
+    pivot: [{ value: 1.1, label: '枢轴 P', type: 'pivot', side: 'neutral', rank: 0 }],
   } as any : undefined
-  await act(async () => root.render(<AnalysisKChart key={key} rows={chartRows} levels={levels} />))
+  await act(async () => root.render(<AnalysisKChart key={key} rows={chartRows} levels={levels} persistenceKey={persistenceKey} />))
 }
 
 async function clickButton(label: string) {
@@ -88,11 +92,52 @@ it('applies a shortcut to the chart and keeps the whole loaded dataset available
   await act(async () => all.click())
 
   expect(all.getAttribute('aria-pressed')).toBe('true')
+  expect(sessionStorage.getItem('analysis-k-chart:view-state:v1')).toBeNull()
   expect(mock.chart.dispatchAction).toHaveBeenLastCalledWith({
     type: 'dataZoom', ...indexRangeToZoomRange(allIndices, rows.length),
   })
   expect(host.textContent).toContain(`当前显示：${allDates.start} ~ ${allDates.end} · 400/400 根`)
   expect(host.textContent).toContain('日K全部指已加载数据')
+})
+
+it('resizes after its container changes width without rebuilding data or resetting zoom', async () => {
+  let resize!: () => void
+  const observe = vi.fn()
+  const disconnect = vi.fn()
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: () => void) { resize = callback }
+    observe = observe
+    disconnect = disconnect
+  })
+  await render()
+  expect(observe).toHaveBeenCalledOnce()
+  const calls = mock.chart.setOption.mock.calls.length
+  resize()
+  expect(mock.chart.resize).toHaveBeenCalledOnce()
+  expect(mock.chart.setOption).toHaveBeenCalledTimes(calls)
+  await act(async () => root.unmount())
+  expect(disconnect).toHaveBeenCalledOnce()
+  root = createRoot(host)
+})
+
+it('updates only the linked price guide and clears invalid prices without resetting zoom', async () => {
+  const renderLinked = async (linkedPrice: number | null) => {
+    await act(async () => root.render(<AnalysisKChart rows={rows} linkedPrice={linkedPrice} />))
+  }
+  await renderLinked(null)
+  const initialCalls = mock.chart.setOption.mock.calls.length
+  await renderLinked(.521)
+  expect(mock.chart.setOption).toHaveBeenCalledTimes(initialCalls + 1)
+  const [patch, settings] = mock.chart.setOption.mock.calls.at(-1)
+  expect(settings).toEqual({ lazyUpdate: true })
+  expect(patch.dataZoom).toBeUndefined()
+  expect(patch.series[0].id).toBe('analysis-candles')
+  expect(patch.series[0].data).toBeUndefined()
+  const guide = patch.series[0].markLine.data[0]
+  expect(guide.yAxis).toBe(.521)
+  expect(guide.label.formatter).toContain('0.521')
+  await renderLinked(Number.NaN)
+  expect(mock.chart.setOption.mock.calls.at(-1)[0].series[0].markLine.data).toEqual([])
 })
 
 it('syncs explicit dates and manual slider changes, then preserves a drag across hover redraws', async () => {
@@ -128,6 +173,71 @@ it('syncs explicit dates and manual slider changes, then preserves a drag across
   expect(mock.option.dataZoom[0].end).toBe(expectedZoom.end)
   expect(mock.option.dataZoom[1].start).toBe(expectedZoom.start)
   expect(mock.option.dataZoom[1].end).toBe(expectedZoom.end)
+})
+
+it('restores all level lines when leaving a level for candles or chart background', async () => {
+  await render()
+  const opacity = () => mock.option.series.slice(2).map((line: any) => line.lineStyle.opacity)
+  expect(opacity()).toEqual([.7, .7])
+  await act(async () => mock.handlers.get('mouseover')?.({ componentType: 'series', seriesIndex: 2 }))
+  expect(opacity()).toEqual([1, .12])
+  await act(async () => mock.handlers.get('mouseover')?.({ componentType: 'series', seriesIndex: 0 }))
+  expect(opacity()).toEqual([.7, .7])
+  await act(async () => mock.handlers.get('mouseover')?.({ componentType: 'series', seriesIndex: 2 }))
+  await act(async () => mock.handlers.get('mouseout')?.({ componentType: 'series', seriesIndex: 2 }))
+  expect(opacity()).toEqual([.7, .7])
+})
+
+it('restores the compact view for the same key and replaces it when the symbol key changes', async () => {
+  await render(rows, 'same-component', 'symbol-a')
+  await clickButton('近1月')
+  expect(JSON.parse(sessionStorage.getItem('analysis-k-chart:view-state:v1')!).activeRangePreset).toBe('1m')
+
+  await act(async () => root.render(null))
+  await render(rows, 'same-component', 'symbol-a')
+  expect(host.querySelector<HTMLButtonElement>('button[aria-label="最近一个月"]')?.getAttribute('aria-pressed')).toBe('true')
+
+  const startInput = host.querySelector<HTMLInputElement>('input[aria-label="起始日期"]')!
+  const customStart = rows[350].date
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(startInput, customStart)
+    startInput.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+
+  const srButton = [...host.querySelectorAll('button')].find(button => button.textContent?.startsWith('压力支撑'))!
+  await act(async () => srButton.click())
+  const rankThree = host.querySelector<HTMLButtonElement>('button[title="全档 R3/S3(7 个)"]')!
+  await act(async () => rankThree.click())
+
+  const stored = JSON.parse(sessionStorage.getItem('analysis-k-chart:view-state:v1')!)
+  expect(stored).toMatchObject({
+    persistenceKey: 'symbol-a',
+    pivotRank: 3,
+    activeRangePreset: null,
+    visibleDateRange: { start: customStart, end: rows[rows.length - 1].date },
+  })
+  expect(Object.keys(stored).sort()).toEqual([
+    'activeRangePreset', 'activeTypes', 'persistenceKey', 'pivotRank', 'version', 'visibleDateRange',
+  ])
+
+  await act(async () => root.render(null))
+  await render(rows, 'remounted-component', 'symbol-a')
+  expect(host.querySelector<HTMLInputElement>('input[aria-label="起始日期"]')?.value).toBe(customStart)
+  expect([...host.querySelectorAll('button')].find(button => button.textContent?.startsWith('压力支撑'))?.style.borderColor).toBe('')
+  expect(host.querySelector<HTMLButtonElement>('button[title="全档 R3/S3(7 个)"]')?.className).toContain('bg-[#8B5CF6]/15')
+
+  // Keep the React component mounted: changing the persistence key must reset and replace the single stored slot.
+  await render(rows, 'remounted-component', 'symbol-b')
+  expect(host.querySelector<HTMLButtonElement>('button[aria-label="最近六个月"]')?.getAttribute('aria-pressed')).toBe('true')
+  expect(host.querySelector<HTMLInputElement>('input[aria-label="起始日期"]')?.value).not.toBe(customStart)
+  expect([...host.querySelectorAll('button')].find(button => button.textContent?.startsWith('压力支撑'))?.style.borderColor).not.toBe('')
+  expect(host.querySelector<HTMLButtonElement>('button[title="全档 R3/S3(7 个)"]')?.className).not.toContain('bg-[#8B5CF6]/15')
+  expect(JSON.parse(sessionStorage.getItem('analysis-k-chart:view-state:v1')!).persistenceKey).toBe('symbol-b')
+
+  await render(rows, 'remounted-component', 'symbol-a')
+  expect(host.querySelector<HTMLInputElement>('input[aria-label="起始日期"]')?.value).not.toBe(customStart)
+  expect([...host.querySelectorAll('button')].find(button => button.textContent?.startsWith('压力支撑'))?.style.borderColor).not.toBe('')
+  expect(JSON.parse(sessionStorage.getItem('analysis-k-chart:view-state:v1')!).persistenceKey).toBe('symbol-a')
 })
 
 it('disables range controls for empty and single-bar data, and resets on a keyed symbol switch', async () => {

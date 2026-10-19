@@ -17,6 +17,8 @@ export const QK = {
   globalMarketChart: (market: GlobalMarket, symbol: string, interval: GlobalMarketChartInterval) =>
     ['global-market', 'chart', market, symbol, interval] as const,
   globalMarketResources: ['global-market', 'resources'] as const,
+  macroReference: (market: 'cn' | 'us') => ['global-market', 'macro', market] as const,
+  etfShares: (symbol: string, date: string | null = null) => ['global-market', 'etf-shares', symbol, date ?? 'latest'] as const,
   globalMarketOverview: (market: GlobalMarket) => ['global-market', 'overview', market] as const,
   globalIndustries: (mode: 'auto' | 'cn' | 'us') => ['global-market', 'industries', mode] as const,
   newsAnalysis: (id: string) => ['news-analysis', id] as const,
@@ -111,6 +113,8 @@ export const QK = {
   klineLatest:          (symbol: string) => ['kline-latest', symbol] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
   stockAnalysisDaily:   (symbol: string, days: number) => ['stock-analysis-daily', symbol, days] as const,
+  stockAnalysisSnapshot: (symbol: string, days = 250) => ['stock-analysis-snapshot', symbol, days] as const,
+  analysisMinute: (symbol: string, date: string, kind: 'stock' | 'index') => ['analysis-minute', symbol, date, kind] as const,
   klineMinute:          (symbol: string, date: string, live?: boolean) =>
                              live == null
                                ? ['kline-minute', symbol, date] as const

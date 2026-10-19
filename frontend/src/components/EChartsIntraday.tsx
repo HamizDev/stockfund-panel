@@ -375,9 +375,11 @@ function buildOption(
         type: 'value' as const,
         position: 'right' as const,
         gridIndex: 0,
-        min: yMin,
-        max: yMax,
-        interval: maxDiff || undefined,
+        // A percentage domain guarantees an actual 0% tick at the midpoint.
+        // Price-valued ticks were rounded independently and could omit it.
+        min: -maxDiff / prevClose * 100,
+        max: maxDiff / prevClose * 100,
+        interval: maxDiff / prevClose * 50 || undefined,
         splitArea: { show: false },
         axisLine: { show: false },
         axisTick: { show: false },
@@ -387,7 +389,7 @@ function buildOption(
             formatter: (params: any) => {
               const v = params.value
               if (typeof v !== 'number') return ''
-              const pct = (v - prevClose) / prevClose * 100
+              const pct = v
               if (Math.abs(pct) < 0.01) return '0.00%'
               return (pct > 0 ? '+' : '') + pct.toFixed(2) + '%'
             },
@@ -398,7 +400,7 @@ function buildOption(
           fontSize: 10,
           fontFamily: 'JetBrains Mono, monospace',
           formatter: (v: number) => {
-            const pct = (v - prevClose) / prevClose * 100
+            const pct = v
             if (Math.abs(pct) < 0.01) return '0.00%'
             return (pct > 0 ? '+' : '') + pct.toFixed(2) + '%'
           },
@@ -495,7 +497,8 @@ export function EChartsIntraday({
 
   useEffect(() => {
     setInfoIdx(-1)
-  }, [date])
+    onPriceHoverRef.current?.(null)
+  }, [date, data])
 
   useEffect(() => {
     const el = containerRef.current
@@ -508,7 +511,13 @@ export function EChartsIntraday({
       // 强制 canvas 使用十字光标，覆盖 ECharts 默认的 pointer
       const forceCursor = () => {
         const canvases = el.querySelectorAll('canvas')
-        canvases.forEach(c => { c.style.setProperty('cursor', 'crosshair', 'important') })
+        canvases.forEach(canvas => {
+          // Writing even the same inline style triggers the observer again.
+          if (canvas.style.getPropertyValue('cursor') !== 'crosshair'
+            || canvas.style.getPropertyPriority('cursor') !== 'important') {
+            canvas.style.setProperty('cursor', 'crosshair', 'important')
+          }
+        })
       }
       forceCursor()
       // MutationObserver: ECharts 内部可能重建/修改 canvas 属性，持续强制 cursor
@@ -534,7 +543,8 @@ export function EChartsIntraday({
             setInfoIdx(dataIdx)
             const d = dataRef.current
             if (dataIdx >= 0 && dataIdx < d.length) {
-              onPriceHoverRef.current?.(d[dataIdx].close)
+              const price = d[dataIdx].close
+              onPriceHoverRef.current?.(isValidPrice(price) ? price : null)
             } else {
               onPriceHoverRef.current?.(null)
             }
@@ -606,6 +616,7 @@ export function EChartsIntraday({
 
   useEffect(() => {
     return () => {
+      onPriceHoverRef.current?.(null)
       chartRef.current?.off('updateAxisPointer')
       chartRef.current?.off('globalout')
       chartRef.current?.off('dataZoom')

@@ -27,6 +27,11 @@ from app.market_time import CN_TZ
 from app.services import preferences, trading_day
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
+
+@pytest.fixture(autouse=True)
+def isolate_reference_lookup(monkeypatch):
+    monkeypatch.setattr('app.services.minute_reference._online_daily', lambda *_: None)
+
 TODAY = date(2026, 9, 15)  # 周二, 交易日
 SYMBOL = "600519.SH"
 

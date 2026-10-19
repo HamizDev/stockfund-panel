@@ -2,7 +2,7 @@ import { api } from '@/lib/api'
 import type { JevosReview, JevosReviewLabel, JevosServiceStatus, JevosStatus } from './types'
 
 const STATUSES = new Set<JevosServiceStatus>(['starting', 'ready', 'offline', 'not_ready', 'invalid_response'])
-const LABELS = new Set<JevosReviewLabel>(['positive_clue', 'risk_clue', 'mixed', 'unclear', 'support', 'wait', 'conflict', 'insufficient'])
+const LABELS = new Set<JevosReviewLabel>(['positive_clue', 'risk_clue', 'neutral', 'mixed', 'unclear', 'support', 'wait', 'conflict', 'insufficient'])
 const SIGNALS = new Set(['long', 'short', 'flat', 'hold'])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -29,6 +29,12 @@ function isReview(value: unknown, expectedKind?: JevosReview['kind']): value is 
     && Object.values(value.probabilities).every(probability => typeof probability === 'number' && Number.isFinite(probability) && probability >= 0 && probability <= 1)
     && Array.isArray(value.related_names) && value.related_names.length <= 8
     && value.related_names.every(name => typeof name === 'string' && name.length <= 40)
+    && (value.method === undefined || value.method === 'noul-v1' || value.method === 'choice-v2')
+    && (value.confidence == null || (typeof value.confidence === 'number' && Number.isFinite(value.confidence) && value.confidence >= 0 && value.confidence <= 1))
+    && (value.tentative === undefined || typeof value.tentative === 'boolean')
+    && (value.reason === undefined || (typeof value.reason === 'string' && value.reason.length <= 320))
+    && (value.evidence === undefined || (Array.isArray(value.evidence) && value.evidence.length <= 1
+      && value.evidence.every(quote => typeof quote === 'string' && quote.length > 0 && quote.length <= 280)))
 }
 
 function isReviewMap(value: unknown, kind: JevosReview['kind'], limit: number): value is Record<string, JevosReview> {
