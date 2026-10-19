@@ -8,7 +8,7 @@ import time
 from collections import OrderedDict
 from concurrent.futures import Future, TimeoutError
 
-from . import provider, symbol_directory, symbol_search
+from . import hk_symbol_directory, provider, symbol_directory, symbol_search
 from .catalog import MARKETS, MarketDataError, local_catalog, normalize_symbol
 
 _LOCK = threading.RLock()
@@ -136,6 +136,20 @@ def catalog(market: str, query: str = "") -> dict:
                 warnings.append("名称检索暂不可用，可尝试英文名称或完整股票代码")
     if directory_used:
         warnings.append("候选来自 Nasdaq Trader 定期更新的证券目录；是否有行情仍需由行情源核验")
+    hk_directory_used = False
+    if not remote and market == "hk":
+        try:
+            directory_rows = _cached(
+                ("hk-symbol-directory",),
+                hk_symbol_directory.CACHE_SECONDS,
+                hk_symbol_directory.load_rows,
+            )
+            remote = hk_symbol_directory.search(query, rows=directory_rows)
+            hk_directory_used = bool(remote)
+        except MarketDataError:
+            warnings.append("HKEX公开证券目录暂不可用")
+    if hk_directory_used:
+        warnings.append("候选来自 HKEX 官方证券名单，仅含港币普通股、ETF及杠杆/反向产品；目录不提供行情")
     if not remote:
         try:
             symbol = normalize_symbol(market, query)

@@ -2,6 +2,7 @@
 import hashlib
 import json
 
+import pytest
 from app.custom.jevos.client import ChoiceResult, ModelInfo
 from app.custom.jevos.news_judgement import NEWS_VERSION, classify_news, excerpts
 from app.custom.jevos.service import VERSION as SERVICE_VERSION
@@ -206,10 +207,95 @@ def test_different_subjects_do_not_force_a_mixed_label():
     assert result["tentative"] is True
 
 
+def test_later_business_clarification_is_in_bounded_conflict_review():
+    title = "科德数控：未与凯众股份开展业务合作"
+    first = "科德数控在互动平台表示，市场有关于凯众踏板用科德五轴加工的言论，公司收到部分投资者咨询。"
+    clarification = "截至目前，公司未曾与上海凯众材料科技股份有限公司开展业务合作，不存在向凯众股份提供五轴联动数控机床产品的情形。"
+    text = f"{title}\n【{title}】{first}{clarification}"
+
+    class ClarificationClient(FakeClient):
+        def choose(self, state, questions, identity):
+            index = len(self.calls)
+            self.direction = ("negative", "uncertain", "neutral")[index]
+            self.evidence = ("e0", "e0", "e2")[index]
+            self.confidence = (0.9, 0.9, 0.53)[index]
+            return super().choose(state, questions, identity)
+
+    client = ClarificationClient()
+    result = classify_news(client, _state(text), IDENTITY)
+
+    assert len(client.calls) == 3
+    expanded = client.calls[2][0]["untrusted_news_text"]
+    primary_questions = client.calls[0][1]
+    secondary_questions = client.calls[1][1]
+    review_questions = client.calls[2][1]
+    assert title in expanded
+    assert first.rstrip("。") in expanded
+    assert clarification.rstrip("。") in expanded
+    assert len(expanded) <= 720
+    assert primary_questions["direction"]["instructions"] == secondary_questions["direction"]["instructions"]
+    assert primary_questions["evidence"]["instructions"] == secondary_questions["evidence"]["instructions"]
+    assert review_questions["direction"]["instructions"] != primary_questions["direction"]["instructions"]
+    assert review_questions["evidence"]["instructions"] != primary_questions["evidence"]["instructions"]
+    assert set(review_questions["direction"]["criteria"]) == set(primary_questions["direction"]["criteria"])
+    assert result["label"] == "neutral"
+    assert result["tentative"] is True
+    assert result["evidence"] == [clarification.rstrip("。")]
+    assert result["evidence"][0] in text
+
+
+@pytest.mark.parametrize(
+    "confirmed_adverse_fact",
+    [
+        "监管部门已对公司作出行政处罚并处以罚款。",
+        "公司未能按期交付已经签订的订单。",
+        "合作方已终止双方正在履行的供货合作。",
+    ],
+)
+def test_confirmed_adverse_fact_is_not_rewritten_as_neutral(confirmed_adverse_fact):
+    class AdverseFactClient(FakeClient):
+        def choose(self, state, questions, identity):
+            index = len(self.calls)
+            self.direction = ("negative", "uncertain", "neutral")[index]
+            self.evidence = ("e0", "e0", "e2")[index]
+            return super().choose(state, questions, identity)
+
+    text = f"公司受到处罚传闻\n公司就相关市场传言作出说明。{confirmed_adverse_fact}"
+    client = AdverseFactClient()
+    result = classify_news(client, _state(text), IDENTITY)
+
+    assert len(client.calls) == 3
+    assert confirmed_adverse_fact.rstrip("。") in client.calls[2][0]["untrusted_news_text"]
+    assert client.calls[2][1]["direction"]["instructions"] != client.calls[0][1]["direction"]["instructions"]
+    assert result["label"] == "risk_clue"
+    assert result["tentative"] is True
+
+
+def test_neutral_conflict_review_requires_evidence_from_clarification_sentence():
+    class WrongEvidenceClient(FakeClient):
+        def choose(self, state, questions, identity):
+            index = len(self.calls)
+            self.direction = ("negative", "uncertain", "neutral")[index]
+            self.evidence = "e0"
+            return super().choose(state, questions, identity)
+
+    text = (
+        "公司未与某企业开展业务合作\n"
+        "公司收到投资者对市场传言的咨询。公司表示从未开展相关合作且没有供货。"
+    )
+    client = WrongEvidenceClient()
+    result = classify_news(client, _state(text), IDENTITY)
+
+    assert len(client.calls) == 3
+    assert client.calls[2][1]["evidence"]["instructions"] != client.calls[0][1]["evidence"]["instructions"]
+    assert result["label"] == "risk_clue"
+    assert result["tentative"] is True
+
+
 def test_news_prompt_revision_invalidates_prior_news_review_key():
     state = _state()
     identifier = "article-1"
-    previous_version = f"{SERVICE_VERSION}/news-choice-3"
+    previous_version = f"{SERVICE_VERSION}/news-choice-6"
     raw = json.dumps(
         {"version": previous_version, "kind": "news", "id": identifier, "state": state},
         ensure_ascii=False,
@@ -218,7 +304,8 @@ def test_news_prompt_revision_invalidates_prior_news_review_key():
     ).encode("utf-8")
     old_key = hashlib.sha256(raw).hexdigest()
 
-    assert NEWS_VERSION != "news-choice-3"
+    assert NEWS_VERSION == "news-choice-7"
+    assert NEWS_VERSION != "news-choice-6"
     assert _input_key("news", identifier, state) != old_key
 
 

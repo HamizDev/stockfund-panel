@@ -6,8 +6,10 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from contextlib import suppress
 from datetime import date
 from datetime import time as day_time
+from pathlib import Path
 
 import polars as pl
 
@@ -22,8 +24,43 @@ _POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix='minute-reference')
 _WAIT_SECONDS = 4
 
 
-def _online_daily(repo, capset, symbol):
-    key = (str(repo.store.data_dir), preferences.get_daily_data_provider(), symbol)
+def prefetch(repo, capset, symbol: str) -> None:
+    """Overlap a missing optional baseline with the minute fetch, without waiting.
+
+    Uses the same two-worker queue and cache as resolve(); no separate request
+    pool, price inference, writes or background work for already valid baselines.
+    """
+    # Optional warm-up must not prevent the primary minute response. Resolve
+    # retains its existing bounded lookup and source/basis checks afterward.
+    with suppress(Exception):
+        _online_daily(repo, capset, symbol, wait=False)
+
+
+def _preference_revision():
+    """Non-creating file identity; atomic A->B->A edits remain distinguishable."""
+    from app.config import settings
+
+    path = Path(settings.data_dir) / 'user_data' / 'preferences.json'
+    try:
+        stat = path.stat()
+        return (str(path.resolve()), stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    except FileNotFoundError:
+        return (str(path), 'missing')
+    except OSError:
+        return None
+
+
+def _source_context():
+    revision = _preference_revision()
+    provider = preferences.get_daily_data_provider()
+    return (provider, revision) if revision is not None and revision == _preference_revision() else None
+
+
+def _online_daily(repo, capset, symbol, *, wait=True):
+    context = _source_context()
+    if context is None:
+        return None
+    key = (str(repo.store.data_dir), context, symbol)
     with _LOCK:
         hit = _CACHE.get(key)
         if hit is not None and time.monotonic() < hit[0]:
@@ -35,6 +72,8 @@ def _online_daily(repo, capset, symbol):
                 return None
             pending = _POOL.submit(_fetch_daily, key, repo, capset, symbol)
             _PENDING[key] = pending
+    if not wait:
+        return None
     try:
         return pending.result(timeout=_WAIT_SECONDS)
     except TimeoutError:
@@ -46,8 +85,12 @@ def _online_daily(repo, capset, symbol):
 def _fetch_daily(key, repo, capset, symbol):
     value = None
     try:
+        if _source_context() != key[1]:
+            return None
         frame, metadata = analysis_snapshot.load_snapshot(repo, capset, symbol, 30)
-        if metadata.get('source') == 'online' and metadata.get('price_basis') == 'unadjusted':
+        if (_source_context() == key[1]
+                and metadata.get('requested_provider', metadata.get('provider')) == key[1][0]
+                and metadata.get('source') == 'online' and metadata.get('price_basis') == 'unadjusted'):
             value = frame.select('symbol', 'date', 'close')
     except Exception:
         # Provider error text can contain private configuration. Never return it.
@@ -55,10 +98,11 @@ def _fetch_daily(key, repo, capset, symbol):
     finally:
         with _LOCK:
             _PENDING.pop(key, None)
-            _CACHE[key] = (time.monotonic() + (300 if value is not None else 15), value)
-            _CACHE.move_to_end(key)
-            while len(_CACHE) > _MAX_ENTRIES:
-                _CACHE.popitem(last=False)
+            if _source_context() == key[1]:
+                _CACHE[key] = (time.monotonic() + (300 if value is not None else 15), value)
+                _CACHE.move_to_end(key)
+                while len(_CACHE) > _MAX_ENTRIES:
+                    _CACHE.popitem(last=False)
     return value
 
 

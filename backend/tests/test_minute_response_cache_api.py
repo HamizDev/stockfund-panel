@@ -77,6 +77,7 @@ def _patch_api(
     monkeypatch.setattr(kline_api, "_get_previous_closes", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(kline_api, "_get_price_limit_info", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(kline_api.minute_reference, "resolve", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(kline_api.minute_reference, "prefetch", lambda *_args, **_kwargs: None)
 
     provider = SimpleNamespace(name="stocksdk", minute_fail_closed=True)
 

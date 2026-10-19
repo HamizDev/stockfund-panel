@@ -26,6 +26,12 @@ import {
   deleteReport, openHistoryReport, loadHistory,
 } from '@/lib/stockAnalysisStore'
 
+type InstrumentAssetType = 'stock' | 'etf' | 'index'
+
+function isInstrumentAssetType(value: string | null): value is InstrumentAssetType {
+  return value === 'stock' || value === 'etf' || value === 'index'
+}
+
 /**
  * 个股分析页 —— 日 K + 关键价位(压力/支撑/密集区/枢轴/前高前低)+ AI 四维分析。
  *
@@ -42,6 +48,7 @@ export function StockAnalysis() {
   const [confirmReport, setConfirmReport] = useState<{ id: string; created_at: string; focus: string } | null>(null)
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
   const [showPriceAlerts, setShowPriceAlerts] = useState(false)
+  const [knownAssetType, setKnownAssetType] = useState<{ symbol: string; assetType: InstrumentAssetType } | null>(null)
   const { last: lastStock, remember: rememberStock } = useLastStock('stock-analysis')
 
   // 进入页面立即加载历史报告(供右侧常驻列表)。store 内部有 historyLoaded 去重, 重复调用安全。
@@ -49,7 +56,9 @@ export function StockAnalysis() {
 
   const linkedSymbol = searchParams.get('symbol')
   const linkedName = searchParams.get('name')
-  const names = usePaperInstrumentNames(symbol ? [symbol] : [])
+  const linkedAssetType = searchParams.get('asset_type')
+  const nameIsKnown = !!name.trim() && name.trim() !== symbol
+  const names = usePaperInstrumentNames(symbol && !nameIsKnown ? [symbol] : [])
   const resolvedName = names.data?.names?.[symbol] || name || symbol
 
   // 自动恢复上次选中的股票(切走再回来不丢)。useLastStock 的 last 来自 localStorage, 同步可用。
@@ -58,19 +67,25 @@ export function StockAnalysis() {
       const nextName = linkedName || linkedSymbol
       setSymbol(linkedSymbol)
       setName(nextName)
+      setKnownAssetType(isInstrumentAssetType(linkedAssetType)
+        ? { symbol: linkedSymbol, assetType: linkedAssetType }
+        : null)
       rememberStock(linkedSymbol, nextName)
       return
     }
     if (!symbol && lastStock) {
       setSymbol(lastStock.symbol)
       setName(lastStock.name)
+      setKnownAssetType(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [linkedSymbol, linkedName, rememberStock])
+  }, [linkedSymbol, linkedName, linkedAssetType, rememberStock])
 
-  const onSelect = (sym: string, nm: string) => {
+  const onSelect = (sym: string, nm: string, selectedType?: InstrumentAssetType) => {
+    const assetType = selectedType ?? (knownAssetType?.symbol === sym ? knownAssetType.assetType : undefined)
     setSymbol(sym)
     setName(nm)
+    setKnownAssetType(assetType ? { symbol: sym, assetType } : null)
     setConfirmReport(null)
     setShowPriceAlerts(false)
     rememberStock(sym, nm)
@@ -78,6 +93,8 @@ export function StockAnalysis() {
       const next = new URLSearchParams(previous)
       next.set('symbol', sym)
       next.set('name', nm)
+      if (assetType) next.set('asset_type', assetType)
+      else next.delete('asset_type')
       return next
     })
   }
@@ -166,7 +183,11 @@ export function StockAnalysis() {
                 hint="搜索代码或名称，查看日 K、分时 / 分钟 K 与关键价位，并可让 AI 进行研究分析。"
               />
             ) : (
-              <StockAnalysisBoard key={symbol} symbol={symbol} />
+              <StockAnalysisBoard
+                key={symbol}
+                symbol={symbol}
+                knownAssetType={knownAssetType?.symbol === symbol ? knownAssetType.assetType : undefined}
+              />
             )}
           </div>
           <HistorySidebar />
@@ -215,7 +236,7 @@ function isAnalysisView(value: unknown): value is AnalysisView {
 }
 
 // 日线和分钟数据独立加载，缺少日线也能查看最新日内行情。
-export function StockAnalysisBoard({ symbol }: { symbol: string }) {
+export function StockAnalysisBoard({ symbol, knownAssetType }: { symbol: string; knownAssetType?: InstrumentAssetType }) {
   const [view, setView] = usePageState<AnalysisView>('stockAnalysis', () => ({ symbol, date: null, view: 'intraday' }), isAnalysisView)
   const selectedDate = view.symbol === symbol ? view.date : null
   const selectedView = view.symbol === symbol ? view.view : 'intraday'
@@ -234,12 +255,12 @@ export function StockAnalysisBoard({ symbol }: { symbol: string }) {
   const metadata = useQuery({
     queryKey: QK.instrumentSearch(symbol.slice(0, 6), 'stock,etf,index'),
     queryFn: () => api.instrumentSearch(symbol.slice(0, 6), 20, 'stock,etf,index'),
-    enabled: !!symbol,
+    enabled: !!symbol && !knownAssetType,
     staleTime: 300_000,
     retry: false,
   })
   const foundType = metadata.data?.results.find(item => item.symbol === symbol)?.asset_type
-  const assetType = foundType === 'stock' || foundType === 'etf' || foundType === 'index' ? foundType : undefined
+  const assetType = knownAssetType ?? (foundType === 'stock' || foundType === 'etf' || foundType === 'index' ? foundType : undefined)
   const selectDate = (date: string | null) => setView(previous => ({ ...previous, symbol, date }))
   const selectView = (next: 'intraday' | 'candles') => setView({ symbol, date: selectedDate, view: next })
   return <section aria-label="日K与分时分析" className="grid min-w-0 grid-cols-1 items-start gap-4 xl:grid-cols-2">

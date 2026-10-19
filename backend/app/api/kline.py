@@ -1274,6 +1274,8 @@ def get_minute(
     if live and trade_date == cn_today() and in_continuous_session():
         # 详情分时轮询: 当日盘中实时拉取最新一根K, 不落盘; 拉空(源侧延迟/
         # 时段边界)则落回下方本地优先路径。
+        if prev_close is None:
+            minute_reference.prefetch(repo, capset, symbol)
         live_df = kline_sync.fetch_minute_single(
             symbol, trade_date, asset_type=asset_type, capset=capset,
             raw_basis=raw_basis,
@@ -1330,6 +1332,8 @@ def get_minute(
         )
 
     # 本地不完整或无数据 → 从当前有效分钟源实时拉取
+    if prev_close is None:
+        minute_reference.prefetch(repo, capset, symbol)
     live_df = _fetch_minute_fallback(
         repo, symbol, trade_date, asset_type, capset, raw_basis, df,
     )

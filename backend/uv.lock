@@ -2513,7 +2513,7 @@ all = [
 
 [[package]]
 name = "stockfund-panel-backend"
-version = "0.0.7"
+version = "0.0.8"
 source = { editable = "." }
 dependencies = [
     { name = "apscheduler" },

@@ -31,8 +31,8 @@ beforeEach(() => {
 })
 afterEach(async () => { await act(async () => root.unmount()); query.clear(); host.remove() })
 async function settle() { for (let i = 0; i < 5; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) }) }
-async function render(symbol = '510300.SH') {
-  await act(async () => root.render(<QueryClientProvider client={query}><StockAnalysisBoard key={symbol} symbol={symbol} /></QueryClientProvider>))
+async function render(symbol = '510300.SH', knownAssetType?: 'stock' | 'etf' | 'index') {
+  await act(async () => root.render(<QueryClientProvider client={query}><StockAnalysisBoard key={symbol} symbol={symbol} knownAssetType={knownAssetType} /></QueryClientProvider>))
   await settle()
 }
 async function click(text: string) { await act(async () => [...host.querySelectorAll('button')].find(button => button.textContent === text)!.click()); await settle() }
@@ -44,6 +44,12 @@ it('loads ETF metadata and exposes latest minute data while the daily request is
   expect(minute.dataset.asset).toBe('etf')
   expect(minute.dataset.date).toBe('latest')
   expect(calls.daily).toHaveBeenCalledWith('510300.SH', 250, expect.any(AbortSignal))
+})
+
+it('uses a selected asset type immediately without issuing the metadata lookup', async () => {
+  await render('510300.SH', 'etf')
+  expect(host.querySelector<HTMLElement>('[data-testid="minute"]')?.dataset.asset).toBe('etf')
+  expect(calls.search).not.toHaveBeenCalled()
 })
 
 it('links a day candle to minutes, remembers the view on remount and isolates another symbol', async () => {

@@ -21,6 +21,7 @@ from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 @pytest.fixture(autouse=True)
 def isolate_reference_lookup(monkeypatch):
     monkeypatch.setattr('app.services.minute_reference._online_daily', lambda *_: None)
+    monkeypatch.setattr('app.services.minute_reference.prefetch', lambda *_: None)
 
 # 2026-08-26 是周三; 10:00 处于上午连续竞价, expected(已交易分钟) = 30
 _NOW = datetime(2026, 8, 26, 10, 0, tzinfo=CN_TZ)

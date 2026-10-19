@@ -59,6 +59,7 @@ def load_snapshot(repo, capset, symbol: str, days: int) -> tuple[pl.DataFrame, d
     start = end - timedelta(days=days * 2 + 180)
     asset_type = repo.resolve_asset_type(symbol)
     provider_name = preferences.get_daily_data_provider()
+    requested_provider = provider_name
     warning = None
     frame = pl.DataFrame()
     try:
@@ -105,7 +106,7 @@ def load_snapshot(repo, capset, symbol: str, days: int) -> tuple[pl.DataFrame, d
         frame, source, basis = local, "local", "local_enriched"
     metadata = {
         "symbol": symbol, "asset_type": asset_type, "source": source,
-        "provider": provider_name, "price_basis": basis,
+        "provider": provider_name, "requested_provider": requested_provider, "price_basis": basis,
         "as_of": str(frame["date"][-1]) if not frame.is_empty() else None,
         "checked_at": now.isoformat(), "warning": warning,
     }

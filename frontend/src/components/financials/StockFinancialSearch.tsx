@@ -7,7 +7,7 @@ import { QK } from '@/lib/queryKeys'
 import { boardTag } from '@/components/stock-table/primitives'
 
 interface Props {
-  onSelect: (symbol: string, name: string) => void
+  onSelect: (symbol: string, name: string, assetType?: 'stock' | 'etf' | 'index') => void
   /** 搜索资产类型, 逗号分隔 (默认 'stock')。如 'stock,index' */
   assetTypes?: string
   placeholder?: string
@@ -50,8 +50,11 @@ export function StockFinancialSearch({ onSelect, assetTypes, placeholder = '输�
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
-  function handleSelect(r: { symbol: string; name: string }) {
-    onSelect(r.symbol, r.name)
+  function handleSelect(r: { symbol: string; name: string; asset_type?: string }) {
+    const assetType = r.asset_type === 'stock' || r.asset_type === 'etf' || r.asset_type === 'index'
+      ? r.asset_type
+      : undefined
+    onSelect(r.symbol, r.name, assetType)
     if (clearOnSelect) setQuery('')
     setOpen(false)
     setActiveIdx(-1)

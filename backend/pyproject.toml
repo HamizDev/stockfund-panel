@@ -1,6 +1,6 @@
 [project]
 name = "stockfund-panel-backend"
-version = "0.0.7"
+version = "0.0.8"
 description = "股票与基金数据看板、选股选基和回测分析"
 requires-python = ">=3.11"
 license = { text = "MIT" }

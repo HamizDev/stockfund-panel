@@ -1,5 +1,14 @@
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
-from app.custom.global_markets import provider, service, symbol_directory, symbol_search
+from app.custom.global_markets import (
+    hk_symbol_directory,
+    provider,
+    service,
+    symbol_directory,
+    symbol_search,
+)
 from app.custom.global_markets.catalog import MarketDataError, display_name, local_catalog
 
 
@@ -59,6 +68,8 @@ def test_service_resolves_known_chinese_names_without_remote_search(monkeypatch)
         AssertionError("known aliases must not reach Tencent")))
     monkeypatch.setattr(symbol_directory, "search", lambda *args: (_ for _ in ()).throw(
         AssertionError("known aliases must not reach Nasdaq Trader")))
+    monkeypatch.setattr(hk_symbol_directory, "load_rows", lambda *args: (_ for _ in ()).throw(
+        AssertionError("known aliases must not reach HKEX")))
     us = service.catalog("us", "海力士")
     hk = service.catalog("hk", "南方兩倍做多海力士")
     assert [row["symbol"] for row in us["items"]] == ["SKHY"]
@@ -72,6 +83,7 @@ def test_service_uses_tencent_after_yahoo_empty_and_marks_candidates(monkeypatch
     monkeypatch.setattr(provider, "search", lambda *_: [])
     monkeypatch.setattr(symbol_search, "search", lambda market, query: calls.append((market, query)) or fallback)
     monkeypatch.setattr(symbol_directory, "search", lambda *_: pytest.fail("HK must not use US directory"))
+    monkeypatch.setattr(hk_symbol_directory, "load_rows", lambda *_: pytest.fail("Tencent result should win"))
 
     result = service.catalog("hk", "中芯国际")
 
@@ -79,6 +91,72 @@ def test_service_uses_tencent_after_yahoo_empty_and_marks_candidates(monkeypatch
     assert result["items"] == fallback
     assert any("腾讯" in warning and "行情" in warning for warning in result["warnings"])
     assert "quote" not in result["items"][0]
+
+
+def test_hkex_directory_is_last_hk_search_fallback_and_preserves_source_metadata(monkeypatch):
+    query = "陌生ZXQTESTCORP2026"
+    fallback = [{
+        "symbol": "00981.HK", "name": query, "name_en": "HKEX ONLY",
+        "market": "hk", "kind": "stock", "category": "Equity",
+        "subcategory": "Equity Securities (Main Board)", "category_zh": "股本",
+        "subcategory_zh": "股本證券(主板)", "currency": "HKD",
+        "source": "HKEX Full List of Securities", "source_date": "2026-10-20",
+    }]
+    steps = []
+    monkeypatch.setattr(provider, "search", lambda *_: steps.append("yahoo") or [])
+    monkeypatch.setattr(symbol_search, "search", lambda *_: steps.append("tencent") or [])
+    monkeypatch.setattr(symbol_directory, "search", lambda *_: pytest.fail("HK must not use US directory"))
+    monkeypatch.setattr(hk_symbol_directory, "load_rows", lambda: steps.append("hkex") or fallback)
+
+    result = service.catalog("hk", query)
+
+    assert steps == ["yahoo", "tencent", "hkex"]
+    assert result["items"] == fallback
+    assert any("HKEX" in warning and "不提供行情" in warning for warning in result["warnings"])
+    assert "quote" not in result["items"][0]
+
+
+def test_concurrent_different_hk_queries_share_one_service_directory_download(monkeypatch):
+    row = {
+        "symbol": "00981.HK", "name": "ZZQALPHAX SAMPLE ISSUER", "name_en": "ZZQALPHAX SAMPLE ISSUER",
+        "market": "hk", "kind": "stock", "category": "Equity",
+        "subcategory": "Equity Securities (Main Board)", "category_zh": "股本",
+        "subcategory_zh": "股本證券(主板)", "currency": "HKD",
+        "source": "HKEX Full List of Securities", "source_date": "2026-10-20",
+    }
+    directory_key = ("hk-symbol-directory",)
+    service._CACHE.pop(directory_key, None)
+    service._FAILURES.pop(directory_key, None)
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def load_rows():
+        calls.append(True)
+        entered.set()
+        assert release.wait(3)
+        return [row]
+
+    monkeypatch.setattr(provider, "search", lambda *_: [])
+    monkeypatch.setattr(hk_symbol_directory, "load_rows", load_rows)
+    monkeypatch.setattr(symbol_search, "search", lambda *_: pytest.fail("English query should skip Tencent"))
+    monkeypatch.setattr(symbol_directory, "search", lambda *_: pytest.fail("HK must not use US directory"))
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(service.catalog, "hk", "ZZQALPHAX")
+            assert entered.wait(2)
+            second = executor.submit(service.catalog, "hk", "SAMPLEISSUER")
+            release.set()
+            first_result = first.result()
+            second_result = second.result()
+
+        assert len(calls) == 1
+        assert directory_key in service._CACHE
+        assert first_result["items"][0]["symbol"] == "00981.HK"
+        assert second_result["items"][0]["symbol"] == "00981.HK"
+    finally:
+        service._CACHE.pop(directory_key, None)
+        service._FAILURES.pop(directory_key, None)
 
 
 def test_service_skips_tencent_when_yahoo_has_results(monkeypatch):

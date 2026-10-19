@@ -50,6 +50,8 @@ const MAX_ACTIVE = 3
 let activeTasks: ActiveTask[] = []
 let history: HistoryReport[] = []
 let historyLoaded = false
+let historyRequest: Promise<void> | null = null
+let historyGeneration = 0
 const listeners = new Set<() => void>()
 
 let activeDialogTaskId: string | null = null
@@ -131,14 +133,34 @@ export function useDialogTask(): { task: ActiveTask | HistoryReport | null; mode
 
 // ===== 动作 =====
 
-export async function loadHistory(): Promise<void> {
-  try {
-    const res = await api.stockAnalysisReportsList()
-    history = res.reports ?? []
-    historyLoaded = true
-    rebuildSnap()
-    emit()
-  } catch { /* 静默 */ }
+export function loadHistory(): Promise<void> {
+  if (historyRequest) return historyRequest
+  const generation = historyGeneration
+  const request = Promise.resolve().then(async () => {
+    try {
+      if (generation !== historyGeneration) return
+      const res = await api.stockAnalysisReportsList()
+      if (generation !== historyGeneration) return
+      history = res.reports ?? []
+      historyLoaded = true
+      rebuildSnap()
+      emit()
+    } catch { /* 静默；未标记为已加载，因此下次调用可以重试 */ }
+  })
+  historyRequest = request
+  void request.finally(() => {
+    if (historyGeneration === generation && historyRequest === request) historyRequest = null
+  })
+  return request
+}
+
+export function resetHistory() {
+  historyGeneration += 1
+  historyRequest = null
+  history = []
+  historyLoaded = false
+  rebuildSnap()
+  emit()
 }
 
 export async function findLatestHistoryReport(symbol: string): Promise<HistoryReport | null> {
