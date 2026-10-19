@@ -1,5 +1,6 @@
-from app.custom.global_markets import provider, service
-from app.custom.global_markets.catalog import display_name, local_catalog
+import pytest
+from app.custom.global_markets import provider, service, symbol_directory, symbol_search
+from app.custom.global_markets.catalog import MarketDataError, display_name, local_catalog
 
 
 def symbols(market: str, query: str) -> list[str]:
@@ -54,8 +55,60 @@ def test_display_names_cover_search_only_rows():
 def test_service_resolves_known_chinese_names_without_remote_search(monkeypatch):
     monkeypatch.setattr(provider, "search", lambda *args: (_ for _ in ()).throw(
         AssertionError("known aliases should resolve locally")))
+    monkeypatch.setattr(symbol_search, "search", lambda *args: (_ for _ in ()).throw(
+        AssertionError("known aliases must not reach Tencent")))
+    monkeypatch.setattr(symbol_directory, "search", lambda *args: (_ for _ in ()).throw(
+        AssertionError("known aliases must not reach Nasdaq Trader")))
     us = service.catalog("us", "海力士")
     hk = service.catalog("hk", "南方兩倍做多海力士")
     assert [row["symbol"] for row in us["items"]] == ["SKHY"]
     assert [row["symbol"] for row in hk["items"]] == ["07709.HK"]
     assert not us["warnings"] and not hk["warnings"]
+
+
+def test_service_uses_tencent_after_yahoo_empty_and_marks_candidates(monkeypatch):
+    fallback = [{"symbol": "00981.HK", "name": "中芯国际", "market": "hk", "kind": "stock"}]
+    calls = []
+    monkeypatch.setattr(provider, "search", lambda *_: [])
+    monkeypatch.setattr(symbol_search, "search", lambda market, query: calls.append((market, query)) or fallback)
+    monkeypatch.setattr(symbol_directory, "search", lambda *_: pytest.fail("HK must not use US directory"))
+
+    result = service.catalog("hk", "中芯国际")
+
+    assert calls == [("hk", "中芯国际")]
+    assert result["items"] == fallback
+    assert any("腾讯" in warning and "行情" in warning for warning in result["warnings"])
+    assert "quote" not in result["items"][0]
+
+
+def test_service_skips_tencent_when_yahoo_has_results(monkeypatch):
+    yahoo = [{"symbol": "AAPL", "name": "Apple", "market": "us", "kind": "stock"}]
+    monkeypatch.setattr(provider, "search", lambda *_: yahoo)
+    monkeypatch.setattr(symbol_search, "search", lambda *_: pytest.fail("Yahoo result should win"))
+
+    result = service.catalog("us", "distinct yahoo result")
+
+    assert result["items"] == yahoo
+
+
+def test_tencent_failure_keeps_nasdaq_fallback_available(monkeypatch):
+    fallback = [{"symbol": "OPEN", "name": "Open Systems", "market": "us", "kind": "stock"}]
+    monkeypatch.setattr(provider, "search", lambda *_: (_ for _ in ()).throw(MarketDataError("Yahoo unavailable")))
+    monkeypatch.setattr(symbol_search, "search", lambda *_: (_ for _ in ()).throw(MarketDataError("Tencent unavailable")))
+    monkeypatch.setattr(symbol_directory, "search", lambda *_: fallback)
+
+    result = service.catalog("us", "未收录证券名称")
+
+    assert result["items"] == fallback
+    assert any("Nasdaq Trader" in warning for warning in result["warnings"])
+    assert any("腾讯" in warning for warning in result["warnings"])
+
+
+def test_english_code_failure_skips_chinese_search_and_keeps_code_probe(monkeypatch):
+    monkeypatch.setattr(provider, "search", lambda *_: (_ for _ in ()).throw(MarketDataError("Yahoo unavailable")))
+    monkeypatch.setattr(symbol_search, "search", lambda *_: pytest.fail("English code should skip Tencent"))
+    monkeypatch.setattr(symbol_directory, "search", lambda *_: [])
+
+    result = service.catalog("us", "IBM")
+
+    assert result["items"] == [{"symbol": "IBM", "name": "代码查询 · IBM", "market": "us", "kind": "stock"}]

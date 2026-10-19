@@ -129,6 +129,7 @@ def test_local_names_need_no_network_and_no_cross_market_results(monkeypatch):
 
 def test_remote_failure_exposes_a_code_probe_not_a_fabricated_instrument(monkeypatch):
     monkeypatch.setattr(provider, "search", lambda *args: (_ for _ in ()).throw(MarketDataError("坏请求")))
+    monkeypatch.setattr(service.symbol_search, "search", lambda *_: [])
     monkeypatch.setattr(service.symbol_directory, "search", lambda _: [])
     result = service.catalog("us", "IBM")
     assert result["items"][0]["name"].startswith("代码查询")

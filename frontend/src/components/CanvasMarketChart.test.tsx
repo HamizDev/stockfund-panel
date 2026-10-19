@@ -11,6 +11,17 @@ const canvasContext = {
   arc: vi.fn(), closePath: vi.fn(), save: vi.fn(), restore: vi.fn(), setLineDash: vi.fn(),
   fillText: vi.fn(), measureText: vi.fn((text: string) => ({ width: text.length * 6 })),
 } as unknown as CanvasRenderingContext2D
+const hoverCanvasContext = {
+  setTransform: vi.fn(), clearRect: vi.fn(), fillRect: vi.fn(), strokeRect: vi.fn(),
+  beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), stroke: vi.fn(), fill: vi.fn(),
+  arc: vi.fn(), closePath: vi.fn(), save: vi.fn(), restore: vi.fn(), setLineDash: vi.fn(),
+  fillText: vi.fn(), measureText: vi.fn((text: string) => ({ width: text.length * 6 })),
+} as unknown as CanvasRenderingContext2D
+
+function drawCallCount(context: CanvasRenderingContext2D): number {
+  return Object.values(context as unknown as Record<string, any>)
+    .reduce((total, method) => total + (method?.mock?.calls?.length ?? 0), 0)
+}
 
 let root: Root
 let host: HTMLDivElement
@@ -18,7 +29,9 @@ let host: HTMLDivElement
 beforeEach(() => {
   sessionStorage.clear()
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
-  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(canvasContext)
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
+    return (this.classList.contains('canvas-market-chart-hover') ? hoverCanvasContext : canvasContext) as any
+  })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -57,6 +70,46 @@ afterEach(async () => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   vi.useRealTimers()
+})
+
+it('does not repaint the static chart for every pointer move', async () => {
+  const bars = Array.from({ length: 240 }, (_, index) => ({
+    time: index + 1,
+    open: 10 + index * 0.01,
+    high: 10.5 + index * 0.01,
+    low: 9.5 + index * 0.01,
+    close: 10.1 + index * 0.01,
+    volume: 1000 + index,
+  }))
+  await act(async () => root.render(<CanvasMarketChart
+    bars={bars} symbol="TEST" contextKey="hover-render-count" visibleBars="all" showControls={false}
+  />))
+  const canvas = host.querySelector('canvas')!
+  const clearCallsBefore = (canvasContext.clearRect as any).mock.calls.length
+  const drawingCallsBefore = drawCallCount(canvasContext)
+  const overlayClearCallsBefore = (hoverCanvasContext.clearRect as any).mock.calls.length
+  const overlayDrawingCallsBefore = drawCallCount(hoverCanvasContext)
+  const overlayCrosshairsBefore = (hoverCanvasContext.stroke as any).mock.calls.length
+
+  for (const clientX of [70, 160, 250, 340, 430]) {
+    await act(async () => {
+      canvas.dispatchEvent(new MouseEvent('pointermove', {
+        bubbles: true, clientX, clientY: 120,
+      }))
+    })
+  }
+
+  const clearCallsAfter = (canvasContext.clearRect as any).mock.calls.length
+  const drawingCallsAfter = drawCallCount(canvasContext)
+  const overlayClearCallsAfter = (hoverCanvasContext.clearRect as any).mock.calls.length
+  const overlayDrawingCallsAfter = drawCallCount(hoverCanvasContext)
+
+  expect(clearCallsAfter).toBe(clearCallsBefore)
+  expect(drawingCallsAfter).toBe(drawingCallsBefore)
+  expect(overlayClearCallsAfter - overlayClearCallsBefore).toBe(5)
+  expect(overlayDrawingCallsAfter).toBeGreaterThan(overlayDrawingCallsBefore)
+  expect((hoverCanvasContext.stroke as any).mock.calls.length).toBeGreaterThan(overlayCrosshairsBefore)
+  expect(host.querySelector('.canvas-market-chart-hover')?.getAttribute('aria-hidden')).toBe('true')
 })
 
 it('renders empty input safely and exposes an empty chart status', async () => {
@@ -333,10 +386,13 @@ it('recomputes backing canvas size when DPR changes while ResizeObserver is acti
     symbol="TEST" contextKey="TEST" showControls={false}
   />))
   const canvas = host.querySelector('canvas')!
+  const hoverCanvas = host.querySelector<HTMLCanvasElement>('.canvas-market-chart-hover')!
   expect(canvas.width).toBe(640)
+  expect(hoverCanvas.width).toBe(640)
   expect(mediaQueries.length).toBeGreaterThan(0)
 
   Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 2 })
   await act(async () => mediaQueries[0].listener?.({ matches: false, media: '(resolution: 1dppx)' } as MediaQueryListEvent))
   expect(canvas.width).toBe(1280)
+  expect(hoverCanvas.width).toBe(1280)
 })

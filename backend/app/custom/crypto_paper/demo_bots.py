@@ -2,12 +2,14 @@
 
 Each preset owns one distinct instrument. Budgets are attribution ledgers, not
 exchange subaccounts. Durable intents are never retried after uncertain POSTs.
-Arming is session-only; restarting never silently resumes exchange orders.
+Restart recovery requires a separately opted-in, credential-bound policy and
+a fresh read-only ownership preflight. Existing accounts remain session-only.
 """
 # ruff: noqa: RUF001 -- localized simulation controls.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import threading
 import time
@@ -21,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.services.fs_utils import atomic_write_text
 
-from . import auto, demo_market, demo_trading
+from . import auto, demo_market, demo_service, demo_store, demo_trading
 from . import demo_execution as execution
 from .demo_client import DemoAPIError
 
@@ -38,6 +40,7 @@ _RUNTIME_LOCK = threading.RLock()
 _RUNTIME: dict[tuple[str, str], dict] = {}
 _CONTROL: dict[str, int] = {}
 _SEND_GATES: dict[str, _SendFence] = {}
+_BOOT_CHECKS: dict[str, dict] = {}
 HK = timezone(timedelta(hours=8))
 D = Decimal
 PRESETS = (
@@ -57,6 +60,7 @@ class EnabledRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     enabled: bool = Field(strict=True)
     confirm_demo: bool = Field(default=False, strict=True)
+    resume_on_restart: bool | None = Field(default=None, strict=True)
 
 
 class OwnershipError(DemoAPIError):
@@ -83,6 +87,12 @@ def _load(data_dir):
         if (any(bot.get(k) != v for k, v in preset.items()) or bot.get('budget_usdt') != 10
                 or bot.get('max_notional') != 90 or bot.get('leverage') != 10):
             raise DemoAPIError('官方模拟预设参数发生变化，请先核对原记录')
+        policy = bot.get('resume_on_restart', False)
+        if not isinstance(policy, bool) or (policy and (
+                not isinstance(bot.get('resume_fingerprint'), str)
+                or len(bot['resume_fingerprint']) != 64
+                or any(char not in '0123456789abcdef' for char in bot['resume_fingerprint']))):
+            raise DemoAPIError('模拟重启恢复配置无效，请核对后重新启用')
     return state
 
 
@@ -112,6 +122,14 @@ def _runtime_key(data_dir, identifier):
 
 def _credentials(data_dir):
     return demo_trading._credentials(data_dir, 'okx')
+
+
+def _saved_fingerprint(data_dir):
+    try:
+        credentials = demo_store.read(data_dir, 'okx')
+    except (demo_store.DemoStoreError, OSError, ValueError) as exc:
+        raise DemoAPIError('本机保存的模拟连接不可读取，请重新连接并核对') from exc
+    return hashlib.sha256(json.dumps(credentials, sort_keys=True).encode()).hexdigest() if credentials else None
 
 
 def _send_gate(data_dir):
@@ -155,6 +173,13 @@ def connection_change(data_dir, exchange):
                 if key[0] == root:
                     runtime['armed'] = False
                     runtime.pop('verified', None)
+        with _STORE_LOCK:
+            state = _load(data_dir)
+            opted_in = [bot for bot in state['bots'].values() if bot.get('resume_on_restart', False)]
+            for bot in opted_in:
+                bot['resume_on_restart'] = False
+            if opted_in:
+                _save(data_dir, state)
         yield
 
 
@@ -217,12 +242,17 @@ def _available(snapshot):
         raise DemoAPIError('官方模拟USDT可用余额无效') from exc
 
 
-def preflight(data_dir):
+def preflight(data_dir, *, identifiers=None):
     """Read current demo settings without arming, writing a ledger or sending orders."""
     with demo_trading._op(demo_trading._key(data_dir, 'okx')):
         credentials, generation, fingerprint = _credentials(data_dir)
         with _STORE_LOCK:
             bots = list(copy.deepcopy(_load(data_dir)['bots']).values())
+        if identifiers is not None:
+            selected_ids = set(identifiers)
+            if not selected_ids or not selected_ids <= {b['id'] for b in bots}:
+                raise DemoAPIError('待检查的官方模拟策略不存在')
+            bots = [b for b in bots if b['id'] in selected_ids]
         config = execution._transport(credentials, 'GET', '/api/v5/account/config')
         if not isinstance(config, list) or len(config) != 1 or not isinstance(config[0], dict):
             raise DemoAPIError('官方模拟账户配置不可核对，请稍后重试')
@@ -279,6 +309,8 @@ def preflight(data_dir):
 
 
 def set_enabled(data_dir, request: EnabledRequest, identifier=None):
+    if request.resume_on_restart and not request.enabled:
+        raise DemoAPIError('重启恢复须在明确启用官方模拟时设置')
     root = str(data_dir.resolve())
     with _STORE_LOCK:
         state = _load(data_dir)
@@ -298,7 +330,8 @@ def set_enabled(data_dir, request: EnabledRequest, identifier=None):
             while fence.inflight:
                 fence.condition.wait()
         for item in ids:
-            _edit(data_dir, item, lambda b: b.update(enabled=False, status='paused', reason='已暂停；不会自动平仓，已有持仓和挂单需继续核对'))
+            _edit(data_dir, item, lambda b: b.update(enabled=False, resume_on_restart=False,
+                status='paused', reason='已暂停；不会自动平仓，已有持仓和挂单需继续核对'))
         return status(data_dir)
     if not request.confirm_demo:
         raise DemoAPIError('请明确确认仅使用官方模拟资金启用这组策略')
@@ -306,6 +339,14 @@ def set_enabled(data_dir, request: EnabledRequest, identifier=None):
         if demo_trading.status(data_dir, 'okx')['armed']:
             raise DemoAPIError('请先暂停原单策略官方模拟执行，避免共享仓位冲突')
         credentials, generation, fingerprint = _credentials(data_dir)
+        policies = {}
+        for item in ids:
+            bot = state['bots'][item]
+            opted_in = request.resume_on_restart if request.resume_on_restart is not None else (
+                bot.get('resume_on_restart', False) and bot.get('resume_fingerprint') == fingerprint)
+            if opted_in and _saved_fingerprint(data_dir) != fingerprint:
+                raise DemoAPIError('重启恢复需要先将当前官方模拟连接保存到本机')
+            policies[item] = bool(opted_in)
         snapshot = execution.snapshot(credentials)
         if _available(snapshot) < sum(D(state['bots'][item]['budget_usdt']) for item in ids):
             raise DemoAPIError('官方模拟USDT可用余额不足策略额度总和')
@@ -327,9 +368,62 @@ def set_enabled(data_dir, request: EnabledRequest, identifier=None):
                 _RUNTIME[_runtime_key(data_dir, item)] = {'armed': True, 'generation': generation,
                     'fingerprint': fingerprint, 'verified': (generation, fingerprint)}
         for item in ids:
-            _edit(data_dir, item, lambda b: b.update(enabled=True, position_verified=True, last_verified_ms=int(time.time() * 1000),
+            _edit(data_dir, item, lambda b, item=item: b.update(enabled=True, position_verified=True, last_verified_ms=int(time.time() * 1000),
+                resume_on_restart=policies[item], resume_fingerprint=fingerprint if policies[item] else None,
                 status='waiting', reason='官方模拟已启用，等待已收盘K线与交易条件'))
     return status(data_dir)
+
+
+def _resume_after_restart(data_dir):
+    root = str(data_dir.resolve())
+    with _STORE_LOCK:
+        selected = [b for b in _load(data_dir)['bots'].values()
+                    if b['enabled'] and b.get('resume_on_restart', False)]
+    with _RUNTIME_LOCK:
+        selected = [copy.deepcopy(b) for b in selected if _runtime_key(data_dir, b['id']) not in _RUNTIME]
+        if not selected or time.monotonic() < _BOOT_CHECKS.get(root, {}).get('next_check', 0):
+            return
+        token = _CONTROL.get(root, 0)
+        _BOOT_CHECKS[root] = {'next_check': time.monotonic() + 60,
+                              'reason': '正在核对重启后的官方模拟连接与仓位'}
+    try:
+        # This may lazily load an already-saved encrypted profile. It respects
+        # explicit disconnects and never creates or alters API credentials.
+        demo_service.snapshot(data_dir, 'okx', refresh=True)
+        _, generation, fingerprint = _credentials(data_dir)
+        if _saved_fingerprint(data_dir) != fingerprint or any(
+                b.get('resume_fingerprint') != fingerprint for b in selected):
+            raise DemoAPIError('模拟连接已变化，重启恢复未启用，请核对后重新授权')
+        if any(b['pending'] for b in selected):
+            # The existing tick may now query the old client ID with the saved
+            # connection; no arming or new request is allowed before it settles.
+            raise DemoAPIError('存在待核对委托，重启恢复等待官方对账')
+        checked = preflight(data_dir, identifiers=[b['id'] for b in selected])
+        if not checked['ready']:
+            raise DemoAPIError('官方模拟重启预检尚未通过，请检查运行条件')
+        _, current_generation, current_fingerprint = _credentials(data_dir)
+        with _STORE_LOCK, _RUNTIME_LOCK:
+            current = _load(data_dir)['bots']
+            if token != _CONTROL.get(root, 0) or (generation, fingerprint) != (current_generation, current_fingerprint):
+                return
+            for bot in selected:
+                latest = current[bot['id']]
+                if (not latest['enabled'] or not latest.get('resume_on_restart') or latest['pending']
+                        or latest.get('resume_fingerprint') != fingerprint
+                        or _runtime_key(data_dir, bot['id']) in _RUNTIME):
+                    return
+            for bot in selected:
+                _RUNTIME[_runtime_key(data_dir, bot['id'])] = {
+                    'armed': True, 'generation': generation, 'fingerprint': fingerprint,
+                    'verified': (generation, fingerprint), 'resumed_after_restart': True}
+                _edit(data_dir, bot['id'], lambda b: b.update(position_verified=True,
+                    last_verified_ms=int(time.time() * 1000), status='waiting',
+                    reason='重启后官方模拟对账通过，已按原规则恢复执行'))
+        with _RUNTIME_LOCK:
+            _BOOT_CHECKS.pop(root, None)
+    except DemoAPIError as exc:
+        with _RUNTIME_LOCK:
+            _BOOT_CHECKS[root]['reason'] = str(exc)
 
 
 def _update_valuation(bot, quote):
@@ -389,7 +483,8 @@ def reconcile(data_dir, identifier):
                 raise OwnershipError('订单部分成交后结束，请在官方核对仓位；本策略保持待对账')
             def rejected(b):
                 b['orders'][-1].update(state='rejected', exchange_state=result)
-                b.update(pending=None, status='paused', reason='官方订单未成交而结束，策略已暂停；不会重发')
+                b.update(pending=None, resume_on_restart=False, status='paused',
+                         reason='官方订单未成交而结束，策略已暂停；不会重发')
             _edit(data_dir, identifier, rejected)
             with _RUNTIME_LOCK:
                 _RUNTIME.setdefault(_runtime_key(data_dir, identifier), {})['armed'] = False
@@ -511,7 +606,8 @@ def _send(data_dir, bot, action, quote, spec):
             if not started:
                 b['pending'] = None
             reason = '请求结果待核对，策略已暂停；只查单不自动重发' if started else '发送前已暂停，本笔未发送'
-            b.update(status='paused', reason=str(DemoAPIError(reason, category=category, code=code)))
+            b.update(status='paused', resume_on_restart=False,
+                     reason=str(DemoAPIError(reason, category=category, code=code)))
         _edit(data_dir, identifier, uncertain)
         with _RUNTIME_LOCK:
             _RUNTIME.setdefault(_runtime_key(data_dir, identifier), {})['armed'] = False
@@ -573,6 +669,7 @@ def tick(data_dir):
         return
     try:
         with demo_trading._op(demo_trading._key(data_dir, 'okx')):
+            _resume_after_restart(data_dir)
             with _STORE_LOCK:
                 bots = list(copy.deepcopy(_load(data_dir)['bots']).values())
             for bot in bots:
@@ -587,7 +684,8 @@ def tick(data_dir):
                     with _RUNTIME_LOCK:
                         _RUNTIME.setdefault(_runtime_key(data_dir, bot['id']), {})['armed'] = False
                     reason = str(exc)
-                    _edit(data_dir, bot['id'], lambda b, reason=reason: b.update(status='paused', reason=reason))
+                    _edit(data_dir, bot['id'], lambda b, reason=reason: b.update(
+                        status='paused', resume_on_restart=False, reason=reason))
                 except DemoAPIError as exc:
                     allowed = {
                         '请先在OKX模拟盘设为合约账户、单向持仓模式',
@@ -636,13 +734,19 @@ def status(data_dir):
         record = {k: bot[k] for k in ('id', 'name', 'symbol', 'strategy_id', 'interval', 'description', 'budget_usdt',
             'max_notional', 'leverage', 'enabled', 'status', 'reason', 'last_check_ms', 'last_bar_ms', 'last_signal')}
         record['armed'] = armed
+        record['resume_on_restart'] = bot.get('resume_on_restart', False)
         record['position_verified'] = verified
         if bot['enabled'] and not armed:
             record['status'] = 'paused'
             if not ready:
                 record['reason'] = '请先连接欧易官方模拟，再重新启用策略；原成交与待对账订单保留'
             elif not runtime:
-                record['reason'] = '服务重启后未启用执行，请重新启用；原成交保留'
+                if bot.get('resume_on_restart', False):
+                    with _RUNTIME_LOCK:
+                        record['reason'] = _BOOT_CHECKS.get(str(data_dir.resolve()), {}).get(
+                            'reason', '已授权重启恢复，等待官方模拟连接与仓位核验')
+                else:
+                    record['reason'] = '服务重启后未启用执行，请重新启用；原成交保留'
             elif (runtime.get('generation'), runtime.get('fingerprint')) != (generation, fingerprint):
                 record['reason'] = '官方模拟连接已变化，请核对后重新启用；原成交保留'
         record['position'] = ({k: bot['position'][k] for k in ('side', 'quantity', 'entry_price', 'notional')} if not flat else None)

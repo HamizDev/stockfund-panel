@@ -19,6 +19,7 @@ from app.price_limits import is_no_limit_day, is_risk_warning_name, parse_listin
 from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync, trading_day
 from app.services import minute_adjust, minute_reference
+from app.services import minute_response_cache
 
 logger = logging.getLogger(__name__)
 
@@ -422,6 +423,158 @@ def _get_previous_closes(
             None,
         )
     return result
+
+
+def _minute_preference_file_identity() -> tuple[tuple[object, ...] | None, bool]:
+    """Read a non-creating identity for the preferences that select minute source."""
+    from app.config import settings
+
+    path = Path(settings.data_dir) / "user_data" / "preferences.json"
+    try:
+        path_key = str(path.resolve())
+    except OSError:
+        return (None, False)
+    try:
+        before = path.stat()
+    except FileNotFoundError:
+        # Missing preferences use the existing default provider. Keep this stable
+        # without calling preferences._path(), which creates the parent directory.
+        return (("missing", path_key), True)
+    except OSError:
+        return (None, False)
+
+    if before.st_size > 1024 * 1024:
+        return (None, False)
+    try:
+        content = path.read_bytes()
+        if not isinstance(json.loads(content.decode("utf-8")), dict):
+            return (None, False)
+        after = path.stat()
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return (None, False)
+
+    before_identity = (
+        before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size,
+    )
+    after_identity = (
+        after.st_dev, after.st_ino, after.st_mtime_ns, after.st_size,
+    )
+    if before_identity != after_identity or len(content) != after.st_size:
+        return (None, False)
+    return (("file", path_key, *after_identity), True)
+
+
+def _minute_fallback_source_context(capset, asset_type: str) -> tuple[str, bool]:
+    """Return the currently resolved source route and whether it is cache-safe."""
+    from app.services import preferences
+    from app.tickflow.capabilities import Cap
+
+    preference_identity, preference_readable = _minute_preference_file_identity()
+    selected = preferences.get_minute_data_provider()
+    preference_identity_after, preference_readable_after = _minute_preference_file_identity()
+    preference_stable = (
+        preference_readable
+        and preference_readable_after
+        and preference_identity == preference_identity_after
+    )
+    provider, fallback, _error = kline_sync._resolve_minute_provider(
+        selected, asset_type=asset_type,
+    )
+    tickflow_single = capset.has(Cap.KLINE_MINUTE_BY_SYMBOL)
+    if fallback:
+        resolved = "tickflow" if tickflow_single else "unavailable"
+        source_key = (
+            f"{selected}->{resolved};tickflow_single={int(tickflow_single)};"
+            f"preferences={preference_identity!r}"
+        )
+        return (source_key, tickflow_single and preference_stable)
+
+    resolved = str(getattr(provider, "name", selected) or selected)
+    # A custom provider that can silently fall through to TickFlow on a transient
+    # error has no source identity on its returned DataFrame. Do not cache that
+    # ambiguous result under the custom provider's key.
+    cache_safe = preference_stable and (
+        getattr(provider, "minute_price_basis", None) != "unverified"
+        and (not tickflow_single or getattr(provider, "minute_fail_closed", False) is True)
+    )
+    source_key = (
+        f"{selected}->{resolved};tickflow_single={int(tickflow_single)};"
+        f"preferences={preference_identity!r}"
+    )
+    return (source_key, cache_safe)
+
+
+def _fetch_minute_fallback(
+    repo,
+    symbol: str,
+    trade_date: date,
+    asset_type: str,
+    capset,
+    raw_basis: bool,
+    local_df,
+):
+    """Read an eligible closed-day fallback through a short-lived in-memory cache."""
+    def fetch():
+        return kline_sync.fetch_minute_single(
+            symbol, trade_date, asset_type=asset_type, capset=capset,
+            raw_basis=raw_basis,
+        )
+
+    # `live` only selects the earlier current-session fast path in get_minute;
+    # it is not a manual-refresh flag for a historical/post-close fallback.
+    if asset_type not in {"stock", "etf"} or not minute_response_cache.is_closed_minute_date(
+        trade_date, cn_today(), cn_now(),
+    ):
+        return fetch()
+
+    try:
+        source_context = _minute_fallback_source_context(capset, asset_type)
+        source_key, cache_safe = source_context
+        # When the provider adjusts its response during fetch, factor file
+        # revisions affect the cached value. Raw frames are projected after this
+        # cache lookup, so the current factors are applied on every API response.
+        if raw_basis:
+            adjustment_root = repo.store.data_dir
+        else:
+            from app.config import settings
+
+            adjustment_root = settings.data_dir
+        adjustment = minute_response_cache.adjustment_context(
+            adjustment_root, asset_type, raw_basis=raw_basis,
+        )
+        local_context = minute_response_cache.local_partition_context(local_df)
+        key = minute_response_cache.MinuteFetchKey(
+            data_dir=repo.store.data_dir,
+            provider=source_key,
+            asset_type=asset_type,
+            symbol=symbol,
+            trade_date=trade_date,
+            frequency="1m",
+            raw_basis=raw_basis,
+            adjustment_context=adjustment,
+            local_partition_context=local_context,
+        )
+    except Exception:
+        # Cache bookkeeping must not break the established fallback path.
+        logger.debug("minute fallback cache unavailable for %s %s", symbol, trade_date, exc_info=True)
+        return fetch()
+
+    if not cache_safe:
+        return fetch()
+
+    def source_unchanged(frame) -> bool:
+        try:
+            same_source = _minute_fallback_source_context(capset, asset_type) == source_context
+            # Match the endpoint's existing 90% full-session tolerance before
+            # retaining a result fetched for today's just-closed partition.
+            complete_today = trade_date != cn_today() or frame.height >= math.ceil(240 * 0.9)
+            return same_source and complete_today
+        except Exception:
+            return False
+
+    return minute_response_cache.minute_response_cache.get_or_fetch(
+        key, fetch, cache_if=source_unchanged,
+    )
 
 
 @router.get("/daily")
@@ -1177,9 +1330,8 @@ def get_minute(
         )
 
     # 本地不完整或无数据 → 从当前有效分钟源实时拉取
-    live_df = kline_sync.fetch_minute_single(
-        symbol, trade_date, asset_type=asset_type, capset=capset,
-        raw_basis=raw_basis,
+    live_df = _fetch_minute_fallback(
+        repo, symbol, trade_date, asset_type, capset, raw_basis, df,
     )
     if raw_basis and not live_df.is_empty():
         live_df = minute_adjust.apply_minute_adjustment(

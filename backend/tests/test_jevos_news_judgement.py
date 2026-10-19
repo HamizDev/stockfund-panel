@@ -1,6 +1,11 @@
 # ruff: noqa: RUF001 -- Chinese source fixtures exercise exact punctuation.
+import hashlib
+import json
+
 from app.custom.jevos.client import ChoiceResult, ModelInfo
-from app.custom.jevos.news_judgement import classify_news, excerpts
+from app.custom.jevos.news_judgement import NEWS_VERSION, classify_news, excerpts
+from app.custom.jevos.service import VERSION as SERVICE_VERSION
+from app.custom.jevos.service import _input_key
 
 IDENTITY = ModelInfo("jevos-test", "a" * 64)
 DIRECTIONS = ("positive", "negative", "neutral", "mixed", "uncertain")
@@ -133,6 +138,88 @@ def test_opposing_headline_and_body_opinions_are_not_presented_as_strong_directi
     assert result['label'] == 'positive_clue'
     assert result['tentative'] is True
     assert '判断有分歧' in result['reason']
+
+
+def test_opposing_same_event_facts_are_reconciled_before_returning_mixed():
+    class ReconcileClient(FakeClient):
+        def choose(self, state, questions, identity):
+            self.direction = ("negative", "positive", "mixed")[len(self.calls)]
+            return super().choose(state, questions, identity)
+
+    client = ReconcileClient()
+    result = classify_news(
+        client,
+        _state("公司第三季度归母净利润亏损1425万元\n公司第三季度营业收入同比增长113%"),
+        IDENTITY,
+    )
+
+    assert len(client.calls) == 3
+    combined_state, _, _ = client.calls[2]
+    assert "净利润亏损1425万元" in combined_state["untrusted_news_text"]
+    assert "营业收入同比增长113%" in combined_state["untrusted_news_text"]
+    assert result["label"] == "mixed"
+    assert len(result["evidence"]) == 1
+    assert "净利润亏损1425万元" in result["evidence"][0]
+    assert "营业收入同比增长113%" in result["evidence"][0]
+    assert result["evidence"][0] in client.calls[0][0]["untrusted_news_text"] + "\n" + client.calls[1][0]["untrusted_news_text"]
+    assert len(result["evidence"][0]) <= 280
+    assert "合并核对" in result["reason"]
+
+
+def test_conflicting_time_windows_do_not_force_a_mixed_label():
+    class ReconcileClient(FakeClient):
+        def choose(self, state, questions, identity):
+            self.direction = ("positive", "negative", "negative")[len(self.calls)]
+            return super().choose(state, questions, identity)
+
+    client = ReconcileClient()
+    result = classify_news(
+        client,
+        _state("公司盘前上涨3%\n公司上周累计下跌25%"),
+        IDENTITY,
+    )
+
+    assert len(client.calls) == 3
+    assert "盘前上涨3%" in client.calls[2][0]["untrusted_news_text"]
+    assert "上周累计下跌25%" in client.calls[2][0]["untrusted_news_text"]
+    assert result["label"] == "positive_clue"
+    assert result["tentative"] is True
+
+
+def test_different_subjects_do_not_force_a_mixed_label():
+    class ReconcileClient(FakeClient):
+        def choose(self, state, questions, identity):
+            self.direction = ("negative", "positive", "negative")[len(self.calls)]
+            return super().choose(state, questions, identity)
+
+    client = ReconcileClient()
+    result = classify_news(
+        client,
+        _state("行业总出货量同比下降10%\n品牌A和品牌B合计市场份额提升"),
+        IDENTITY,
+    )
+
+    assert len(client.calls) == 3
+    assert "行业总出货量同比下降10%" in client.calls[2][0]["untrusted_news_text"]
+    assert "品牌A和品牌B合计市场份额提升" in client.calls[2][0]["untrusted_news_text"]
+    assert result["label"] == "risk_clue"
+    assert result["tentative"] is True
+
+
+def test_news_prompt_revision_invalidates_prior_news_review_key():
+    state = _state()
+    identifier = "article-1"
+    previous_version = f"{SERVICE_VERSION}/news-choice-3"
+    raw = json.dumps(
+        {"version": previous_version, "kind": "news", "id": identifier, "state": state},
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+    ).encode("utf-8")
+    old_key = hashlib.sha256(raw).hexdigest()
+
+    assert NEWS_VERSION != "news-choice-3"
+    assert _input_key("news", identifier, state) != old_key
 
 
 def test_body_event_can_refine_a_neutral_routine_headline_without_overriding_a_rumor():

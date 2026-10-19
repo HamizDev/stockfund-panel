@@ -43,6 +43,7 @@ export interface DemoBot {
   leverage?: number
   enabled: boolean
   armed: boolean
+  resume_on_restart?: boolean
   status: string
   reason: string
   last_check_ms: number | null
@@ -65,6 +66,7 @@ export interface DemoBotsStatus {
 export interface DemoBotToggleRequest {
   enabled: boolean
   confirm_demo: boolean
+  resume_on_restart?: boolean
 }
 
 export interface DemoSetupCheck {
@@ -154,6 +156,7 @@ function isBot(value: unknown): value is DemoBot {
     && (value.leverage === undefined || value.leverage === 10)
     && typeof value.enabled === 'boolean'
     && typeof value.armed === 'boolean'
+    && (value.resume_on_restart === undefined || typeof value.resume_on_restart === 'boolean')
     && typeof value.status === 'string'
     && typeof value.reason === 'string'
     && isNullableNumber(value.last_check_ms)

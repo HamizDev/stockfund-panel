@@ -135,7 +135,7 @@ it('requires the in-page checkbox for per-bot enable and sends demo confirmation
   await checkConfirmation()
   await clickButton('启用此策略（官方模拟）')
 
-  expect(api.setBotEnabled).toHaveBeenCalledWith('okx', 'btc-breakout', { enabled: true, confirm_demo: true })
+  expect(api.setBotEnabled).toHaveBeenCalledWith('okx', 'btc-breakout', { enabled: true, confirm_demo: true, resume_on_restart: false })
   expect(host.querySelector<HTMLInputElement>('input[aria-label="确认仅使用欧易官方模拟"]')?.checked).toBe(false)
   expect(host.textContent).toContain('已请求启动官方模拟')
 })
@@ -149,6 +149,25 @@ it('allows disabling a saved strategy after restart without treating it as curre
   await clickButton('暂停此策略')
 
   expect(api.setBotEnabled).toHaveBeenCalledWith('okx', 'btc-breakout', { enabled: false, confirm_demo: false })
+})
+
+it('requires a separate restart opt-in and sends it with the demo confirmation', async () => {
+  await render()
+  const resume = host.querySelector<HTMLInputElement>('input[aria-label="启用时允许重启后自动恢复模拟策略"]')!
+  expect(resume.checked).toBe(false)
+  await act(async () => resume.click())
+  expect(api.setEnabled).not.toHaveBeenCalled()
+  await checkConfirmation()
+  await clickButton('全部启用（官方模拟）')
+  expect(api.setEnabled).toHaveBeenCalledWith('okx', { enabled: true, confirm_demo: true, resume_on_restart: true })
+})
+
+it('shows actual execution separately from saved enable and restart policy', async () => {
+  vi.mocked(api.status).mockResolvedValue(status({ bots: [bot({ enabled: true, armed: false, resume_on_restart: true })] }))
+  await render()
+  expect(host.textContent).toContain('当前执行 0 / 1 套')
+  expect(host.textContent).toContain('已允许重启恢复 1 套')
+  expect(host.textContent).toContain('已配置，当前未运行')
 })
 
 it('creates default-disabled presets only after the explicit button is pressed', async () => {

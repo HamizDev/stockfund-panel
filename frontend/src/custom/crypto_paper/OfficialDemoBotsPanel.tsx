@@ -46,6 +46,14 @@ const SAFE_REASONS = new Set([
   '策略标的存在官方活动委托，请先处理',
   '已有策略仓位不属于当前模拟连接',
   '启用期间连接已变化或已暂停，本次未启用',
+  '重启恢复需要先将当前官方模拟连接保存到本机',
+  '重启后官方模拟对账通过，已按原规则恢复执行',
+  '正在核对重启后的官方模拟连接与仓位',
+  '已授权重启恢复，等待官方模拟连接与仓位核验',
+  '存在待核对委托，重启恢复等待官方对账',
+  '模拟连接已变化，重启恢复未启用，请核对后重新授权',
+  '官方模拟重启预检尚未通过，请检查运行条件',
+  '本机保存的模拟连接不可读取，请重新连接并核对',
 ])
 
 function knownReason(reason: string): string | null {
@@ -274,6 +282,7 @@ export function OfficialDemoBotsPanel() {
   const jevos = useJevosStatus()
   const [confirmDemo, setConfirmDemo] = useState(false)
   const [pendingAction, setPendingAction] = useState<string | null>(null)
+  const [resumeOnRestart, setResumeOnRestart] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [preflight, setPreflight] = useState<DemoBotsPreflight | null>(null)
@@ -300,7 +309,9 @@ export function OfficialDemoBotsPanel() {
     setNotice(null)
     setError(null)
     try {
-      await demoBotsApi.setBotEnabled(EXCHANGE, bot.id, { enabled, confirm_demo: enabled })
+      await demoBotsApi.setBotEnabled(EXCHANGE, bot.id, {
+        enabled, confirm_demo: enabled, ...(enabled ? { resume_on_restart: resumeOnRestart } : {}),
+      })
       setNotice(enabled ? `${bot.name} 已请求启动官方模拟。` : `${bot.name} 已请求暂停；不会自动撤单或平仓。`)
       if (enabled) setConfirmDemo(false)
     } catch (failure) {
@@ -319,7 +330,9 @@ export function OfficialDemoBotsPanel() {
     setNotice(null)
     setError(null)
     try {
-      await demoBotsApi.setEnabled(EXCHANGE, { enabled, confirm_demo: enabled })
+      await demoBotsApi.setEnabled(EXCHANGE, {
+        enabled, confirm_demo: enabled, ...(enabled ? { resume_on_restart: resumeOnRestart } : {}),
+      })
       setNotice(enabled ? '已请求启动全部策略的官方模拟。' : '已请求暂停全部策略；不会自动撤单或平仓。')
       if (enabled) setConfirmDemo(false)
     } catch (failure) {
@@ -421,11 +434,20 @@ export function OfficialDemoBotsPanel() {
         <span><span className="font-medium text-foreground">确认仅使用欧易官方模拟环境，不涉及实盘资金</span><span className="mt-1 block text-[11px] leading-relaxed text-muted">此确认仅控制本页启动按钮；初始未勾选。每次启动成功后会清除此确认。</span></span>
       </label>
 
+      <label className="flex items-start gap-2 rounded-btn border border-border bg-base p-3 text-xs text-secondary">
+        <input type="checkbox" aria-label="启用时允许重启后自动恢复模拟策略" checked={resumeOnRestart}
+          onChange={event => setResumeOnRestart(event.target.checked)} disabled={Boolean(pendingAction)}
+          className="mt-0.5 accent-[var(--color-accent)]" />
+        <span><span className="font-medium text-foreground">启用时允许重启后自动恢复</span>
+          <span className="mt-1 block text-[11px] leading-relaxed text-muted">需已将同一模拟连接加密保存到本机。每次重启先核对官方账户、10倍逐仓、持仓与委托，通过后按原规则运行；暂停会撤销此设置，更换连接后需重新授权。</span></span>
+      </label>
+      <p className="text-[11px] text-muted" role="status">当前执行 {bots.filter(bot => bot.armed).length} / {bots.length} 套 · 已允许重启恢复 {bots.filter(bot => bot.resume_on_restart).length} 套</p>
+
       <div className="flex flex-wrap gap-2">
         <button type="button" onClick={() => { void checkSetup() }} disabled={!status.connection_ready || Boolean(pendingAction)} className={BUTTON_CLASS}>
           {pendingAction === 'preflight' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}检查运行条件（不下单）
         </button>
-        <button type="button" onClick={() => { void toggleAll(true) }} disabled={!canEnable || Boolean(pendingAction) || bots.every(bot => bot.armed)} className={ENABLE_BUTTON_CLASS}>
+        <button type="button" onClick={() => { void toggleAll(true) }} disabled={!canEnable || Boolean(pendingAction) || bots.every(bot => bot.armed && Boolean(bot.resume_on_restart) === resumeOnRestart)} className={ENABLE_BUTTON_CLASS}>
           {pendingAction === 'all' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}全部启用（官方模拟）
         </button>
         <button type="button" onClick={() => { void toggleAll(false) }} disabled={!canPause || Boolean(pendingAction)} className={PAUSE_BUTTON_CLASS}>

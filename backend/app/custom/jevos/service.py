@@ -133,6 +133,7 @@ class JevosService:
             value = json.loads(self.path.read_text(encoding='utf-8'))
             if value.get('version') != VERSION or not isinstance(value.get('records'), dict):
                 return
+            news_version_is_current = value.get('news_version') == NEWS_VERSION
             for key, row in list(value['records'].items())[-MAX_RECORDS:]:
                 record = Review.model_validate(row)
                 if record.input_key == key and (record.kind != 'news' or record.method == 'choice-v2'):
@@ -143,6 +144,10 @@ class JevosService:
                     self.latest[kind] = {identifier: key for identifier, key in rows.items()
                         if key in self.records and self.records[key]['kind'] == kind
                         and self.records[key]['id'] == identifier}
+                    if kind == 'news' and not news_version_is_current:
+                        # Preserve old news records as local history, but don't
+                        # surface labels produced by an older news prompt.
+                        self.latest[kind] = {}
         except (OSError, ValueError, TypeError, AttributeError, RecursionError, ValidationError):
             self.records = {}
             self.latest = {'news': {}, 'strategy': {}}
@@ -233,7 +238,8 @@ class JevosService:
                     for kind in self.latest:
                         self.latest[kind] = {identifier: key for identifier, key in self.latest[kind].items() if key in self.records or key in self.pending}
                     self.status = 'ready'
-                    saved = {'version': VERSION, 'records': copy.deepcopy(self.records), 'latest': copy.deepcopy(self.latest)}
+                    saved = {'version': VERSION, 'news_version': NEWS_VERSION,
+                             'records': copy.deepcopy(self.records), 'latest': copy.deepcopy(self.latest)}
                 if not self.stop_event.is_set():
                     self.path.parent.mkdir(parents=True, exist_ok=True)
                     atomic_write_text(self.path, json.dumps(saved, ensure_ascii=False, allow_nan=False), mode=0o600)

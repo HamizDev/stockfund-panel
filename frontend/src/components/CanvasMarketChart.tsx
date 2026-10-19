@@ -83,6 +83,21 @@ interface HoverPoint {
   bars: readonly CanvasChartBar[]
 }
 
+interface CanvasDrawGeometry {
+  width: number
+  height: number
+  start: number
+  end: number
+  left: number
+  right: number
+  top: number
+  priceBottom: number
+  volumeBottom: number
+  priceRange: { low: number; high: number }
+  priceSpan: number
+  slotWidth: number
+}
+
 const EMPTY_SERIES: readonly CanvasChartSeries[] = []
 const EMPTY_MARKERS: readonly CanvasChartMarker[] = []
 const EMPTY_PRICE_LINES: readonly CanvasChartPriceLine[] = []
@@ -205,6 +220,8 @@ export function CanvasMarketChart({
 }: CanvasMarketChartProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const hoverCanvasRef = useRef<HTMLCanvasElement>(null)
+  const drawGeometryRef = useRef<CanvasDrawGeometry | null>(null)
   const viewportRef = useRef<CanvasViewport>({ endIndex: -1, visibleCount: 0 })
   const previousCountRef = useRef(0)
   const previousTimesRef = useRef<readonly CanvasChartTime[]>([])
@@ -365,6 +382,7 @@ export function CanvasMarketChart({
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
+    drawGeometryRef.current = null
     const { width, height: chartH, pixelRatio } = dimensions
     canvas.width = Math.max(1, Math.round(width * pixelRatio))
     canvas.height = Math.max(1, Math.round(chartH * pixelRatio))
@@ -425,6 +443,20 @@ export function CanvasMarketChart({
     right = Math.max(left + 1, width - Math.min(axisWidth, Math.max(1, width - left - 1)))
     plotRightRef.current = right
     const slotWidth = (right - left) / Math.max(1, end - start + 1)
+    drawGeometryRef.current = {
+      width,
+      height: chartH,
+      start,
+      end,
+      left,
+      right,
+      top,
+      priceBottom,
+      volumeBottom,
+      priceRange,
+      priceSpan,
+      slotWidth,
+    }
     const yFor = (value: number) => priceBottom - ((value - priceRange.low) / priceSpan) * (priceBottom - top)
     const xFor = (index: number) => left + (index - start + 0.5) * slotWidth
 
@@ -584,43 +616,67 @@ export function CanvasMarketChart({
       }
     }
 
-    if (hover && hover.index >= start && hover.index <= end) {
-      const x = xFor(hover.index)
-      ctx.save()
-      ctx.strokeStyle = theme.crosshair
-      ctx.setLineDash([3, 3])
-      ctx.beginPath()
-      ctx.moveTo(x, top)
-      ctx.lineTo(x, showVolume ? volumeBottom : priceBottom)
-      if (hover.y >= top && hover.y <= priceBottom) {
-        ctx.moveTo(left, hover.y)
-        ctx.lineTo(right, hover.y)
-      }
-      ctx.stroke()
-      ctx.setLineDash([])
-      const price = hover.y >= top && hover.y <= priceBottom
-        ? priceRange.high - ((hover.y - top) / Math.max(1, priceBottom - top)) * priceSpan
-        : bars[hover.index].close
-      const priceText = priceFormatter(price)
-      ctx.fillStyle = theme.crosshairLabelBg
-      ctx.fillRect(right + 1, Math.max(top, Math.min(priceBottom - 18, hover.y - 9)), 62, 18)
-      ctx.fillStyle = theme.tooltipText
-      ctx.textAlign = 'left'
-      ctx.fillText(priceText, right + 5, Math.max(top + 9, Math.min(priceBottom - 9, hover.y)))
-      const dateText = formatTime(bars[hover.index].time)
-      const dateWidth = Math.min(width - 4, ctx.measureText(dateText).width + 10)
-      const dateX = Math.min(Math.max(left, x - dateWidth / 2), width - dateWidth - 2)
-      ctx.fillStyle = theme.crosshairLabelBg
-      ctx.fillRect(dateX, chartH - 19, dateWidth, 18)
-      ctx.fillStyle = theme.tooltipText
-      ctx.textAlign = 'center'
-      ctx.fillText(dateText, dateX + dateWidth / 2, chartH - 10)
-      ctx.restore()
-    }
     ctx.textAlign = 'left'
     ctx.textBaseline = 'alphabetic'
   }, [bars, dimensions, downColor, formatTime, linkedPrice, markers, priceFormatter, priceLines, series,
-    showVolume, symbol, theme, timeIndex, title, visibleSeries, viewportRevision, hover])
+    showVolume, symbol, theme, timeIndex, title, visibleSeries, viewportRevision])
+
+  useEffect(() => {
+    const canvas = hoverCanvasRef.current
+    if (!canvas) return
+    const { width, height: chartH, pixelRatio } = dimensions
+    const backingWidth = Math.max(1, Math.round(width * pixelRatio))
+    const backingHeight = Math.max(1, Math.round(chartH * pixelRatio))
+    if (canvas.width !== backingWidth) canvas.width = backingWidth
+    if (canvas.height !== backingHeight) canvas.height = backingHeight
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+    ctx.clearRect(0, 0, width, chartH)
+    ctx.font = '11px JetBrains Mono, ui-monospace, monospace'
+    ctx.lineWidth = 1
+    ctx.textBaseline = 'middle'
+
+    const geometry = drawGeometryRef.current
+    if (!hover || !geometry || hover.index < geometry.start || hover.index > geometry.end) return
+
+    const x = geometry.left + (hover.index - geometry.start + 0.5) * geometry.slotWidth
+    ctx.save()
+    ctx.strokeStyle = theme.crosshair
+    ctx.setLineDash([3, 3])
+    ctx.beginPath()
+    ctx.moveTo(x, geometry.top)
+    ctx.lineTo(x, showVolume ? geometry.volumeBottom : geometry.priceBottom)
+    if (hover.y >= geometry.top && hover.y <= geometry.priceBottom) {
+      ctx.moveTo(geometry.left, hover.y)
+      ctx.lineTo(geometry.right, hover.y)
+    }
+    ctx.stroke()
+    ctx.setLineDash([])
+    const price = hover.y >= geometry.top && hover.y <= geometry.priceBottom
+      ? geometry.priceRange.high - ((hover.y - geometry.top) / Math.max(1, geometry.priceBottom - geometry.top)) * geometry.priceSpan
+      : bars[hover.index].close
+    const priceText = priceFormatter(price)
+    ctx.fillStyle = theme.crosshairLabelBg
+    ctx.fillRect(geometry.right + 1,
+      Math.max(geometry.top, Math.min(geometry.priceBottom - 18, hover.y - 9)), 62, 18)
+    ctx.fillStyle = theme.tooltipText
+    ctx.textAlign = 'left'
+    ctx.fillText(priceText,
+      geometry.right + 5, Math.max(geometry.top + 9, Math.min(geometry.priceBottom - 9, hover.y)))
+    const dateText = formatTime(bars[hover.index].time)
+    const dateWidth = Math.min(geometry.width - 4, ctx.measureText(dateText).width + 10)
+    const dateX = Math.min(Math.max(geometry.left, x - dateWidth / 2), geometry.width - dateWidth - 2)
+    ctx.fillStyle = theme.crosshairLabelBg
+    ctx.fillRect(dateX, geometry.height - 19, dateWidth, 18)
+    ctx.fillStyle = theme.tooltipText
+    ctx.textAlign = 'center'
+    ctx.fillText(dateText, dateX + dateWidth / 2, geometry.height - 10)
+    ctx.restore()
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'alphabetic'
+  }, [bars, dimensions, formatTime, hover, linkedPrice, priceFormatter, priceLines, series,
+    showVolume, theme, visibleSeries, viewportRevision])
 
   const pointerPosition = (event: { currentTarget: HTMLCanvasElement; clientX: number; clientY: number }) => {
     const rect = event.currentTarget.getBoundingClientRect()
@@ -819,6 +875,13 @@ export function CanvasMarketChart({
         onPointerLeave={() => { if (!dragRef.current) setHover(null) }}
         onClick={handleCanvasClick}
         onDoubleClick={handleDoubleClick}
+      />
+      {/* Keep high-frequency hover feedback off the canvas that draws the candles and indicators. */}
+      <canvas
+        ref={hoverCanvasRef}
+        className="canvas-market-chart-hover pointer-events-none absolute inset-0 block w-full"
+        style={{ height: chartHeight }}
+        aria-hidden="true"
       />
       <div className="pointer-events-none absolute left-2 top-2 max-w-[calc(100%-1rem)] truncate rounded px-1.5 py-1 text-[10px] font-mono"
         style={{ background: theme.infoBarBg, color: theme.textStrong }} aria-live="polite" title={summary}>

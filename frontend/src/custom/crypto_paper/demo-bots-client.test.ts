@@ -66,6 +66,15 @@ it('rejects a malformed status without forwarding an arbitrary response detail',
   await expect(demoBotsApi.status('okx')).rejects.toThrow('官方模拟策略状态响应格式无效')
 })
 
+it('preserves boolean restart policy and rejects an invalid permission value', async () => {
+  const good = validStatus()
+  good.bots[0].resume_on_restart = true
+  fetchMock.mockResolvedValueOnce(reply(good))
+  expect((await demoBotsApi.status('okx')).bots[0].resume_on_restart).toBe(true)
+  fetchMock.mockResolvedValueOnce(reply({ ...good, bots: [{ ...good.bots[0], resume_on_restart: 'true' }] }))
+  await expect(demoBotsApi.status('okx')).rejects.toThrow('官方模拟策略状态响应格式无效')
+})
+
 it('preflight uses GET and rejects malformed configuration without echoing it', async () => {
   fetchMock.mockResolvedValueOnce(reply({ private: 'do-not-render' }))
   await expect(demoBotsApi.preflight('okx')).rejects.toThrow('官方模拟检查响应格式无效')

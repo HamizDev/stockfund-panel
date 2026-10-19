@@ -268,6 +268,7 @@ def test_completed_cache_stays_bounded_when_a_new_review_is_written(tmp_path: Pa
     oldest_key = next(iter(seeded))
     cache_path.write_text(json.dumps({
         "version": jevos_service.VERSION,
+        "news_version": jevos_service.NEWS_VERSION,
         "records": seeded,
         "latest": {
             "news": {row["id"]: key for key, row in seeded.items()},
@@ -298,6 +299,8 @@ def test_persisted_cache_hit_after_restart_does_not_repeat_inference(tmp_path: P
     first.offer_news([item], ["BTC-USDT-SWAP"])
     row = _wait_news(first, "article-1")
     _wait_persisted(first, row)
+    saved = json.loads(first.path.read_text(encoding="utf-8"))
+    assert saved["news_version"] == jevos_service.NEWS_VERSION
     first.stop()
     assert len(client.judgements) == 2
 
@@ -366,18 +369,21 @@ def test_cached_first_batch_does_not_starve_later_news(tmp_path: Path, make_serv
     assert service.snapshot()['queued'] == 0
 
 
-def test_news_rule_upgrade_discards_only_old_news_cache(tmp_path: Path, make_service):
+@pytest.mark.parametrize("news_version", [None, "news-choice-3"])
+def test_news_rule_upgrade_discards_only_old_news_cache(tmp_path: Path, make_service, news_version):
     key, news = _cached_review(1)
-    news['method'] = 'noul-v1'
     strategy_key = 'd' * 64
     strategy = {**news, 'kind': 'strategy', 'id': 'bot-1', 'input_key': strategy_key,
                 'label': 'support', 'original_signal': 'long'}
     cache = tmp_path / 'jevos' / 'advisories.json'
     cache.parent.mkdir()
-    cache.write_text(json.dumps({'version': jevos_service.VERSION, 'records': {key: news, strategy_key: strategy},
-        'latest': {'news': {news['id']: key}, 'strategy': {'bot-1': strategy_key}}}), encoding='utf-8')
+    value = {'version': jevos_service.VERSION, 'records': {key: news, strategy_key: strategy},
+             'latest': {'news': {news['id']: key}, 'strategy': {'bot-1': strategy_key}}}
+    if news_version is not None:
+        value['news_version'] = news_version
+    cache.write_text(json.dumps(value), encoding='utf-8')
     service = make_service(tmp_path, FakeClient())
-    assert key not in service.records
+    assert key in service.records
     assert service.records[strategy_key]['original_signal'] == 'long'
     assert service.latest == {'news': {}, 'strategy': {'bot-1': strategy_key}}
 

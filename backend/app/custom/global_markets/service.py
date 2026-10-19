@@ -8,7 +8,7 @@ import time
 from collections import OrderedDict
 from concurrent.futures import Future, TimeoutError
 
-from . import provider, symbol_directory
+from . import provider, symbol_directory, symbol_search
 from .catalog import MARKETS, MarketDataError, local_catalog, normalize_symbol
 
 _LOCK = threading.RLock()
@@ -114,7 +114,18 @@ def catalog(market: str, query: str = "") -> dict:
                          lambda: provider.search(market, query))
     except MarketDataError:
         remote = []
-        warnings.append("名称检索暂不可用，可尝试英文名称或完整股票代码")
+        warnings.append("Yahoo名称搜索暂不可用")
+    tencent_used = False
+    has_chinese = any("\u3400" <= char <= "\u9fff" or "\uf900" <= char <= "\ufaff" for char in query)
+    if not remote and has_chinese:
+        try:
+            remote = _cached(("tencent-search", market, query.casefold()), 3600,
+                             lambda: symbol_search.search(market, query))
+            tencent_used = bool(remote)
+        except MarketDataError:
+            warnings.append("腾讯公开名称搜索暂不可用")
+    if tencent_used:
+        warnings.append("候选来自腾讯公开名称搜索，仅用于标的定位；行情与类别仍需由行情源核验")
     directory_used = False
     if not remote and market == "us":
         try:
