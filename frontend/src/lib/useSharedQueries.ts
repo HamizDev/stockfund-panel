@@ -4,7 +4,7 @@
  * 实时数据走 SSE invalidation，无需前端轮询。
  * 只有管线进度等非 SSE 数据才用 refetchInterval。
  */
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, type QueryClient } from '@tanstack/react-query'
 import { api } from './api'
 import { QK } from './queryKeys'
 
@@ -83,6 +83,39 @@ export function useVersion() {
     queryFn: api.version,
     staleTime: Infinity,
   })
+}
+
+/** 指数行情 — Layout / Indices 共用，行情 SSE 按 index-quotes 前缀刷新。 */
+export function useIndexQuotes() {
+  return useQuery({
+    queryKey: QK.indexQuotes,
+    queryFn: () => api.indexQuotes(),
+    staleTime: 30_000,
+  })
+}
+
+/** 管线任务列表 — Layout / Data / Dashboard 共用；仅 poll owner 定时检查。 */
+export function usePipelineJobs(opts?: { enabled?: boolean; poll?: boolean }) {
+  return useQuery({
+    queryKey: QK.pipelineJobs,
+    queryFn: () => api.pipelineJobs(15),
+    enabled: opts?.enabled ?? true,
+    staleTime: 15_000,
+    refetchInterval: opts?.poll
+      ? query => query.state.data?.active_id ? 2_000 : 60_000
+      : false,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+  })
+}
+
+/** 任务启动成功后立即唤醒共享状态，并刷新包含新任务的历史列表。 */
+export function notifyPipelineJobStarted(queryClient: QueryClient, jobId: string) {
+  queryClient.setQueryData<Awaited<ReturnType<typeof api.pipelineJobs>>>(QK.pipelineJobs, old => ({
+    active_id: jobId,
+    jobs: old?.jobs ?? [],
+  }))
+  void queryClient.invalidateQueries({ queryKey: QK.pipelineJobs })
 }
 
 /** 数据状态 — Data / Screener 共用 */

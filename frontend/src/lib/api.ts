@@ -4,6 +4,7 @@
 // Prod:同源(FastAPI 托管前端 dist)
 
 import { toast } from '@/components/Toast'
+import type { IndicatorCatalog, IndicatorSearch, IndicatorSearchParams, IndicatorSource } from '@/custom/indicator_library/types'
 import type { JevosStatus } from '@/custom/jevos/types'
 import type {
   GlobalMarket,
@@ -2499,6 +2500,19 @@ export interface SectorRotationUniverseItem {
 
 // ===== API surface =====
 export const api = {
+  indicatorCatalog: (signal?: AbortSignal) => request<IndicatorCatalog>(
+    '/api/custom/indicator-library/catalog', { signal, quiet: true }),
+  indicatorSearch: (params: IndicatorSearchParams, signal?: AbortSignal) => request<IndicatorSearch>(
+    `/api/custom/indicator-library/search?${new URLSearchParams({ ...params, page: String(params.page), offline: String(params.offline) })}`,
+    { signal, quiet: true }),
+  indicatorSource: (id: string, version: string, offline: boolean, signal?: AbortSignal) => request<IndicatorSource>(
+    `/api/custom/indicator-library/source?${new URLSearchParams({ id, version, offline: String(offline) })}`,
+    { signal, quiet: true }).then(result => {
+      if (result?.id !== id || typeof result.source !== 'string' || result.source.length > 262144) {
+        throw new Error('源码响应与所选脚本不匹配')
+      }
+      return result
+    }),
   etfShares: (symbol: string, date: string | null = null, signal?: AbortSignal) => {
     const query = new URLSearchParams({ symbol })
     if (date) query.set('date', date)

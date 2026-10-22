@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useEffect, useRef } from 'react'
+import { lazy, Suspense, useState, useEffect } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -28,6 +28,7 @@ import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { usePaperInstrumentNames } from '@/lib/usePaperInstrumentNames'
 import { boardTag } from '@/components/stock-table/primitives'
+import { usePipelineJobs, notifyPipelineJobStarted } from '@/lib/useSharedQueries'
 
 function n(v: number | null | undefined) {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
@@ -704,6 +705,7 @@ function ChinaDashboard() {
 
   // ===== 盘后管道触发(看板内一键获取数据) =====
   const [fetchJobId, setFetchJobId] = useState<string | null>(null)
+  const pipelineJobs = usePipelineJobs({ enabled: hasNoData })
   const fetchStatus = useQuery({
     queryKey: QK.pipelineJob(fetchJobId ?? ''),
     queryFn: () => api.pipelineJob(fetchJobId!),
@@ -715,7 +717,10 @@ function ChinaDashboard() {
   })
   const startFetch = useMutation({
     mutationFn: api.pipelineRun,
-    onSuccess: ({ job_id }) => setFetchJobId(job_id),
+    onSuccess: ({ job_id }) => {
+      setFetchJobId(job_id)
+      notifyPipelineJobStarted(qc, job_id)
+    },
   })
   const isFetching = startFetch.isPending
     || fetchStatus.data?.status === 'running'
@@ -743,19 +748,13 @@ function ChinaDashboard() {
     }
   }, [fetchSucceeded, qc])
 
-  // 组件重新挂载时(从其他页面切回)恢复正在运行的同步任务进度。
-  // 原因: fetchJobId 是组件内状态, 切走页面时组件卸载、状态丢失, 切回后进度卡片消失。
-  // 修复: 挂载时若无本地数据且未跟踪任何 job, 查一次后端是否有 active job, 有则接管。
-  const resumeTriedRef = useRef(false)
+  // 组件重新挂载时(从其他页面切回)从共享任务状态恢复运行中的进度。
   useEffect(() => {
-    if (resumeTriedRef.current) return
     if (!hasNoData) return
     if (fetchJobId) return
-    resumeTriedRef.current = true
-    api.pipelineJobs(1).then(({ active_id }) => {
-      if (active_id) setFetchJobId(active_id)
-    }).catch(() => { /* 查询失败不阻塞, 用户仍可手动点击获取 */ })
-  }, [hasNoData, fetchJobId])
+    if (!pipelineJobs.isFetched || pipelineJobs.isFetching) return
+    if (pipelineJobs.data?.active_id) setFetchJobId(pipelineJobs.data.active_id)
+  }, [hasNoData, fetchJobId, pipelineJobs.data?.active_id, pipelineJobs.isFetched, pipelineJobs.isFetching])
 
   // 手动刷新: 先重建后端 Polars 缓存(解决跨天残留), 再重新拉看板数据
   const handleRefresh = () => {

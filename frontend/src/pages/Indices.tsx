@@ -10,6 +10,7 @@ import { dailyChartRows } from '@/lib/dailyChartRows'
 import { EChartsCandlestick } from '@/components/EChartsCandlestick'
 import { EChartsIntraday } from '@/components/EChartsIntraday'
 import { INSTRUMENT_VIEW_GC_MS, useInstrumentViewCache } from '@/lib/useInstrumentViewCache'
+import { useIndexQuotes } from '@/lib/useSharedQueries'
 
 function defaultRange() {
   const end = cnToday()
@@ -121,11 +122,7 @@ export function Indices() {
     setSearchParams({ symbol })
   }
 
-  const quotes = useQuery({
-    queryKey: QK.indexQuotes,
-    queryFn: () => api.indexQuotes(),
-    placeholderData: (prev) => prev,
-  })
+  const quotes = useIndexQuotes()
 
   const daily = useQuery({
     queryKey: QK.indexDaily(selectedSymbol, range.start, dailyEnd),

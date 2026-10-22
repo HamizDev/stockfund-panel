@@ -10,6 +10,11 @@ import type { GlobalMarket, GlobalMarketChartInterval } from '@/custom/global_ma
 // ===== Query Key 工厂 =====
 
 export const QK = {
+  indicatorCatalog: ['indicator-library', 'catalog'] as const,
+  indicatorSearch: (q: string, author: string, kind: string, page: number, offline: boolean) =>
+    ['indicator-library', 'search', q, author, kind, page, offline] as const,
+  indicatorSource: (id: string, version: string, offline: boolean) =>
+    ['indicator-library', 'source', id, version, offline] as const,
   marketMembershipStatus: ['market-membership-status'] as const,
   newsFeed: ['news-feed'] as const,
   jevosStatus: ['jevos-status'] as const,

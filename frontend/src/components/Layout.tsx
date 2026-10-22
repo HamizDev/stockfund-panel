@@ -15,6 +15,8 @@ import {
   usePreferences,
   useQuoteStatus,
   useVersion,
+  useIndexQuotes,
+  usePipelineJobs,
 } from '@/lib/useSharedQueries'
 import { useUpdateCheck } from '@/lib/updateCheck'
 import {
@@ -446,12 +448,7 @@ export function Layout() {
   )
 
   // 数据同步状态轮询: 有活跃 job 时「数据」菜单项显示转圈
-  const { data: pipelineJobs } = useQuery({
-    queryKey: QK.pipelineJobs,
-    queryFn: () => api.pipelineJobs(1),
-    refetchInterval: (query) => (query.state.data?.active_id ? 2000 : 15000),
-    refetchIntervalInBackground: true,
-  })
+  const { data: pipelineJobs } = usePipelineJobs({ poll: true })
   const isDataSyncing = !!pipelineJobs?.active_id
 
   // 数据同步完成的"瞬时反馈": isDataSyncing 从 true→false 时显示绿色对勾,
@@ -484,12 +481,7 @@ export function Layout() {
   }
   // 指数条: 固定核心五只 (产品契约, 不再可配置), 常驻显示
   const sidebarIndexes = CORE_INDEXES
-  const { data: sidebarIndexQuotes } = useQuery({
-    queryKey: [...QK.indexQuotes, 'sidebar', 'core'] as const,
-    queryFn: () => api.indexQuotes(sidebarIndexes.map(p => p.symbol)),
-    enabled: sidebarIndexes.length > 0,
-    placeholderData: (prev) => prev,
-  })
+  const { data: sidebarIndexQuotes } = useIndexQuotes()
 
   // SSE: 行情更新时自动刷新相关 queries + 告警通知
   useQuoteStream(realtimeEnabled, prefs?.sse_refresh_pages)

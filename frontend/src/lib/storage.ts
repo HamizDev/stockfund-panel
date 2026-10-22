@@ -61,6 +61,8 @@ export const storage = {
   globalIndustryView: kv<unknown>('global-industries-view', 'session'),
   /** 只读页面的选择/筛选；按标签页保存，不包含账户操作表单或实时行情快照。 */
   pageView: {
+    indicatorLibrary: kv<unknown>('page-view:indicator-library', 'session'),
+    researchMaterialsTab: kv<unknown>('page-view:research-materials-tab', 'session'),
     indices: kv<unknown>('page-view:indices', 'session'),
     stockAnalysis: kv<unknown>('page-view:stock-analysis', 'session'),
     dashboardCn: kv<unknown>('page-view:dashboard:cn', 'session'),

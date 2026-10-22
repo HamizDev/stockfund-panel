@@ -17,6 +17,7 @@ import {
   AlertTriangle,
   Info,
   WandSparkles,
+  BookOpen,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { EndpointTestDialog } from '@/components/EndpointTestDialog'
@@ -29,6 +30,8 @@ import {
   useQuoteStatus,
   useQuoteInterval,
   useDataStatus,
+  usePipelineJobs,
+  notifyPipelineJobStarted,
 } from '@/lib/useSharedQueries'
 import { useToggleRealtimeQuotes, useUpdateQuoteInterval } from '@/lib/useSharedMutations'
 import { MissingCapChip, routeCapUsable, routeProviderDisplay, type RouteCapId } from '@/lib/capability-labels'
@@ -84,11 +87,7 @@ export function Data() {
     refetchInterval: activeJobId ? false : 30_000,
   })
 
-  const history = useQuery({
-    queryKey: QK.pipelineJobs,
-    queryFn: () => api.pipelineJobs(15),
-    refetchInterval: activeJobId ? false : 60_000,
-  })
+  const history = usePipelineJobs()
 
   const job = useQuery({
     queryKey: QK.pipelineJob(activeJobId ?? ''),
@@ -105,6 +104,7 @@ export function Data() {
     onSuccess: ({ job_id }) => {
       setActiveJobId(job_id)
       startTime.current = Date.now()
+      notifyPipelineJobStarted(qc, job_id)
     },
   })
 
@@ -640,6 +640,13 @@ export function Data() {
             </button>
             <div className="w-px h-4 bg-border" />
             <div className="flex items-center gap-1.5">
+              <Link
+                to="/indicator-library"
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150"
+              >
+                <BookOpen className="h-3.5 w-3.5" />
+                指标研究
+              </Link>
               <button
                 onClick={() => setShowCreateExt(true)}
                 className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150"

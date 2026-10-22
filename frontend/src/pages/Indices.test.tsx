@@ -47,6 +47,7 @@ vi.mock('@/lib/api', () => ({
 }))
 vi.mock('@/lib/useSharedQueries', () => ({
   useCapabilities: () => ({ data: { capabilities: {} } }),
+  useIndexQuotes: () => ({ data: { rows: [], count: 5 } }),
 }))
 vi.mock('@/components/EChartsCandlestick', () => ({
   EChartsCandlestick: ({ data, onDateClick }: {
