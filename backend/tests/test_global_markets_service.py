@@ -38,6 +38,7 @@ def test_market_interval_keys_and_defensive_copies(monkeypatch):
         return value(*args)
 
     monkeypatch.setattr(provider, "fetch_chart", fetch)
+    monkeypatch.setattr(service, "_submit_hk_classification", lambda _symbol: None)
     service.chart("hk", "700", "1d")["bars"][0]["close"] = 999
     hit = service.chart("hk", "00700.HK", "1d")
     assert hit["cached"] and hit["bars"][0]["close"] == 10
@@ -45,6 +46,22 @@ def test_market_interval_keys_and_defensive_copies(monkeypatch):
     service.chart("us", "AAPL", "1m")
     assert len(calls) == 3
     assert len(service._CACHE) == 3
+
+
+def test_chart_route_preserves_optional_classification_contract(monkeypatch):
+    app = FastAPI()
+    app.include_router(build_router())
+    expected = {"market": "hk", "classification": {
+        "source": "eastmoney_hk_f10", "system": "eastmoney_belong_industry",
+        "industry": "软件服务", "fetched_at_ms": 123,
+    }}
+    monkeypatch.setattr(service, "chart", lambda *_args: expected)
+
+    with TestClient(app) as client:
+        response = client.get("/api/custom/global-markets/chart?market=hk&symbol=00700&interval=1d")
+
+    assert response.status_code == 200
+    assert response.json() == expected
 
 
 def test_stale_data_is_explicit_and_original_fetch_time_retained(monkeypatch):

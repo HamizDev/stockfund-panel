@@ -267,7 +267,6 @@ export function FundCandidateCard({
   const category = item.fund_type ?? (resultFundType === 'all' ? null : resultFundType)
   const holdingItems = item.research?.holdings?.items ?? []
   const gap = fundCandidateDataGap(item.research)
-  const source = item.research?.source === 'eastmoney' ? '东方财富公开研究资料' : '东方财富公开排名'
   const copyCode = `${item.code}.OF`
   const detailsUrl = `/fund?code=${encodeURIComponent(copyCode)}&name=${encodeURIComponent(item.name)}&research_horizon=${encodeURIComponent(candidateHorizon)}`
   const actionLabel = analysisStatus === 'done'
@@ -333,7 +332,6 @@ export function FundCandidateCard({
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/60 pt-2 text-[11px] leading-[18px] text-secondary">
-        <span>来源 {source}</span>
         <span>净值日期 {navDateLabel}</span>
         <span className={`rounded-full border px-1.5 py-0.5 text-[11px] leading-4 ${analysisTone}`}>AI {analysisLabel}</span>
         <span>{modelLabel}</span>

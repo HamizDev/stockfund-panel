@@ -5,7 +5,7 @@ import gzip
 import json
 import logging
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from functools import lru_cache
@@ -14,7 +14,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
-from app.market_time import cn_now, cn_today, in_continuous_session
+from app.market_time import CN_TZ, cn_now, cn_today, in_continuous_session
 from app.price_limits import is_no_limit_day, is_risk_warning_name, parse_listing_date, price_limit_pct
 from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync, trading_day
@@ -513,19 +513,24 @@ def _fetch_minute_fallback(
     raw_basis: bool,
     local_df,
 ):
-    """Read an eligible closed-day fallback through a short-lived in-memory cache."""
+    """Share requested minutes in memory only, with a shorter live-session TTL."""
     def fetch():
         return kline_sync.fetch_minute_single(
             symbol, trade_date, asset_type=asset_type, capset=capset,
-            raw_basis=raw_basis,
+            # Today's projection ratio is one. Enforce raw fetches even if the
+            # selected custom source falls back to native TickFlow; the session
+            # reference must not depend on which upstream actually responded.
+            raw_basis=raw_basis or trade_date == cn_today(),
         )
 
     # `live` only selects the earlier current-session fast path in get_minute;
     # it is not a manual-refresh flag for a historical/post-close fallback.
-    if asset_type not in {"stock", "etf"} or not minute_response_cache.is_closed_minute_date(
-        trade_date, cn_today(), cn_now(),
-    ):
+    today = cn_today()
+    if asset_type not in {"stock", "etf"} or trade_date > today:
         return fetch()
+    closed = minute_response_cache.is_closed_minute_date(trade_date, today, cn_now())
+    cache = (minute_response_cache.minute_response_cache if closed
+             else minute_response_cache.live_minute_response_cache)
 
     try:
         source_context = _minute_fallback_source_context(capset, asset_type)
@@ -542,7 +547,8 @@ def _fetch_minute_fallback(
         adjustment = minute_response_cache.adjustment_context(
             adjustment_root, asset_type, raw_basis=raw_basis,
         )
-        local_context = minute_response_cache.local_partition_context(local_df)
+        local_context = (minute_response_cache.local_partition_context(local_df) if closed
+                         else ("on-demand-current-session",))
         key = minute_response_cache.MinuteFetchKey(
             data_dir=repo.store.data_dir,
             provider=source_key,
@@ -567,14 +573,43 @@ def _fetch_minute_fallback(
             same_source = _minute_fallback_source_context(capset, asset_type) == source_context
             # Match the endpoint's existing 90% full-session tolerance before
             # retaining a result fetched for today's just-closed partition.
-            complete_today = trade_date != cn_today() or frame.height >= math.ceil(240 * 0.9)
+            complete_today = not closed or trade_date != cn_today() or frame.height >= math.ceil(240 * 0.9)
             return same_source and complete_today
         except Exception:
             return False
 
-    return minute_response_cache.minute_response_cache.get_or_fetch(
+    return cache.get_or_fetch(
         key, fetch, cache_if=source_unchanged,
     )
+
+
+def _fetch_chart_minute(repo, symbol, trade_date, asset_type, capset, raw_basis, local_df):
+    """Chart-only labelled ETF backup; never changes the configured strategy feed."""
+    frame = _fetch_minute_fallback(repo, symbol, trade_date, asset_type, capset, raw_basis, local_df)
+    from app.services import analysis_current_session, preferences
+
+    if (not frame.is_empty() or asset_type != 'etf' or trade_date > cn_today()
+            or preferences.get_minute_data_provider() != 'stocksdk'):
+        return frame, {}
+    # Reuse the validated raw-session loader and its bounded memory cache.
+    # A closed selected date must have its real closing minute; the native ETF
+    # endpoint only supplies recent bars and must not invent older history.
+    now = cn_now()
+    as_of = now if trade_date == now.date() else datetime.combine(trade_date, time(15, 30), CN_TZ)
+    captured = []
+    bar, _stamp = analysis_current_session.load_current(
+        repo, capset, symbol, asset_type, as_of, provider_name='txquote', wait_seconds=8,
+        require_latest=as_of.time().replace(tzinfo=None) >= time(15, 30),
+        minute_limit=300, on_minutes=captured.append)
+    if bar is None or not captured:
+        return frame, {'minute_warning': 'ETF分钟源与备选暂未返回该日完整有效数据。请稍后重试。'}
+    backup = captured[0]
+    # Today has identity projection on the legacy read path. Historical backup
+    # frames must match the legacy adjusted partition when migration is off.
+    if not raw_basis and trade_date != cn_today():
+        backup = minute_adjust.apply_minute_adjustment(backup, repo.store.data_dir, asset_type)
+    return backup, {'minute_provider': 'txquote',
+                    'minute_warning': '当前分钟源暂无数据。已使用ETF分钟备选。该备选不提供成交额。'}
 
 
 @router.get("/daily")
@@ -1241,7 +1276,7 @@ def get_minute(
         trade_date = cn_today()
         df = kline_sync.fetch_minute_single(
             symbol, trade_date, asset_type=asset_type, capset=capset,
-            raw_basis=raw_basis,
+            raw_basis=True,  # This branch always requests today's session.
         )
         if raw_basis:
             df = minute_adjust.apply_minute_adjustment(df, repo.store.data_dir, asset_type)
@@ -1276,9 +1311,8 @@ def get_minute(
         # 时段边界)则落回下方本地优先路径。
         if prev_close is None:
             minute_reference.prefetch(repo, capset, symbol)
-        live_df = kline_sync.fetch_minute_single(
-            symbol, trade_date, asset_type=asset_type, capset=capset,
-            raw_basis=raw_basis,
+        live_df, minute_info = _fetch_chart_minute(
+            repo, symbol, trade_date, asset_type, capset, raw_basis, None,
         )
         if not live_df.is_empty():
             if raw_basis:
@@ -1290,7 +1324,7 @@ def get_minute(
                 {
                     "symbol": symbol, "name": stock_name, "stock_info": stock_info,
                     "date": str(trade_date), "rows": live_df.to_dicts(),
-                    "source": "live", "asset_type": asset_type,
+                    "source": "live", "asset_type": asset_type, **minute_info,
                     "price_limit": price_limit,
                     **minute_reference.resolve(repo, capset, symbol, trade_date, asset_type, live_df, prev_close),
                 },
@@ -1334,7 +1368,7 @@ def get_minute(
     # 本地不完整或无数据 → 从当前有效分钟源实时拉取
     if prev_close is None:
         minute_reference.prefetch(repo, capset, symbol)
-    live_df = _fetch_minute_fallback(
+    live_df, minute_info = _fetch_chart_minute(
         repo, symbol, trade_date, asset_type, capset, raw_basis, df,
     )
     if raw_basis and not live_df.is_empty():
@@ -1347,7 +1381,7 @@ def get_minute(
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": live_df.to_dicts(),
             "source": "live" if not live_df.is_empty() else "none",
-            "asset_type": asset_type,
+            "asset_type": asset_type, **minute_info,
             "price_limit": price_limit,
             **minute_reference.resolve(repo, capset, symbol, trade_date, asset_type, live_df, prev_close),
         },

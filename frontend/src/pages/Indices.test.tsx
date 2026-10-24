@@ -8,6 +8,8 @@ import { Indices } from './Indices'
 import { QK } from '@/lib/queryKeys'
 import { INSTRUMENT_VIEW_GC_MS } from '@/lib/useInstrumentViewCache'
 
+vi.mock('@/lib/useMediaQuery', () => ({ useMediaQuery: () => false }))
+
 type MinuteResponse = {
   symbol: string
   date: string
@@ -21,6 +23,7 @@ const fixtures = vi.hoisted(() => ({
   pending: [] as {
     symbol: string
     day: string | undefined
+    signal?: AbortSignal
     resolve: (value: MinuteResponse) => void
     reject: (reason: Error) => void
   }[],
@@ -37,10 +40,10 @@ vi.mock('@/lib/api', () => ({
       fixtures.dailyCalls.push({ symbol, start: range.start, end: range.end })
       return { symbol, rows: fixtures.dailyRows.filter(row => row.date >= range.start && row.date <= range.end) }
     },
-    indexMinute: (symbol: string, day?: string) => {
+    indexMinute: (symbol: string, day?: string, signal?: AbortSignal) => {
       fixtures.calls.push({ symbol, day })
       return new Promise<MinuteResponse>((resolve, reject) => {
-        fixtures.pending.push({ symbol, day, resolve, reject })
+        fixtures.pending.push({ symbol, day, signal, resolve, reject })
       })
     },
   },
@@ -168,23 +171,33 @@ it('loads index points without the minute-batch capability and isolates exact da
   expect(chart()?.textContent).toBe('2026-09-11|2026-09-11 09:35:00|11')
   expect(chart()?.dataset.pointsOnly).toBe('true')
   expect(chart()?.dataset.prevClose).toBe('9')
+  expect(host.textContent).toContain('状态 在线查询')
+  expect(host.textContent).not.toContain('txquote')
 
   await clickDay('2026-09-10')
   expect(chart()).toBeNull()
   await clickDay('2026-09-09')
+  expect(fixtures.pending.find(call => call.day === '2026-09-10')?.signal?.aborted).toBe(true)
   await resolveDay('2026-09-10', 10)
   expect(chart()).toBeNull()
+  expect(client.getQueryData(QK.indexMinute('000001.SH', '2026-09-10'))).toBeUndefined()
   await resolveDay('2026-09-09', 9)
   expect(chart()?.dataset.prevClose).toBe('')
   await clickDay('2026-09-11')
   expect(chart()?.dataset.prevClose).toBe('9')
 
   await clickDay('2026-09-10')
+  expect(chart()).toBeNull()
+  await resolveDay('2026-09-10', 10)
   expect(chart()?.textContent).toBe('2026-09-10|2026-09-10 09:35:00|10')
   expect(chart()?.dataset.prevClose).toBe('8')
 
   const mount10 = chart()?.dataset.mount
   await clickDay('2026-09-11')
+  // Only the current historical day is retained; returning to an evicted day
+  // fetches it again rather than accumulating every clicked date.
+  expect(chart()).toBeNull()
+  await resolveDay('2026-09-11', 11)
   expect(chart()?.textContent).toBe('2026-09-11|2026-09-11 09:35:00|11')
   expect(chart()?.dataset.mount).not.toBe(mount10)
 
@@ -195,9 +208,24 @@ it('loads index points without the minute-batch capability and isolates exact da
   await resolveDay('2026-09-11', 12)
   expect(chart()?.textContent).toBe('2026-09-11|2026-09-11 09:35:00|12')
   expect(chart()?.dataset.mount).toBe(mount11)
+
+  const selectedMinuteKey = QK.indexMinute('000001.SH', '2026-09-11')
+  const selectedMinute = client.getQueryCache().find({ queryKey: selectedMinuteKey })
+  expect(selectedMinute?.meta).toMatchObject({ instrumentView: 'indices', symbol: '000001.SH', minuteDate: '2026-09-11' })
+  expect(selectedMinute?.options.gcTime).toBe(INSTRUMENT_VIEW_GC_MS)
+  const callsBeforeNavigation = fixtures.calls.length
+  await act(async () => root.render(<div>离开指数页</div>))
+  await settle()
+  await act(async () => root.render(
+    <MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>,
+  ))
+  await settle()
+  expect(chart()?.textContent).toBe('2026-09-11|2026-09-11 09:35:00|12')
+  expect(host.textContent).not.toContain('分时加载中')
+  expect(fixtures.calls).toHaveLength(callsBeforeNavigation)
 })
 
-it('shows a distinct empty-date state with the response source and history range', async () => {
+it('shows a distinct empty-date state with neutral status and history range', async () => {
   await act(async () => root.render(
     <MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>,
   ))
@@ -206,8 +234,10 @@ it('shows a distinct empty-date state with the response source and history range
 
   expect(host.textContent).toContain('日期 2026-09-11')
   expect(host.textContent).toContain('价格点位')
-  expect(host.textContent).toContain('来源 暂无有效数据 · 腾讯免费分时')
-  expect(host.textContent).toContain('近5个交易日，以来源实际覆盖为准')
+  expect(host.textContent).toContain('状态 暂无有效数据')
+  expect(host.textContent).toContain('近5个交易日，按实际覆盖')
+  expect(host.textContent).not.toContain('txquote')
+  expect(host.textContent).not.toContain('腾讯免费分时')
   expect(host.textContent).toContain('2026-09-11 暂无指数分时数据')
   expect(host.querySelector('[data-chart]')).toBeNull()
   expect(Array.from(host.querySelectorAll('button')).some(button => button.textContent === '重试')).toBe(false)

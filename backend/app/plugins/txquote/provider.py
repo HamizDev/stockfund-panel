@@ -15,6 +15,8 @@
 单位与口径 (CONTRIBUTING §3.1, 不可凭字段名推断):
   - 腾讯股票 q=/分时/5日分时 volume 已是手, 直接透传 (金额=价x量x100 反推验证);
     新浪 K 线 volume 为股 → floor(/100) 转手。
+  - ETF 分钟K走腾讯 mkline 原生 OHLC, volume 按腾讯ETF手数口径透传; 该接口不提供成交额,
+    amount 固定为 null, 不用换手率或价量乘积代替。
   - amount 均为元, 直接透传。
   - datetime 为北京时间墙钟 (naive), 与分钟K契约一致。
   - 缺字段/解析失败的行跳过, 不伪造数据; 网络失败软返回空, 不阻断上游。
@@ -44,6 +46,7 @@ _DATASETS = ("minute", "depth5")
 
 # freq → 新浪 scale 映射。1m 走腾讯分时 (仅当日), 不在此表。
 _FREQ_TO_SINA_SCALE = {"5m": 5, "15m": 15, "30m": 30, "60m": 60}
+_ETF_FREQ_TO_TENCENT_PERIOD = {"1m": "m1", "5m": "m5", "15m": "m15", "30m": "m30", "60m": "m60"}
 _MINUTE_BATCH = 20  # 新浪为单标的接口, 逐只拉取; 批量节流
 _MINUTE_INTERVAL_S = 0.3  # 单标的请求间隔 (礼貌节流)
 _DEPTH_BATCH = 60  # 腾讯 q= 单次批量上限 (与 client 内部分片一致)
@@ -86,7 +89,12 @@ class TxQuoteProvider:
 
     name = "txquote"
     builtin = True
-    minute_asset_types = ("stock", "index")
+    minute_asset_types = ("stock", "index", "etf")
+    minute_price_basis = 'raw'
+    minute_intraday_reference = True
+    # ETF native m1 includes opening/closing auctions in the canonical hand unit.
+    # Stock day/query has no native OHLC; never aggregate that path into daily K.
+    minute_daily_aggregation = ('etf',)
     # 1m 近 5 交易日 (腾讯 day/query); 5m+ 约 20 交易日。声明浅历史, 分时档位自动收窄。
     minute_history_days = 5
 
@@ -133,8 +141,10 @@ class TxQuoteProvider:
     ) -> pl.DataFrame:
         """分钟K → 内部 minute canonical DataFrame。
 
-        freq 映射: "1m" 用腾讯近 5 日 1 分钟K (day/query, 按请求窗口过滤);
-        "5m"/"15m"/"30m"/"60m" 用新浪 K 线; 其他 freq 抛 ValueError 明示。
+        股票 freq 映射: "1m" 用腾讯近 5 日 1 分钟K (day/query);
+        "5m"/"15m"/"30m"/"60m" 用新浪 K 线。
+        ETF 的 1m/5m/15m/30m/60m 使用腾讯 mkline 原生不复权 OHLC, 最多 320 根/标的;
+        amount 未提供并保持 null。其他 freq 抛 ValueError 明示。
         股票网络/解析失败沿用软返回空; 指数错误抛出, 由专用服务转换为不可用。
         """
         if not symbols or asset_type not in self.minute_asset_types:
@@ -142,7 +152,14 @@ class TxQuoteProvider:
         freq = (freq or "1m").strip().lower()
         if asset_type == "index" and freq != "1m":
             raise ValueError("腾讯指数分时仅支持 1m 点位")
-        if freq == "1m":
+        if asset_type == "etf":
+            period = _ETF_FREQ_TO_TENCENT_PERIOD.get(freq)
+            if period is None:
+                raise ValueError("txquote ETF 分钟K仅支持 1m/5m/15m/30m/60m")
+            frames = self._minute_etf_tencent(
+                symbols, start_time, end_time, period, on_chunk_done,
+            )
+        elif freq == "1m":
             frames = self._minute_1m(symbols, start_time, end_time, on_chunk_done, asset_type)
         elif freq in _FREQ_TO_SINA_SCALE:
             frames = self._minute_sina(
@@ -156,6 +173,54 @@ class TxQuoteProvider:
         if not non_empty:
             return pl.DataFrame()
         return pl.concat(non_empty, how="diagonal_relaxed").sort(["symbol", "datetime"])
+
+    def _minute_etf_tencent(
+        self,
+        symbols: list[str],
+        start_time: datetime | None,
+        end_time: datetime | None,
+        period: str,
+        on_chunk_done: Callable[[int, int], None] | None,
+    ) -> list[pl.DataFrame]:
+        """ETF 原生腾讯 OHLC; 查询最近最多 320 根并严格过滤请求时间窗。"""
+        from app.market_time import CN_TZ
+
+        def wallclock(value: datetime | None) -> datetime | None:
+            return value.astimezone(CN_TZ).replace(tzinfo=None) if value and value.tzinfo else value
+
+        start_time, end_time = wallclock(start_time), wallclock(end_time)
+        client = self._get_client()
+        frames: list[pl.DataFrame] = []
+        for i, symbol in enumerate(symbols):
+            if i:
+                time.sleep(_MINUTE_INTERVAL_S)
+            try:
+                bars = client.minute_etf_kline(symbol, period, count=320)
+            except TxQuoteError as e:
+                logger.warning("txquote ETF %s %s 分钟K拉取失败: %s", symbol, period, e)
+                bars = []
+            records = []
+            for bar in bars:
+                stamp = bar["datetime"]
+                if start_time is not None and stamp < start_time:
+                    continue
+                if end_time is not None and stamp > end_time:
+                    continue
+                records.append({
+                    "symbol": symbol,
+                    "datetime": stamp,
+                    "open": bar["open"],
+                    "high": bar["high"],
+                    "low": bar["low"],
+                    "close": bar["close"],
+                    "volume": bar["volume"],
+                    "amount": None,
+                })
+            if records:
+                frames.append(_normalize_minute_frame(records))
+            if on_chunk_done:
+                on_chunk_done(i + 1, len(symbols))
+        return frames
 
     def _minute_1m(
         self,

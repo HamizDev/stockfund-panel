@@ -1,4 +1,29 @@
 export type GlobalMarket = 'hk' | 'us'
+
+export type GlobalFinancialTable = 'metrics' | 'income' | 'balance' | 'cashflow'
+export interface GlobalFinancials {
+  market: GlobalMarket
+  symbol: string
+  table: GlobalFinancialTable
+  currency: string | null
+  source: string
+  fetched_at_ms: number
+  cached: boolean
+  stale: boolean
+  warnings: string[]
+  items: {
+    period_end: string
+    period_start?: string | null
+    report_type?: string | null
+    report_label?: string | null
+    published_at: string | null
+    currency: string | null
+    accounting_standard: string | null
+    values: { key: string; label: string; value: number | null; unit: string | null }[]
+  }[]
+}
+export type GlobalMarketSnapshotSource = 'eastmoney_public' | 'yahoo_screener' | 'sina_hk_public' | 'sina_hk_public+tencent_etf' | 'tencent_hk_etf'
+export type GlobalMarketSnapshotScope = 'hk_mainboard' | 'hk_sina_hkd_pool' | 'hk_sina_tencent_hkd_pool' | 'hk_etf_tencent_batch' | 'us_listed_securities' | 'us_screener_pool'
 export type GlobalMarketChartInterval = '1d' | '5m' | '1m'
 export type GlobalMarketInstrumentKind = 'stock' | 'etf' | 'index'
 export type GlobalMarketCurrency = 'HKD' | 'USD'
@@ -21,6 +46,14 @@ export interface GlobalMarketQuote {
   price: number | null
   /** 小数制，例如 0.0366 表示上涨 3.66%。 */
   change_pct: number | null
+}
+
+export interface GlobalMarketStockClassification {
+  source: 'eastmoney_hk_f10'
+  system: 'eastmoney_belong_industry'
+  industry: string
+  /** Local fetch/verification time in Unix milliseconds. */
+  fetched_at_ms: number
 }
 
 export interface GlobalMarketBar {
@@ -51,6 +84,8 @@ export interface GlobalMarketChartResponse {
   warnings: string[]
   quote: GlobalMarketQuote
   bars: GlobalMarketBar[]
+  /** Available for verified HKD company shares; ETF and other responses may omit it or return null. */
+  classification?: GlobalMarketStockClassification | null
 }
 
 export type GlobalMarketResourceAccess = 'free_api' | 'free_web' | 'approval_required' | 'unavailable'
@@ -77,6 +112,7 @@ export interface GlobalMarketPageState {
 }
 
 export interface GlobalMarketOverviewItem extends GlobalMarketCatalogItem {
+  source?: GlobalMarketSnapshotSource | 'yahoo_public'
   price: number | null
   change_pct: number | null
   quote_at_ms: number | null
@@ -130,9 +166,13 @@ export interface MarketSnapshotItem {
   volume: number | null
   turnover_rate: number | null
   industry: string | null
+  industry_source?: 'nasdaq_screener'
+  sector?: string | null
+  market_cap?: number | null
   quote_at_ms: number | null
   fetched_at_ms: number
-  source: 'eastmoney_public' | 'yahoo_screener'
+  source: GlobalMarketSnapshotSource
+  scope?: GlobalMarketSnapshotScope
   kind: 'stock' | 'security' | 'etf'
   stale?: boolean
   error?: string | null
@@ -140,23 +180,33 @@ export interface MarketSnapshotItem {
 
 export interface GlobalMarketSnapshot {
   market: GlobalMarket
-  scope: 'hk_mainboard' | 'us_listed_securities' | 'us_screener_pool'
+  scope: GlobalMarketSnapshotScope
   universe_label: string
   total_reported: number
   received: number
   complete: boolean
   skipped: number
   date: string | null
-  source: 'eastmoney_public' | 'yahoo_screener'
+  source: GlobalMarketSnapshotSource
+  source_note?: string
+  etf_coverage?: { requested: number; accepted: number; unavailable: number }
   warnings?: string[]
   currency: GlobalMarketCurrency
   timezone: GlobalMarketTimeZone
   quote_at_ms: number | null
   fetched_at_ms: number
   stats: { covered: number; up: number; flat: number; down: number; strong: number; weak: number; mean: number | null; median: number | null; bins: number[] }
-  ranks: { gainers: MarketSnapshotItem[]; losers: MarketSnapshotItem[]; amount: MarketSnapshotItem[]; turnover: MarketSnapshotItem[] }
+  ranks: { gainers: MarketSnapshotItem[]; losers: MarketSnapshotItem[]; amount: MarketSnapshotItem[]; turnover: MarketSnapshotItem[]; volume?: MarketSnapshotItem[]; market_cap?: MarketSnapshotItem[] }
   industries: { name: string; count: number; change_pct: number; leader: MarketSnapshotItem; laggard: MarketSnapshotItem }[]
   industry_covered: number
+  classification?: {
+    source: 'nasdaq_screener'
+    source_as_of: string | null
+    fetched_at_ms: number | null
+    row_count: number
+    matched: number
+    error: string | null
+  }
 }
 export interface GlobalSnapshotState {
   data: GlobalMarketSnapshot | null
@@ -212,4 +262,34 @@ export interface MacroReference {
   cached: boolean
   stale: boolean
   error: string | null
+}
+export type ResearchProvider = 'finnhub' | 'adanos'
+export type ResearchSentimentSource = 'reddit' | 'news' | 'x' | 'polymarket'
+export interface ResearchSourcesStatus {
+  storage: 'local_json'
+  sources: { provider: ResearchProvider; configured: boolean; masked: string }[]
+}
+export interface ResearchSupplement {
+  market: 'us'
+  symbol: string
+  currency: 'USD'
+  quote: { price: number; change_pct: number | null; previous_close: number | null; as_of_ms: number | null } | null
+  profile: { name: string; industry: string; market_cap_usd: number | null } | null
+  news: { headline: string; url: string; published_at_ms: number; summary: string }[]
+  warnings: string[]
+  cached?: boolean
+  fetched_at_ms: number
+}
+export interface ResearchSentiment {
+  market: 'us'
+  symbol: string
+  source: ResearchSentimentSource
+  buzz_score: number | null
+  bullish_pct: number | null
+  mentions: number | null
+  metric: 'mentions' | 'trades'
+  period_days: number | null
+  cached?: boolean
+  warnings: string[]
+  fetched_at_ms: number
 }

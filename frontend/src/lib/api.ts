@@ -4,10 +4,13 @@
 // Prod:同源(FastAPI 托管前端 dist)
 
 import { toast } from '@/components/Toast'
+import { canonicalFinancialSymbol } from '@/custom/global_markets/marketFormatters'
 import type { IndicatorCatalog, IndicatorSearch, IndicatorSearchParams, IndicatorSource } from '@/custom/indicator_library/types'
 import type { JevosStatus } from '@/custom/jevos/types'
 import type {
   GlobalMarket,
+  GlobalFinancialTable,
+  GlobalFinancials,
   GlobalMarketCatalogResponse,
   GlobalMarketChartInterval,
   GlobalMarketChartResponse,
@@ -18,6 +21,11 @@ import type {
   MacroMarket,
   MacroReference,
   EtfShareSnapshot,
+  ResearchProvider,
+  ResearchSentimentSource,
+  ResearchSourcesStatus,
+  ResearchSupplement,
+  ResearchSentiment,
 } from '@/custom/global_markets/types'
 
 const BASE = ''
@@ -358,6 +366,12 @@ export interface AiStockReport {
   summary?: string
   close?: number | null
   levels?: Record<LevelType, PriceLevel[]>
+  as_of?: string | null
+  requested_at?: string | null
+  daily_as_of?: string | null
+  intraday_as_of?: string | null
+  is_provisional?: boolean
+  price_basis?: string
   created_at: string
 }
 
@@ -438,6 +452,9 @@ export interface AnalysisSnapshot extends KlineDailyResponse {
   price_basis: 'unadjusted' | 'local_enriched'
   provider: string
   as_of: string | null
+  daily_as_of?: string | null
+  intraday_as_of?: string | null
+  is_provisional?: boolean
   checked_at: string
   warning: string | null
   analysis: StockLevels
@@ -1207,7 +1224,7 @@ export interface HoldingsDailyReviewReport {
     name: string
     asset_type?: string
     data_date: string | null
-    action: '继续持有' | '暂停追加' | '条件追加' | '条件减仓' | '条件部分赎回' | '资料不足待核实'
+    action: '证据支持' | '证据分歧' | '风险需复核' | '资料不足待核实'
     reason: string
     trigger: string
     invalidation: string
@@ -2543,6 +2560,28 @@ export const api = {
   }),
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
 
+  globalResearchSources: (signal?: AbortSignal) => request<ResearchSourcesStatus>(
+    '/api/custom/global-markets/research-sources', { signal, quiet: true }),
+  globalFinancials: (market: GlobalMarket, symbol: string, table: GlobalFinancialTable, signal?: AbortSignal) =>
+    request<GlobalFinancials>(`/api/custom/global-markets/financials?${new URLSearchParams({ market, symbol, table })}`,
+      { signal, quiet: true, timeoutMs: 20_000 }).then(result => {
+      if (result?.market !== market || result.symbol !== canonicalFinancialSymbol(market, symbol) || result.table !== table
+        || !Array.isArray(result.items) || !Array.isArray(result.warnings)) {
+        throw new Error('财务数据上下文不匹配')
+      }
+      return result
+    }),
+  saveGlobalResearchKey: (provider: ResearchProvider, apiKey: string) => request<ResearchSourcesStatus>(
+    `/api/custom/global-markets/research-sources/${provider}`,
+    { method: 'POST', body: JSON.stringify({ api_key: apiKey }), quiet: true }),
+  clearGlobalResearchKey: (provider: ResearchProvider) => request<ResearchSourcesStatus>(
+    `/api/custom/global-markets/research-sources/${provider}`, { method: 'DELETE', quiet: true }),
+  globalResearchSupplement: (symbol: string, signal?: AbortSignal) => request<ResearchSupplement>(
+    `/api/custom/global-markets/research-supplement?symbol=${encodeURIComponent(symbol)}`, { signal, quiet: true }),
+  globalResearchSentiment: (symbol: string, source: ResearchSentimentSource, signal?: AbortSignal) => request<ResearchSentiment>(
+    `/api/custom/global-markets/research-sentiment?symbol=${encodeURIComponent(symbol)}&source=${source}`,
+    { method: 'POST', signal, quiet: true }),
+
   globalMarketOverview: (market: GlobalMarket, signal?: AbortSignal) => request<GlobalMarketOverview>(
     `/api/custom/global-markets/overview?${new URLSearchParams({ market })}`, { signal, quiet: true },
   ).then(result => {
@@ -3045,7 +3084,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(symbols),
     }),
-  klineMinute: (symbol: string, date?: string, live?: boolean) =>
+  klineMinute: (symbol: string, date?: string, live?: boolean, signal?: AbortSignal) =>
     request<{
       symbol: string
       name?: string
@@ -3054,6 +3093,8 @@ export const api = {
       rows: MinuteKlineRow[]
       source?: 'local' | 'live' | 'none'
       asset_type?: 'stock' | 'etf' | 'index'
+      minute_provider?: string
+      minute_warning?: string
       price_limit?: PriceLimitInfo | null
       prev_close?: number | null
       prev_close_source?: 'local_daily' | 'online_daily' | 'none'
@@ -3061,6 +3102,7 @@ export const api = {
       prev_close_warning?: string
     }>(
       `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}${live ? '&live=1' : ''}`,
+      { signal },
     ),
   klineMinuteRange: (symbol: string, days = 10) =>
     request<{
@@ -3073,7 +3115,7 @@ export const api = {
     }>(
       `/api/kline/minute-range?symbol=${encodeURIComponent(symbol)}&days=${days}`,
     ),
-  indexDaily: (symbol: string, days = 120, dateRange?: { start: string; end: string }) =>
+  indexDaily: (symbol: string, days = 120, dateRange?: { start: string; end: string }, signal?: AbortSignal) =>
     request<{
       symbol: string
       name?: string
@@ -3084,8 +3126,9 @@ export const api = {
       dateRange
         ? `/api/index/daily?symbol=${encodeURIComponent(symbol)}&start_date=${dateRange.start}&end_date=${dateRange.end}`
         : `/api/index/daily?symbol=${encodeURIComponent(symbol)}&days=${days}`,
+      { signal },
     ),
-  indexMinute: (symbol: string, date?: string) =>
+  indexMinute: (symbol: string, date?: string, signal?: AbortSignal) =>
     request<{
       symbol: string
       name?: string
@@ -3097,6 +3140,7 @@ export const api = {
       history_days?: number
     }>(
       `/api/index/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}`,
+      { signal },
     ),
   syncIndexInstruments: () =>
     request<{ status: string; count: number }>('/api/index/sync_instruments', { method: 'POST' }),
@@ -3946,6 +3990,12 @@ export const api = {
     symbol: string; name?: string; focus?: string; content: string
     summary?: string; close?: number | null
     levels?: Record<LevelType, PriceLevel[]>
+    as_of?: string | null
+    requested_at?: string | null
+    daily_as_of?: string | null
+    intraday_as_of?: string | null
+    is_provisional?: boolean
+    price_basis?: string
   }) =>
     request<{ ok: boolean; report: AiStockReport }>('/api/stock-analysis/reports', {
       method: 'POST', body: JSON.stringify(r),
@@ -3964,6 +4014,12 @@ export const api = {
     summary?: string
     levels?: Record<LevelType, PriceLevel[]>
     close?: number | null
+    as_of?: string | null
+    requested_at?: string | null
+    daily_as_of?: string | null
+    intraday_as_of?: string | null
+    is_provisional?: boolean
+    price_basis?: string
     content?: string
     message?: string
   }> {

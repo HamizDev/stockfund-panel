@@ -601,6 +601,14 @@ def get_capability_matrix() -> dict:
     )
 
 
+@router.get("/source-routing")
+def source_routing_status() -> dict:
+    """Read-only main/backup health; no credentials or source response bodies."""
+    from app.data_providers.source_routing import status
+
+    return status()
+
+
 @router.post("/plugin-key")
 def save_plugin_key(req: PluginKeyIn) -> dict:
     """保存插件 API Key(先探后存, 对齐 /tickflow-key 语义)。

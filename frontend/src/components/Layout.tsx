@@ -634,7 +634,7 @@ export function Layout() {
   return (
     <div
       className="h-screen grid bg-base text-foreground overflow-hidden transition-[grid-template-columns] duration-200 ease-smooth"
-      style={{ gridTemplateColumns: isDesktop && !overlayPreview ? (navState === 'expanded' ? '14rem 1fr' : navState === 'rail' ? '3.5rem 1fr' : '0 1fr') : '1fr' }}
+      style={{ gridTemplateColumns: isDesktop && !overlayPreview ? (navState === 'expanded' ? '14rem minmax(0,1fr)' : navState === 'rail' ? '3.5rem minmax(0,1fr)' : '0 minmax(0,1fr)') : 'minmax(0,1fr)' }}
     >
       {/* 移动端抽屉遮罩 */}
       {!isDesktop && drawerOpen && (
@@ -926,7 +926,7 @@ export function Layout() {
                 <div className="min-w-0">
                   <div className="text-xs font-medium leading-none text-foreground">实时行情</div>
                   <div className="mt-1 flex min-w-0 items-center gap-1 text-[10px] leading-none">
-                    <span className="truncate text-muted">{realtimeProviderName || realtimeModeLabel}</span>
+                    <span className="truncate text-muted">{realtimeModeLabel}</span>
                     <span className="shrink-0 text-border" aria-hidden="true">·</span>
                     <span className={`shrink-0 ${realtimeStatusClass}`}>{realtimeStatusLabel}</span>
                   </div>

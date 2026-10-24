@@ -195,6 +195,8 @@ describe('FundCandidateCard display formatting', () => {
     expect(article?.querySelector('button')?.getAttribute('aria-pressed')).toBe('false')
     expect(article?.textContent).toContain('AI 已停止（当前未分析）')
     expect(article?.textContent).toContain('AI 服务 实际服务')
+    expect(article?.textContent).not.toContain('东方财富')
+    expect(article?.textContent).toContain('净值日期 2026-09-30')
     expect(article?.textContent).toContain('资料摘要：净值日期来自公开资料。')
     expect(article?.textContent).toContain('AI 分析摘要（未完成）：')
     expect(article?.textContent).toContain('模型观点')

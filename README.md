@@ -16,14 +16,14 @@
 
 由 **HamizDev 独立维护**，把行情观察、候选筛选、策略验证和模拟跟踪放在同一个界面里。支持股票、场内 ETF、场外基金研究，以及独立的数字资产模拟模块；数据源和 AI 服务按需配置，个人数据与密钥保存在使用者自己的运行环境。
 
-当前版本 **0.0.8**：[版本说明](docs/release-0.0.8.md) · [港美股数据范围与口径](docs/global-markets.md) · [更新历史](CHANGELOG.md) · [本地 Jevos 辅助判断](docs/local-jevos.md)。
+当前版本 **0.0.9**：[版本说明](docs/release-0.0.9.md) · [港美股数据范围与口径](docs/global-markets.md) · [更新历史](CHANGELOG.md) · [本地 Jevos 辅助判断](docs/local-jevos.md)。
 
 ## 功能亮点
 
 - **从行情看到研究依据**：日 K、分时、1 分钟 K、关键价位与技术分项摘要；明确显示数据时间、来源和缺失项。
 - **三市场观察与广度**：A/HK/US 首页、港美股市场分布与行业热度；样本范围和数据延迟见 [数据口径](docs/global-markets.md)。
 - **股票与 ETF 分开筛选**：默认 Top 10 候选，支持名称搜索、卡片 / 热力图切换和逐标的研究详情。
-- **AI 按需辅助**：解释候选、比较基金、生成与迭代策略草稿、解读持仓和快讯；复用使用者自己的模型配置。
+- **AI 按需辅助**：解释候选、比较基金、生成与迭代策略草稿、解读持仓和快讯；研究报告展示客观证据与风险，不输出加减仓等操作结论。复用使用者自己的模型配置。
 - **从回测走到模拟验证**：策略独立账户、净值曲线、费用、订单、成交台账、已平仓回合与账户对照。
 - **本地管理，按能力接源**：日线、分钟、实时、五档、财务等能力分别配置；插件不满足条件时明确显示不可用。
 - **保持研究过程连贯**：分组菜单、名称优先、浏览状态保存、候选缓存和快讯当日缓存，减少反复查找。
@@ -198,7 +198,7 @@ AI 选股的候选来自已有策略计算，不是模型自行发现的股票�
 | 主题 | 文档 |
 | --- | --- |
 | 安装、启动与更新 | [部署指南](docs/deployment.md) · [配置说明](docs/configuration.md) |
-| 最新版本 | [0.0.8 更新说明](docs/release-0.0.8.md) · [0.0.7 更新说明](docs/release-0.0.7.md) · [0.0.6 更新说明](docs/release-0.0.6.md) · [0.0.5 更新说明](docs/release-0.0.5.md) · [更新历史](CHANGELOG.md) |
+| 最新版本 | [0.0.9 更新说明](docs/release-0.0.9.md) · [0.0.8 更新说明](docs/release-0.0.8.md) · [0.0.7 更新说明](docs/release-0.0.7.md) · [0.0.6 更新说明](docs/release-0.0.6.md) · [0.0.5 更新说明](docs/release-0.0.5.md) · [更新历史](CHANGELOG.md) |
 | 图表与技术研究 | [图表研究工具](docs/chart-research.md) · [本地 Canvas 与官方模拟入口](docs/local-chart-and-official-demo.md) |
 | 候选观察 | [股票 / ETF 热力图](docs/candidate-heatmap.md) |
 | 策略、AI 与回测 | [策略说明](docs/strategy.md) · [AI 策略迭代](docs/strategy-iteration.md) · [研究流程](docs/strategy-research.md) |

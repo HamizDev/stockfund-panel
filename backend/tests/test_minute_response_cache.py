@@ -114,6 +114,17 @@ def test_expired_result_is_fetched_again():
     assert cache.entry_count == 1
 
 
+def test_idle_cache_releases_frames_without_another_reader():
+    cache = MinuteResponseCache(ttl_seconds=0.03, auto_expire=True)
+    cache.get_or_fetch(_key(), _frame)
+    assert cache.cached_rows == 1
+    deadline = time.monotonic() + 1
+    while cache.cached_rows and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert cache.cached_rows == cache.entry_count == 0
+    cache.clear()
+
+
 def test_empty_and_failed_fetches_are_not_cached_and_pending_state_is_cleared():
     cache = MinuteResponseCache(ttl_seconds=2)
     calls = 0

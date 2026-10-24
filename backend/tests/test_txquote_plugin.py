@@ -163,14 +163,22 @@ def test_provider_minute_unsupported_freq():
         p.get_minute(["000001.SZ"], None, None, freq="2m")
 
 
-def test_provider_minute_empty_symbols():
+def test_provider_minute_empty_symbols(monkeypatch):
     p = TxQuoteProvider()
+    from unittest.mock import MagicMock
+
     import polars as pl
+
+    client = MagicMock()
+    client.minute_etf_kline.return_value = []
+    monkeypatch.setattr(p, "_get_client", lambda: client)
 
     out = p.get_minute([], None, None)
     assert isinstance(out, pl.DataFrame) and out.is_empty()
+    assert p.minute_asset_types == ("stock", "index", "etf")
     out = p.get_minute(["510300.SH"], None, None, asset_type="etf")
     assert out.is_empty()
+    client.minute_etf_kline.assert_called_once_with("510300.SH", "m1", count=320)
 
 
 # ---------- provider 数据集声明 ----------

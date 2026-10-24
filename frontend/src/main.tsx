@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { RouterProvider } from 'react-router-dom'
 import { QueryClient, QueryClientProvider, QueryCache } from '@tanstack/react-query'
 import { initializeFrontendExtensions } from './extensions/bootstrap'
+import { installDashboardQueryCache } from './lib/dashboardQueryCache'
 import './index.css'
 
 // 全局认证拦截: 任何 query/mutation 收到 401 (未登录/会话过期) → 跳登录页。
@@ -41,6 +42,8 @@ const queryClient = new QueryClient({
     },
   },
 })
+
+installDashboardQueryCache(queryClient)
 
 async function bootstrap() {
   await initializeFrontendExtensions()

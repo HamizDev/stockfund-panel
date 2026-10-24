@@ -45,7 +45,7 @@ vi.mock('@/components/CanvasMarketChart', () => ({
 }))
 
 type Props = ComponentProps<typeof AnalysisMinutePanel>
-type PendingCall = { symbol: string; date?: string; resolve: (value: any) => void }
+type PendingCall = { symbol: string; date?: string; signal?: AbortSignal; resolve: (value: any) => void }
 
 let host: HTMLDivElement
 let root: Root
@@ -113,10 +113,11 @@ afterEach(async () => {
 it('routes stock and ETF through the shared live minute options, and latest mode does not request daily data', async () => {
   const onDateChange = vi.fn()
   await render(baseProps({ symbol: '600000.SH', assetType: 'stock', date: null, onDateChange }))
-  expect(mocks.klineMinute).toHaveBeenCalledWith('600000.SH', undefined, true)
+  expect(mocks.klineMinute).toHaveBeenCalledWith('600000.SH', undefined, true, expect.any(AbortSignal))
   expect(mocks.indexMinute).not.toHaveBeenCalled()
   expect(mocks.klineDaily).not.toHaveBeenCalled()
   expect(host.textContent).toContain('实际日期：2020-01-02')
+  expect(host.textContent).toContain('数据状态：本地缓存')
   const intraday = host.querySelector<HTMLElement>('[data-testid="intraday"]')!
   expect(intraday.dataset.prevClose).toBe('9.9')
   expect(intraday.dataset.priceLimit).toBe('10.89')
@@ -125,13 +126,13 @@ it('routes stock and ETF through the shared live minute options, and latest mode
   expect(onDateChange).toHaveBeenCalledWith(null)
 
   await render(baseProps({ symbol: '510300.SH', assetType: 'etf', date: '2020-01-03' }))
-  expect(mocks.klineMinute).toHaveBeenLastCalledWith('510300.SH', '2020-01-03', true)
+  expect(mocks.klineMinute).toHaveBeenLastCalledWith('510300.SH', '2020-01-03', true, expect.any(AbortSignal))
   expect(mocks.klineDaily).not.toHaveBeenCalled()
 })
 
 it('routes index to the price-points endpoint and disables 1-minute candles', async () => {
   await render(baseProps({ symbol: '000001.SH', assetType: 'index', date: '2020-01-02', view: 'candles' }))
-  expect(mocks.indexMinute).toHaveBeenCalledWith('000001.SH', '2020-01-02')
+  expect(mocks.indexMinute).toHaveBeenCalledWith('000001.SH', '2020-01-02', expect.any(AbortSignal))
   expect(mocks.klineMinute).not.toHaveBeenCalled()
   const intraday = host.querySelector<HTMLElement>('[data-testid="intraday"]')!
   expect(intraday.dataset.pointsOnly).toBe('true')
@@ -141,7 +142,8 @@ it('routes index to the price-points endpoint and disables 1-minute candles', as
   const intradayButton = [...host.querySelectorAll('button')].find(button => button.textContent === '分时')!
   expect(intradayButton.getAttribute('aria-pressed')).toBe('true')
   expect(host.querySelector('[data-testid="candles"]')).toBeNull()
-  expect(host.textContent).toContain('来源：在线查询 · txquote')
+  expect(host.textContent).toContain('数据状态：在线查询')
+  expect(host.textContent).not.toContain('txquote')
 })
 
 it('does not draw candles when real OHLC is incomplete and does not synthesize open from close', async () => {
@@ -172,7 +174,7 @@ it('formats valid candle time from the Beijing wall-clock string and passes actu
 
 it('does not show a response that belongs to a previous symbol or date', async () => {
   const pending: PendingCall[] = []
-  mocks.klineMinute.mockImplementation((symbol: string, date?: string) => new Promise(resolve => pending.push({ symbol, date, resolve })))
+  mocks.klineMinute.mockImplementation((symbol: string, date?: string, _live?: boolean, signal?: AbortSignal) => new Promise(resolve => pending.push({ symbol, date, signal, resolve })))
   const first = baseProps({ symbol: '600000.SH', date: '2020-01-02' })
   await act(async () => root.render(<QueryClientProvider client={client}><AnalysisMinutePanel {...first} /></QueryClientProvider>))
   await settle()
@@ -184,6 +186,9 @@ it('does not show a response that belongs to a previous symbol or date', async (
     ['600000.SH', '2020-01-02'],
     ['000002.SZ', '2020-01-03'],
   ])
+
+  expect(pending[0].signal?.aborted).toBe(true)
+  expect(pending[1].signal?.aborted).toBe(false)
 
   await act(async () => pending[0].resolve(stockResponse('600000.SH', '2020-01-02')))
   await settle()
@@ -216,6 +221,49 @@ it('keeps same-context data visible and marks a failed refresh', async () => {
   expect(host.querySelector('[role="alert"]')?.textContent).toContain('仍显示上次有效数据')
 })
 
+it('keeps same-date minute rows when a successful refresh returns an empty response', async () => {
+  const date = '2020-01-02'
+  mocks.klineMinute.mockResolvedValueOnce(stockResponse('600000.SH', date))
+    .mockResolvedValueOnce(stockResponse('600000.SH', date, []))
+  await render(baseProps({ date }))
+  expect(host.querySelector('[data-testid="intraday"]')?.textContent).toContain('2020-01-02 09:35:00|10.2')
+
+  const refresh = host.querySelector<HTMLButtonElement>('button[aria-label="刷新分钟数据"]')!
+  await act(async () => refresh.click())
+  await settle()
+
+  expect(host.querySelector('[data-testid="intraday"]')?.textContent).toContain('2020-01-02 09:35:00|10.2')
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain('仍显示上次有效数据')
+})
+
+it('does not carry previous-session minute rows into an empty latest response for a new date', async () => {
+  mocks.klineMinute.mockResolvedValueOnce(stockResponse('600000.SH', '2020-01-02'))
+    .mockResolvedValueOnce(stockResponse('600000.SH', '2020-01-03', []))
+  await render(baseProps({ date: null }))
+  expect(host.querySelector('[data-testid="intraday"]')?.textContent).toContain('2020-01-02 09:35:00|10.2')
+
+  const refresh = host.querySelector<HTMLButtonElement>('button[aria-label="刷新分钟数据"]')!
+  await act(async () => refresh.click())
+  await settle()
+
+  expect(host.querySelector('[data-testid="intraday"]')).toBeNull()
+  expect(host.textContent).toContain('实际日期：2020-01-03')
+  expect(host.textContent).toContain('暂无分钟数据')
+  expect(host.querySelector('[role="alert"]')).toBeNull()
+})
+
+it('shows the minute-source warning returned with the current response', async () => {
+  mocks.klineMinute.mockResolvedValueOnce({
+    ...stockResponse('510300.SH', '2020-01-02'),
+    asset_type: 'etf',
+    minute_provider: 'txquote',
+    minute_warning: 'ETF 备选分钟行情不含成交额。',
+  })
+  await render(baseProps({ symbol: '510300.SH', assetType: 'etf', date: '2020-01-02' }))
+
+  expect(host.textContent).toContain('ETF 备选分钟行情不含成交额。')
+})
+
 it('waits without issuing a query until the asset type is recognized', async () => {
   await render(baseProps({ assetType: undefined }))
   expect(host.textContent).toContain('资产类型待识别')
@@ -229,7 +277,7 @@ it.each(['stock', 'etf'] as const)('refreshes an already-selected latest day for
   await act(async () => latest.click())
   await settle()
   expect(mocks.klineMinute).toHaveBeenCalledTimes(2)
-  expect(mocks.klineMinute).toHaveBeenLastCalledWith('600000.SH', undefined, true)
+  expect(mocks.klineMinute).toHaveBeenLastCalledWith('600000.SH', undefined, true, expect.any(AbortSignal))
   expect(host.querySelector<HTMLInputElement>('input[type="date"]')?.value).toBe('2020-01-02')
   expect(latest.getAttribute('aria-pressed')).toBe('true')
   expect(host.textContent).toContain('最新交易日模式')
@@ -241,7 +289,7 @@ it('refreshes latest index price points without issuing a stock request', async 
   await act(async () => latest.click())
   await settle()
   expect(mocks.indexMinute).toHaveBeenCalledTimes(2)
-  expect(mocks.indexMinute).toHaveBeenLastCalledWith('000001.SH', undefined)
+  expect(mocks.indexMinute).toHaveBeenLastCalledWith('000001.SH', undefined, expect.any(AbortSignal))
   expect(mocks.klineMinute).not.toHaveBeenCalled()
 })
 
@@ -262,6 +310,6 @@ it('invalidates only the exact latest cache before switching away from a histori
   expect(mocks.klineMinute).toHaveBeenCalledTimes(1)
   await render(baseProps({ date: null }))
   expect(mocks.klineMinute).toHaveBeenCalledTimes(2)
-  expect(mocks.klineMinute).toHaveBeenLastCalledWith(symbol, undefined, true)
+  expect(mocks.klineMinute).toHaveBeenLastCalledWith(symbol, undefined, true, expect.any(AbortSignal))
   expect(host.textContent).toContain('实际日期：2020-01-03')
 })

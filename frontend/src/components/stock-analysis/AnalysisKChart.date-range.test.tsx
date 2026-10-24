@@ -188,6 +188,31 @@ it('restores all level lines when leaving a level for candles or chart backgroun
   expect(opacity()).toEqual([.7, .7])
 })
 
+it('keeps a selected historical range visible until the user jumps to and follows the latest K-line', async () => {
+  await render()
+  const endInput = host.querySelector<HTMLInputElement>('input[aria-label="结束日期"]')!
+  const historicalEnd = rows[250].date
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(endInput, historicalEnd)
+    endInput.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+
+  expect(host.textContent).toContain(`~ ${rows[250].date}`)
+  expect(host.textContent).toContain(`当前范围未显示最新日K（${rows.at(-1)!.date}）`)
+  expect(host.querySelector<HTMLButtonElement>('button[aria-label="最新K线"]')).not.toBeNull()
+
+  await clickButton('最新K线')
+  expect(host.querySelector<HTMLButtonElement>('button[aria-label="最近六个月"]')?.getAttribute('aria-pressed')).toBe('true')
+  expect(host.textContent).not.toContain('当前范围未显示最新日K')
+  expect(host.textContent).toContain(`~ ${rows.at(-1)!.date}`)
+
+  const latestBar = { date: '2026-10-22', open: 1.1, high: 1.2, low: 1, close: 1.15, volume: 140 }
+  await render([...rows, latestBar])
+  expect(mock.option.xAxis[0].data).toContain('2026-10-22')
+  expect(host.textContent).not.toContain('当前范围未显示最新日K')
+  expect(host.textContent).toContain('~ 2026-10-22')
+})
+
 it('restores the compact view for the same key and replaces it when the symbol key changes', async () => {
   await render(rows, 'same-component', 'symbol-a')
   await clickButton('近1月')

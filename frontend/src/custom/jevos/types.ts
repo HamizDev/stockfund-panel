@@ -30,6 +30,7 @@ export interface JevosStatus {
   fingerprint: string | null
   last_check_ms: number | null
   queued: number
+  queued_by_kind?: { news: number; strategy: number }
   completed: number
   news: Record<string, JevosReview>
   strategies: Record<string, JevosReview>

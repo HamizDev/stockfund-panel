@@ -295,10 +295,14 @@ def errors() -> list[dict]:
     return list(_LOAD_ERRORS)
 
 
-def get_provider(name: str) -> GenericHTTPProvider:
+def get_provider(name: str, *, use_failover: bool = True) -> GenericHTTPProvider:
     provider = _PROVIDERS.get((name or "").lower())
     if provider is None:
         raise ValueError(f"Custom data source not found or invalid: {name}")
+    if use_failover:
+        from app.data_providers.source_routing import wrap
+
+        return wrap(provider)
     return provider
 
 

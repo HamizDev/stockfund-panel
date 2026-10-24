@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.indicators.levels import compute_levels, summarize_levels
-from app.market_time import cn_today
+from app.market_time import cn_now, cn_today
 from app.services import analysis_snapshot, stock_reports
 from app.services.ndjson_heartbeat import with_heartbeat
 from app.services.stock_analyzer import analyze_stock_stream
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/stock-analysis", tags=["stock-analysis"])
 
 
-def _to_float_list(series: pl.Series) -> list:
+def _to_float_list(series: pl.Series, price_precision: int = 2) -> list:
     """polars Series → JSON 安全的 float 列表(null/NaN → None)。"""
     out: list = []
     for v in series.to_list():
@@ -40,13 +40,13 @@ def _to_float_list(series: pl.Series) -> list:
             continue
         try:
             f = float(v)
-            out.append(round(f, 2) if math.isfinite(f) else None)
+            out.append(round(f, price_precision) if math.isfinite(f) else None)
         except (TypeError, ValueError):
             out.append(None)
     return out
 
 
-def _build_series(df: pl.DataFrame) -> dict:
+def _build_series(df: pl.DataFrame, *, price_precision: int = 2) -> dict:
     """提取带状指标(布林带 / Keltner通道 / ATR止损)的每日时间序列。
 
     这些指标的本质是"每日一条线",随 MA/ATR/σ 漂移,画成曲线才能体现通道形态。
@@ -65,15 +65,17 @@ def _build_series(df: pl.DataFrame) -> dict:
         return {}
 
     out: dict[str, dict] = {}
+    def price_values(series):
+        return _to_float_list(series, price_precision)
     close = df["close"]
     has_atr = "atr_14" in df.columns
 
     # 布林带(上/下/中轨;中轨 = MA20,数据层已预计算)
     if "boll_upper" in df.columns and "boll_lower" in df.columns:
         out["boll"] = {
-            "upper": _to_float_list(df["boll_upper"]),
-            "lower": _to_float_list(df["boll_lower"]),
-            "mid": _to_float_list(df["ma20"]) if "ma20" in df.columns else None,
+            "upper": price_values(df["boll_upper"]),
+            "lower": price_values(df["boll_lower"]),
+            "mid": price_values(df["ma20"]) if "ma20" in df.columns else None,
         }
 
     # Keltner 通道三档(需要 ATR)
@@ -84,8 +86,8 @@ def _build_series(df: pl.DataFrame) -> dict:
 
         def _channel(ma: pl.Series, n: float) -> dict:
             return {
-                "upper": _to_float_list(ma + n * atr),
-                "lower": _to_float_list(ma - n * atr),
+                "upper": price_values(ma + n * atr),
+                "lower": price_values(ma - n * atr),
             }
 
         if "ma20" in df.columns:
@@ -97,23 +99,24 @@ def _build_series(df: pl.DataFrame) -> dict:
 
         # ATR 止损/止盈: close ± 2×ATR(跟随行情漂移的动态止损线)
         out["atr"] = {
-            "stop_loss": _to_float_list(close - 2 * atr),
-            "take_profit": _to_float_list(close + 2 * atr),
+            "stop_loss": price_values(close - 2 * atr),
+            "take_profit": price_values(close + 2 * atr),
         }
 
     return out
 
 
-def _levels_payload(df: pl.DataFrame, symbol: str) -> dict:
+def _levels_payload(df: pl.DataFrame, symbol: str, *, price_precision: int = 2) -> dict:
     if df.is_empty():
         return {"levels": {key: [] for key in ("sr", "pivot", "extreme", "boll", "keltner_s",
                 "keltner_m", "keltner_l", "atr_stop", "gap", "fib", "round")},
                 "close": None, "summary": "无数据", "symbol": symbol, "dates": [], "series": {}}
-    levels = compute_levels(df)
+    levels = compute_levels(df, price_precision=price_precision)
     close = float(df["close"][-1])
-    return {"levels": levels, "close": close, "summary": summarize_levels(levels, close),
+    return {"levels": levels, "close": close,
+            "summary": summarize_levels(levels, close, price_precision=price_precision),
             "symbol": symbol, "dates": [str(d) for d in df["date"].to_list()],
-            "series": _build_series(df)}
+            "series": _build_series(df, price_precision=price_precision)}
 
 
 @router.get("/snapshot")
@@ -123,8 +126,10 @@ def get_snapshot(
     days: int = Query(250, ge=30, le=500),
 ):
     frame, payload = analysis_snapshot.load_snapshot(
-        request.app.state.repo, getattr(request.app.state, "capabilities", None), symbol, days)
-    return {**payload, "analysis": _levels_payload(frame, symbol)}
+        request.app.state.repo, getattr(request.app.state, "capabilities", None), symbol, days,
+        include_current=True)
+    return {**payload, "analysis": _levels_payload(
+        frame, symbol, price_precision=3 if payload.get('asset_type') == 'etf' else 2)}
 
 
 @router.get("/levels")
@@ -148,7 +153,7 @@ def get_levels(
     start = end - timedelta(days=days * 2)
     # 按资产类型分流: ETF/指数走独立 enriched 存储, 股票保持原路径
     df = repo.get_daily_asset(repo.resolve_asset_type(symbol), symbol, start, end)
-    return _levels_payload(df, symbol)
+    return _levels_payload(df, symbol, price_precision=3 if repo.resolve_asset_type(symbol) == 'etf' else 2)
 
 
 class AnalyzeRequest(BaseModel):
@@ -170,12 +175,12 @@ async def analyze_stock(request: Request, req: AnalyzeRequest):
 
     repo = request.app.state.repo
     data_dir = repo.store.data_dir
+    request_time = cn_now()
 
     async def stream_gen():
-        stream = (
-            analyze_stock_stream(repo, data_dir, req.symbol, req.focus, research_plan=True)
-            if req.research_plan else analyze_stock_stream(repo, data_dir, req.symbol, req.focus)
-        )
+        stream = analyze_stock_stream(
+            repo, data_dir, req.symbol, req.focus, research_plan=req.research_plan,
+            refresh=True, capset=getattr(request.app.state, "capabilities", None), request_time=request_time)
         async for chunk in with_heartbeat(stream):
             yield chunk + "\n"
 
@@ -199,6 +204,12 @@ class SaveReportRequest(BaseModel):
     summary: str = ""
     close: float | None = None
     levels: dict | None = None
+    as_of: str | None = None
+    daily_as_of: str | None = None
+    intraday_as_of: str | None = None
+    is_provisional: bool = False
+    price_basis: str | None = None
+    requested_at: str | None = None
 
 
 @router.get("/reports")
@@ -218,6 +229,12 @@ def save_report(request: Request, req: SaveReportRequest):
         "summary": req.summary,
         "close": req.close,
         "levels": req.levels,
+        "as_of": req.as_of,
+        "daily_as_of": req.daily_as_of,
+        "intraday_as_of": req.intraday_as_of,
+        "is_provisional": req.is_provisional,
+        "price_basis": req.price_basis,
+        "requested_at": req.requested_at,
     })
     return {"ok": True, "report": report}
 

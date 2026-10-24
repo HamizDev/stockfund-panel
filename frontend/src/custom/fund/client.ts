@@ -299,8 +299,8 @@ export const fundApi = {
   search(q: string, limit = 50): Promise<{ items: FundSearchItem[] }> {
     return req(`/search?q=${encodeURIComponent(q)}&limit=${limit}`)
   },
-  watchlist(): Promise<{ items: FundWatchItem[] }> {
-    return req('/watchlist')
+  watchlist(signal?: AbortSignal): Promise<{ items: FundWatchItem[] }> {
+    return req('/watchlist', { signal })
   },
   addWatch(item: { thscode: string; name?: string | null; asset_type?: string | null }) {
     return req<{ items: FundWatchItem[] }>('/watchlist', {
@@ -314,8 +314,8 @@ export const fundApi = {
       method: 'DELETE',
     })
   },
-  portfolio(): Promise<{ items: FundPortfolioItem[] }> {
-    return req('/portfolio')
+  portfolio(signal?: AbortSignal): Promise<{ items: FundPortfolioItem[] }> {
+    return req('/portfolio', { signal })
   },
   savePortfolio(items: FundPortfolioItem[]) {
     return req<{ items: FundPortfolioItem[] }>('/portfolio', {
@@ -329,23 +329,23 @@ export const fundApi = {
       method: 'DELETE',
     })
   },
-  quote(thscode: string): Promise<{ quote: FundQuote | null }> {
-    return req(`/quote/${encodeURIComponent(thscode)}`)
+  quote(thscode: string, signal?: AbortSignal): Promise<{ quote: FundQuote | null }> {
+    return req(`/quote/${encodeURIComponent(thscode)}`, { signal })
   },
-  kline(thscode: string, days = 250): Promise<{ thscode: string; adjusted: string; bars: FundKBar[] }> {
-    return req(`/kline/${encodeURIComponent(thscode)}?days=${days}`)
+  kline(thscode: string, days = 250, signal?: AbortSignal): Promise<{ thscode: string; adjusted: string; bars: FundKBar[] }> {
+    return req(`/kline/${encodeURIComponent(thscode)}?days=${days}`, { signal })
   },
-  nav(thscode: string, range = 'year'): Promise<{ thscode: string; nav: FundNavPoint[]; source?: FundDataSource }> {
-    return req(`/nav/${encodeURIComponent(thscode)}?range=${range}`)
+  nav(thscode: string, range = 'year', signal?: AbortSignal): Promise<{ thscode: string; nav: FundNavPoint[]; source?: FundDataSource }> {
+    return req(`/nav/${encodeURIComponent(thscode)}?range=${range}`, { signal })
   },
   research(thscode: string, horizon = '1y'): Promise<FundResearch> {
     return req(`/research/${encodeURIComponent(thscode)}?horizon=${encodeURIComponent(horizon)}`)
   },
-  profile(thscode: string): Promise<{ profile: FundProfile | null; source?: FundDataSource }> {
-    return req(`/profile/${encodeURIComponent(thscode)}`)
+  profile(thscode: string, signal?: AbortSignal): Promise<{ profile: FundProfile | null; source?: FundDataSource }> {
+    return req(`/profile/${encodeURIComponent(thscode)}`, { signal })
   },
   /** 场外基金当日盘中估值 (穿透自算) */
-  estimate(thscode: string): Promise<{
+  estimate(thscode: string, signal?: AbortSignal): Promise<{
     thscode: string
     prev_nav: number | null
     nav_date: string | null
@@ -358,7 +358,7 @@ export const fundApi = {
       report_note: string
     }
   }> {
-    return req(`/estimate/${encodeURIComponent(thscode)}`)
+    return req(`/estimate/${encodeURIComponent(thscode)}`, { signal })
   },
   /** AI 基金分析 (流式 NDJSON) */
   async *analyzeStream(

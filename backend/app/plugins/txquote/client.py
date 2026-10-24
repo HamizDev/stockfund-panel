@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
+from datetime import datetime
 
 import httpx
 
@@ -23,6 +25,10 @@ _QQ_MINUTE_URL = "https://ifzq.gtimg.cn/appstock/app/minute/query"
 # 腾讯近5日分时: 每天 1 分钟 K (time price volume amount), volume 单位为手
 # (金额=价x量x100 反推验证, 2026-09-27 实测)。单标的, 不支持批量。
 _QQ_DAY_MINUTE_URL = "https://web.ifzq.gtimg.cn/appstock/app/day/query"
+# 腾讯原生分钟 OHLC (m1/m5/m15/m30/m60); amount is not supplied by this endpoint.
+_QQ_ETF_KLINE_URL = "https://ifzq.gtimg.cn/appstock/app/kline/mkline"
+_QQ_ETF_KLINE_MAX_BYTES = 2 * 1024 * 1024
+_QQ_ETF_KLINE_MAX_BARS = 320
 # 新浪分钟K: scale=5/15/30/60, 需 UA 头; 返回被 =(...) 包裹的 JSON 数组。
 _SINA_KLINE_URL = "https://quotes.sina.cn/cn/api/jsonp_v2.php/=/CN_MarketDataService.getKLineData"
 
@@ -210,6 +216,112 @@ class TxQuoteClient:
             date_iso = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
             out.append((date_iso, [str(r) for r in rows]))
         return out
+
+    # ---- ETF 原生分钟 OHLC (腾讯 mkline) ----
+    def minute_etf_kline(self, symbol: str, period: str, count: int = 320) -> list[dict]:
+        """腾讯 ETF 分钟 OHLC。period 为 m1/m5/m15/m30/m60, 最多 320 根。
+
+        返回不复权、北京时间墙钟的 bar。腾讯数组字段顺序为
+        time/open/close/high/low/volume/...; 成交额未提供, amount 固定为 None。
+        ETF 成交量按腾讯手数口径透传。错误不包含响应正文。
+        """
+        qq_sym = to_qq_symbol(symbol)
+        if qq_sym is None:
+            raise TxQuoteError(f"不支持的代码格式: {symbol}")
+        period = period.lower() if isinstance(period, str) else ""
+        if period not in {"m1", "m5", "m15", "m30", "m60"}:
+            raise ValueError("腾讯 ETF 分钟K周期仅支持 m1/m5/m15/m30/m60")
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or not 1 <= count <= _QQ_ETF_KLINE_MAX_BARS
+        ):
+            raise ValueError(f"腾讯 ETF 分钟K count 范围为 1-{_QQ_ETF_KLINE_MAX_BARS}")
+
+        params = {"param": f"{qq_sym},{period},,{count}"}
+        body = bytearray()
+        try:
+            with self._http.stream(
+                "GET",
+                _QQ_ETF_KLINE_URL,
+                params=params,
+                headers={"Referer": "https://gu.qq.com/"},
+            ) as response:
+                if response.status_code != 200:
+                    raise TxQuoteError(f"腾讯 ETF 分钟K HTTP {response.status_code}")
+                for chunk in response.iter_bytes():
+                    if len(body) + len(chunk) > _QQ_ETF_KLINE_MAX_BYTES:
+                        raise TxQuoteError("腾讯 ETF 分钟K响应超过大小限制")
+                    body.extend(chunk)
+        except TxQuoteError:
+            raise
+        except httpx.HTTPError as exc:
+            raise TxQuoteError("腾讯 ETF 分钟K请求失败") from exc
+
+        try:
+            payload = json.loads(body)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise TxQuoteError("腾讯 ETF 分钟K响应不是有效 JSON") from exc
+        if not isinstance(payload, dict):
+            raise TxQuoteError("腾讯 ETF 分钟K响应结构无效")
+        if payload.get("msg") == "param error":
+            raise TxQuoteError("腾讯 ETF 分钟K请求参数无效")
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise TxQuoteError("腾讯 ETF 分钟K响应缺少数据")
+        node = data.get(qq_sym)
+        if node is None:
+            if data:
+                raise TxQuoteError("腾讯 ETF 分钟K返回标的与请求不匹配")
+            return []
+        if not isinstance(node, dict) or not isinstance(node.get(period), list):
+            raise TxQuoteError("腾讯 ETF 分钟K响应周期结构无效")
+        rows = node[period]
+        if len(rows) > count or len(rows) > _QQ_ETF_KLINE_MAX_BARS:
+            raise TxQuoteError("腾讯 ETF 分钟K返回根数超过请求上限")
+
+        bars: list[dict] = []
+        seen: set[datetime] = set()
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 6:
+                raise TxQuoteError("腾讯 ETF 分钟K记录字段不足")
+            try:
+                stamp = datetime.strptime(str(row[0]), "%Y%m%d%H%M")
+                values = [self._required_finite_number(row[index]) for index in (1, 2, 3, 4, 5)]
+            except (ValueError, TypeError, IndexError, OverflowError) as exc:
+                raise TxQuoteError("腾讯 ETF 分钟K记录格式无效") from exc
+            if stamp in seen:
+                raise TxQuoteError("腾讯 ETF 分钟K存在重复时间")
+            seen.add(stamp)
+            open_price, close_price, high_price, low_price, volume = values
+            if min(open_price, close_price, high_price, low_price) <= 0:
+                raise TxQuoteError("腾讯 ETF 分钟K价格必须为正数")
+            if high_price < low_price:
+                raise TxQuoteError("腾讯 ETF 分钟K最高价低于最低价")
+            if high_price < max(open_price, close_price) or low_price > min(open_price, close_price):
+                raise TxQuoteError("腾讯 ETF 分钟K高低价与开收盘价不一致")
+            if volume < 0:
+                raise TxQuoteError("腾讯 ETF 分钟K成交量不能为负数")
+            bars.append({
+                "datetime": stamp,
+                "open": open_price,
+                "close": close_price,
+                "high": high_price,
+                "low": low_price,
+                "volume": volume,
+                "amount": None,
+            })
+        return bars
+
+    @staticmethod
+    def _required_finite_number(value: object) -> float:
+        """Parse a required finite Tencent numeric field without bool coercion."""
+        if isinstance(value, bool) or value is None:
+            raise ValueError("number required")
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("finite number required")
+        return number
 
 
 def _parse_qq_depth(body: str) -> dict | None:

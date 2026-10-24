@@ -6,12 +6,17 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { CanvasMarketChartProps } from '@/components/CanvasMarketChart'
 import type { GlobalMarket, GlobalMarketChartInterval, GlobalMarketChartResponse } from './types'
+import { QK } from '@/lib/queryKeys'
+import { INSTRUMENT_VIEW_GC_MS } from '@/lib/useInstrumentViewCache'
 import { MarketResearchPage } from './MarketResearchPage'
 
 const fixtures = vi.hoisted(() => ({
   catalog: vi.fn(),
   chart: vi.fn(),
   resources: vi.fn(),
+  researchSources: vi.fn(),
+  researchSupplement: vi.fn(),
+  researchSentiment: vi.fn(),
   catalogCalls: [] as { market: GlobalMarket; q: string }[],
   chartCalls: [] as { market: GlobalMarket; symbol: string; interval: GlobalMarketChartInterval }[],
   canvasProps: null as CanvasMarketChartProps | null,
@@ -22,6 +27,9 @@ vi.mock('@/lib/api', () => ({
     globalMarketCatalog: fixtures.catalog,
     globalMarketChart: fixtures.chart,
     globalMarketResources: fixtures.resources,
+    globalResearchSources: fixtures.researchSources,
+    globalResearchSupplement: fixtures.researchSupplement,
+    globalResearchSentiment: fixtures.researchSentiment,
   },
 }))
 
@@ -83,6 +91,7 @@ let queryClient: QueryClient
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   window.sessionStorage.clear()
+  window.localStorage.clear()
   fixtures.catalogCalls.length = 0
   fixtures.chartCalls.length = 0
   fixtures.canvasProps = null
@@ -103,6 +112,15 @@ beforeEach(() => {
     return chartFor(market, symbol, interval)
   })
   fixtures.resources.mockResolvedValue({ items: [] })
+  fixtures.researchSources.mockResolvedValue({
+    storage: 'local_json',
+    sources: [
+      { provider: 'finnhub', configured: false, masked: '' },
+      { provider: 'adanos', configured: false, masked: '' },
+    ],
+  })
+  fixtures.researchSupplement.mockResolvedValue({})
+  fixtures.researchSentiment.mockResolvedValue({})
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -136,12 +154,14 @@ async function settle() {
 it('keeps HK and US queries separate, labels stock/ETF/index results, and formats each currency', async () => {
   await renderMarket('hk')
   expect(host.querySelector('h1')?.textContent).toBe('港股研究')
+  expect(host.querySelector('[aria-label="美股补充研究"]')).toBeNull()
   expect(fixtures.chartCalls).toContainEqual({ market: 'hk', symbol: '00700.HK', interval: '1d' })
   expect(host.textContent).toContain('HK$700.00')
   expect(host.textContent).toContain('腾讯控股')
   expect(host.textContent).toContain('盈富基金')
   expect(host.textContent).toContain('恒生指数')
-  expect(host.textContent).toContain('Yahoo Finance 公共接口')
+  expect(host.textContent).not.toContain('Yahoo Finance 公共接口')
+  expect(host.textContent).not.toContain('数据源：')
   expect(host.textContent).toContain('15 分钟（日K）')
   expect(host.textContent).toContain('源站价格（未做分红复权）')
   expect(host.textContent).toContain('含当前未结束K线')
@@ -157,6 +177,8 @@ it('keeps HK and US queries separate, labels stock/ETF/index results, and format
 
   await renderMarket('us')
   expect(host.querySelector('h1')?.textContent).toBe('美股研究')
+  const mainSections = Array.from(host.querySelector('main')!.children).filter(element => element.tagName === 'SECTION')
+  expect(mainSections[1]?.getAttribute('aria-label')).toBe('美股补充研究')
   expect(fixtures.chartCalls).toContainEqual({ market: 'us', symbol: 'SPY', interval: '1d' })
   expect(host.textContent).toContain('$525.00')
   expect(host.textContent).toContain('SPDR S&P 500 ETF')
@@ -183,6 +205,92 @@ it('restores the US selection and interval from its independent session state', 
   expect(host.textContent).toContain('QQQ')
   expect(host.textContent).toContain('5分钟')
   expect(window.sessionStorage.getItem('page-view:global-markets:us')).toContain('QQQ')
+})
+
+it('switches recent names within each market without prefetching their inactive charts', async () => {
+  await renderMarket('hk')
+  const etf = [...host.querySelectorAll<HTMLButtonElement>('button')]
+    .find(button => button.textContent?.includes('盈富基金') && button.getAttribute('aria-pressed') === 'false')!
+  await act(async () => etf.click())
+  await settle()
+  const recent = () => host.querySelector('nav[aria-label="最近查看的标的"]')!
+  expect(recent().textContent).toContain('腾讯控股')
+  expect(recent().textContent).toContain('盈富基金')
+  expect(fixtures.chartCalls).toHaveLength(2)
+  expect(queryClient.getQueryState(QK.globalMarketChart('hk', '00700.HK', '1d'))).toBeUndefined()
+
+  await renderMarket('us')
+  expect(recent().textContent).toContain('SPDR S&P 500 ETF')
+  expect(recent().textContent).not.toContain('腾讯控股')
+  await renderMarket('hk')
+  const callsBefore = fixtures.chartCalls.length
+  const tencent = [...recent().querySelectorAll('button')].find(button => button.textContent === '腾讯控股')!
+  await act(async () => tencent.click())
+  await settle()
+  expect(fixtures.chartCalls).toHaveLength(callsBefore + 1)
+  expect(tencent.getAttribute('aria-current')).toBe('true')
+  expect(fixtures.canvasProps?.symbol).toBe('00700.HK')
+  expect(queryClient.getQueryState(QK.globalMarketChart('hk', '2800.HK', '1d'))).toBeUndefined()
+})
+
+it('shows a cached selected chart immediately on return, refreshes it in the background, and evicts the previous symbol', async () => {
+  window.sessionStorage.setItem('page-view:global-markets:hk', JSON.stringify({ symbol: '00700.HK', interval: '5m' }))
+  const key = QK.globalMarketChart('hk', '00700.HK', '5m')
+  const cached = chartFor('hk', '00700.HK', '5m', {
+    quote: { price: 699, change_pct: 0.02 },
+    classification: {
+      source: 'eastmoney_hk_f10',
+      system: 'eastmoney_belong_industry',
+      industry: '软件服务',
+      fetched_at_ms: Date.parse('2026-10-16T08:00:00Z'),
+    },
+  })
+  queryClient.setQueryData(key, cached)
+
+  await renderMarket('hk')
+  expect(host.textContent).toContain('5分钟')
+  expect(host.textContent).toContain('HK$699.00')
+  expect(host.textContent).toContain('公司行业 · 软件服务')
+  expect(host.textContent).not.toContain('Eastmoney')
+  expect(queryClient.getQueryCache().find({ queryKey: key })?.options.gcTime).toBe(INSTRUMENT_VIEW_GC_MS)
+  expect(fixtures.chartCalls.filter(call => call.symbol === '00700.HK')).toHaveLength(0)
+
+  await act(async () => root.render(<div>离开行情页</div>))
+  await settle()
+  await act(async () => queryClient.setQueryData(key, cached, { updatedAt: Date.now() - 61_000 }))
+  let resolveRefresh!: (value: GlobalMarketChartResponse) => void
+  fixtures.chart.mockImplementationOnce((market: GlobalMarket, symbol: string, interval: GlobalMarketChartInterval) => {
+    fixtures.chartCalls.push({ market, symbol, interval })
+    return new Promise(resolve => { resolveRefresh = resolve })
+  })
+
+  await renderMarket('hk')
+  expect(host.textContent).toContain('HK$699.00')
+  expect(host.textContent).toContain('公司行业 · 软件服务')
+  expect(host.querySelector('[data-testid="canvas-chart"]')).not.toBeNull()
+  expect(host.textContent).not.toContain('正在加载')
+  expect(queryClient.getQueryState(key)?.fetchStatus).toBe('fetching')
+  expect(fixtures.chartCalls.filter(call => call.symbol === '00700.HK')).toHaveLength(1)
+
+  await act(async () => resolveRefresh(chartFor('hk', '00700.HK', '5m', {
+    quote: { price: 701, change_pct: 0.03 },
+    classification: cached.classification,
+  })))
+  await settle()
+  expect(host.textContent).toContain('HK$701.00')
+
+  const otherInstrument = Array.from(host.querySelectorAll<HTMLButtonElement>('button'))
+    .find(button => button.textContent?.includes('盈富基金') && button.getAttribute('aria-pressed') === 'false')
+  expect(otherInstrument).toBeDefined()
+  await act(async () => otherInstrument!.click())
+  await settle()
+
+  const nextKey = QK.globalMarketChart('hk', '2800.HK', '5m')
+  expect(queryClient.getQueryState(key)).toBeUndefined()
+  expect(queryClient.getQueryData(nextKey)).toBeDefined()
+  expect(host.textContent).toContain('盈富基金')
+  expect(host.textContent).toContain('HK$700.00')
+  expect(host.textContent).not.toContain('HK$701.00')
 })
 
 it('recovers invalid session state with the market defaults', async () => {
@@ -215,6 +323,8 @@ it('shows a request failure and recovers when the user refreshes', async () => {
 
   await renderMarket('hk')
   expect(host.textContent).toContain('行情加载失败：网络不可用')
+  expect(host.querySelector('nav[aria-label="最近查看的标的"]')?.textContent).toContain('腾讯控股')
+  expect(host.querySelector('[data-testid="canvas-chart"]')).toBeNull()
 
   const refresh = host.querySelector<HTMLButtonElement>('[aria-label="刷新行情"]')
   expect(refresh).not.toBeNull()
@@ -275,7 +385,7 @@ it('loads resource-directory scope only after opening the foldout and uses safe 
 
   await renderMarket('us')
   expect(fixtures.resources).not.toHaveBeenCalled()
-  const foldout = host.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')
+  const foldout = host.querySelector<HTMLButtonElement>('aside button[aria-expanded="false"]')
   expect(foldout).not.toBeNull()
   await act(async () => foldout!.click())
   await settle()
@@ -287,7 +397,7 @@ it('loads resource-directory scope only after opening the foldout and uses safe 
   expect(host.textContent).toContain('高级历史数据需付费')
 
   await renderMarket('hk')
-  const hkFoldout = host.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')
+  const hkFoldout = host.querySelector<HTMLButtonElement>('aside button[aria-expanded="false"]')
   expect(hkFoldout).not.toBeNull()
   await act(async () => hkFoldout!.click())
   await settle()

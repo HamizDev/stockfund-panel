@@ -11,9 +11,24 @@ const fixture = vi.hoisted(() => ({ rows: [
 ] }))
 vi.mock('@tanstack/react-query', () => ({ useQuery: () => ({ data: fixture, isLoading: false, isError: false }) }))
 vi.mock('@/lib/kline', () => ({ klineDailyQueryOptions: () => ({ queryKey: ['test'] }) }))
+vi.mock('@/lib/storage', () => ({
+  storage: {
+    stockVolumeCompare: { get: () => ({ enabled: true, days: 1 }), set: vi.fn() },
+    stockChartIndicators: { get: (fallback: unknown) => fallback, set: vi.fn() },
+    stockChartMode: { get: (fallback: unknown) => fallback, set: vi.fn() },
+  },
+}))
 vi.mock('@/components/research/ResearchAIButton', () => ({ ResearchAIButton: () => null }))
 vi.mock('@/components/EChartsCandlestick', () => ({
-  SUB_CHARTS: [], OVERLAY_INDICATORS: [], EChartsCandlestick: () => null,
+  SUB_CHARTS: [
+    { key: 'adx', label: 'ADX 趋势', height: 84 },
+    { key: 'vol', label: '成交量', height: 84 },
+    { key: 'macd', label: 'MACD', height: 84 },
+    { key: 'rsi', label: 'RSI', height: 84 },
+    { key: 'kdj', label: 'KDJ', height: 84 },
+  ],
+  OVERLAY_INDICATORS: [{ key: 'boll', label: 'BOLL' }],
+  EChartsCandlestick: () => null,
 }))
 vi.mock('@/components/TradingViewDailyChart', () => ({
   TradingViewDailyChart: ({ anchoredVwap }: { anchoredVwap: Array<{ value: number | null }> }) =>

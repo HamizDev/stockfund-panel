@@ -1,14 +1,15 @@
 /**
  * 基金中心页面 — 场外基金净值 + ETF/LOF 行情。
  *
- * 自包含扩展页面: 数据全部走 /api/custom/fund, 状态用组件内 state +
- * 手动轮询, 不碰核心 queryKeys / api.ts / 全局 store。删除本目录即卸载。
+ * 自包含扩展页面: 数据走 /api/custom/fund，查询结果按基金代码通过 TanStack Query 缓存；
+ * 详情按需取数，离开详情后停止行情轮询。删除本目录即卸载。
  *
  * 样式: 与主面板 Dashboard 一致 (accent 色条标题 / surface 卡片 /
  * 紧凑字号 / 数字 font-mono)。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import * as echarts from 'echarts'
 import type { ECharts } from 'echarts'
 import { ArrowLeft, BarChart3, Info, LineChart, Plus, Search, Star, Activity, Sparkles, X, Loader2 } from 'lucide-react'
@@ -19,12 +20,14 @@ import { FundScreener } from './FundScreener'
 import { FundResearchPanel } from './FundResearchPanel'
 import { HoldingsDailyReview, holdingsReviewSignature } from '@/components/HoldingsDailyReview'
 import { cn } from '@/lib/cn'
+import { QK } from '@/lib/queryKeys'
+import { cnToday } from '@/lib/kline'
+import { INSTRUMENT_VIEW_GC_MS, useInstrumentViewCache } from '@/lib/useInstrumentViewCache'
 import {
   fundApi,
   pctText,
   type FundEstimate,
   type FundEstimateCurve,
-  type FundDataSource,
   type FundNavPoint,
   type FundPortfolioItem,
   type FundProfile,
@@ -61,50 +64,48 @@ function Card({ className, children }: { className?: string; children: React.Rea
 }
 
 function useWatchlist() {
-  const [items, setItems] = useState<FundWatchItem[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
+  const queryClient = useQueryClient()
+  const query = useQuery({
+    queryKey: QK.fundWatchlist,
+    queryFn: ({ signal }) => fundApi.watchlist(signal),
+    staleTime: 15_000,
+    gcTime: INSTRUMENT_VIEW_GC_MS,
+    retry: false,
+    refetchOnWindowFocus: false,
+  })
   const refresh = useCallback(async () => {
-    try {
-      const r = await fundApi.watchlist()
-      setItems(r.items)
-      setError('')
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '加载失败')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-  useEffect(() => {
-    refresh()
-  }, [refresh])
-  return { items, loading, error, refresh }
+    await queryClient.cancelQueries({ queryKey: QK.fundWatchlist, exact: true })
+    await queryClient.invalidateQueries({ queryKey: QK.fundWatchlist, exact: true })
+  }, [queryClient])
+  return {
+    items: query.data?.items ?? [],
+    loading: query.isPending,
+    error: query.data === undefined && query.error instanceof Error ? query.error.message : '',
+    refresh,
+  }
 }
 
 function usePortfolio() {
-  const [items, setItems] = useState<FundPortfolioItem[]>([])
-  const [loading, setLoading] = useState(true)
-  const [loaded, setLoaded] = useState(false)
-  const [error, setError] = useState('')
-  const loadedRef = useRef(false)
+  const queryClient = useQueryClient()
+  const query = useQuery({
+    queryKey: QK.fundPortfolio,
+    queryFn: ({ signal }) => fundApi.portfolio(signal),
+    staleTime: 15_000,
+    gcTime: INSTRUMENT_VIEW_GC_MS,
+    retry: false,
+    refetchOnWindowFocus: false,
+  })
   const refresh = useCallback(async () => {
-    if (!loadedRef.current) setLoading(true)
-    try {
-      const r = await fundApi.portfolio()
-      setItems(r.items)
-      setError('')
-      loadedRef.current = true
-      setLoaded(true)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '基金持仓读取失败')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-  useEffect(() => {
-    refresh()
-  }, [refresh])
-  return { items, loading, loaded, error, refresh, setItems }
+    await queryClient.cancelQueries({ queryKey: QK.fundPortfolio, exact: true })
+    await queryClient.invalidateQueries({ queryKey: QK.fundPortfolio, exact: true })
+  }, [queryClient])
+  return {
+    items: query.data?.items ?? [],
+    loading: query.isPending,
+    loaded: query.data !== undefined,
+    error: query.data === undefined && query.error instanceof Error ? query.error.message : '',
+    refresh,
+  }
 }
 
 function NavChart({ nav }: { nav: FundNavPoint[] }) {
@@ -380,7 +381,7 @@ function AddPositionDialog({
   thscode: string
   name: string
   onClose: () => void
-  onSaved: () => void
+  onSaved: () => void | Promise<void>
 }) {
   const [amount, setAmount] = useState('')
   const [profit, setProfit] = useState('')
@@ -400,7 +401,7 @@ function AddPositionDialog({
       const items = r.items.filter((it) => it.thscode !== thscode)
       items.push({ thscode, name, amount: amt, profit: parseFloat(profit) || 0 })
       await fundApi.savePortfolio(items)
-      onSaved()
+      await onSaved()
     } catch (e) {
       setErr(e instanceof Error ? e.message : '保存失败')
     } finally {
@@ -548,83 +549,78 @@ function FundAnalysisDialog({
   )
 }
 
-function FundDetail({ item, onBack, researchHorizon }: { item: FundWatchItem | FundSearchItem; onBack: () => void; researchHorizon: string }) {
+function FundDetail({ item, onBack, researchHorizon, onPortfolioChanged }: {
+  item: FundWatchItem | FundSearchItem
+  onBack: () => void
+  researchHorizon: string
+  onPortfolioChanged: () => void | Promise<void>
+}) {
   const thscode = item.thscode
   const tradable = isTradable('kind_label' in item ? item.kind_label : '')
-  const [quote, setQuote] = useState<FundQuote | null>(null)
-  const [kline, setKline] = useState<{ adjusted: string; bars: { date: string; open: number | null; high: number | null; low: number | null; close: number | null; volume: number | null }[] } | null>(null)
-  const [nav, setNav] = useState<FundNavPoint[] | null>(null)
-  const [navSource, setNavSource] = useState<FundDataSource | null>(null)
-  const [navLoading, setNavLoading] = useState(true)
-  const [profile, setProfile] = useState<FundProfile | null>(null)
-  const [err, setErr] = useState('')
+  useInstrumentViewCache('fund-detail', thscode)
+  const detailMeta = { instrumentView: 'fund-detail', symbol: thscode }
+  const profileQuery = useQuery({
+    queryKey: QK.fundProfile(thscode),
+    queryFn: ({ signal }) => fundApi.profile(thscode, signal),
+    enabled: !!thscode,
+    staleTime: 24 * 60 * 60_000,
+    gcTime: INSTRUMENT_VIEW_GC_MS,
+    meta: detailMeta,
+    retry: false,
+    refetchOnWindowFocus: false,
+  })
+  const quoteQuery = useQuery({
+    queryKey: QK.fundQuote(thscode),
+    queryFn: ({ signal }) => fundApi.quote(thscode, signal),
+    enabled: tradable,
+    staleTime: 10_000,
+    gcTime: INSTRUMENT_VIEW_GC_MS,
+    meta: detailMeta,
+    retry: false,
+    refetchInterval: tradable ? QUOTE_POLL_MS : false,
+    refetchOnWindowFocus: false,
+  })
+  const klineQuery = useQuery({
+    queryKey: QK.fundKline(thscode, 250),
+    queryFn: ({ signal }) => fundApi.kline(thscode, 250, signal),
+    enabled: tradable,
+    staleTime: 5 * 60_000,
+    gcTime: INSTRUMENT_VIEW_GC_MS,
+    meta: detailMeta,
+    retry: false,
+    refetchOnWindowFocus: false,
+  })
+  const navQuery = useQuery({
+    queryKey: QK.fundNav(thscode, 'year'),
+    queryFn: ({ signal }) => fundApi.nav(thscode, 'year', signal),
+    enabled: !tradable,
+    staleTime: 15 * 60_000,
+    gcTime: INSTRUMENT_VIEW_GC_MS,
+    meta: detailMeta,
+    retry: false,
+    refetchOnWindowFocus: false,
+  })
+  const estimateQuery = useQuery({
+    queryKey: QK.fundEstimate(thscode, cnToday()),
+    queryFn: ({ signal }) => fundApi.estimate(thscode, signal),
+    enabled: !tradable,
+    staleTime: 30_000,
+    gcTime: INSTRUMENT_VIEW_GC_MS,
+    meta: detailMeta,
+    retry: false,
+    refetchOnWindowFocus: false,
+  })
+  const quote = quoteQuery.data?.quote ?? null
+  const kline = klineQuery.data ?? null
+  const nav = navQuery.data?.nav ?? null
+  const navLoading = navQuery.isPending
+  const profile = profileQuery.data?.profile ?? null
+  const estimateData = estimateQuery.data ?? null
+  const err = tradable
+    ? !quote && quoteQuery.error instanceof Error ? quoteQuery.error.message : ''
+    : !nav && navQuery.error instanceof Error ? navQuery.error.message : ''
   const [showAnalysis, setShowAnalysis] = useState(false)
   const [showAddPosition, setShowAddPosition] = useState(false)
-  const [estimateData, setEstimateData] = useState<{
-    prev_nav: number | null
-    nav_date: string | null
-    estimate: FundEstimate
-    curve: FundEstimateCurve
-    holdings: { items: HoldingItem[]; report_note: string }
-  } | null>(null)
-
-  useEffect(() => {
-    let alive = true
-    setErr('')
-    setQuote(null)
-    setKline(null)
-    setNav(null)
-    setNavSource(null)
-    setNavLoading(true)
-    setProfile(null)
-    setEstimateData(null)
-    fundApi
-      .profile(thscode)
-      .then((r) => alive && setProfile(r.profile))
-      .catch(() => {})
-    if (tradable) {
-      fundApi
-        .quote(thscode)
-        .then((r) => alive && setQuote(r.quote))
-        .catch((e) => alive && setErr(e instanceof Error ? e.message : '行情加载失败'))
-      fundApi
-        .kline(thscode, 250)
-        .then((r) => alive && setKline(r))
-        .catch(() => {})
-    } else {
-      fundApi
-        .nav(thscode, 'year')
-        .then((r) => {
-          if (alive) {
-            setNav(r.nav)
-            setNavSource(r.source ?? null)
-          }
-        })
-        .catch((e) => alive && setErr(e instanceof Error ? e.message : '净值加载失败'))
-        .finally(() => alive && setNavLoading(false))
-      fundApi
-        .estimate(thscode)
-        .then((r) => alive && setEstimateData(r))
-        .catch(() => {})
-    }
-    return () => {
-      alive = false
-    }
-  }, [thscode, tradable])
-
-  // ETF/LOF 轮询实时快照
-  useEffect(() => {
-    if (!tradable) return
-    const t = setInterval(async () => {
-      try {
-        const r = await fundApi.quote(thscode)
-        setQuote(r.quote)
-      } catch {
-        /* 轮询失败静默, 保留上次数据 */
-      }
-    }, QUOTE_POLL_MS)
-    return () => clearInterval(t)
-  }, [thscode, tradable])
 
   const ohlc = useMemo(
     () =>
@@ -675,7 +671,7 @@ function FundDetail({ item, onBack, researchHorizon }: { item: FundWatchItem | F
           thscode={thscode}
           name={item.name ?? thscode}
           onClose={() => setShowAddPosition(false)}
-          onSaved={() => setShowAddPosition(false)}
+          onSaved={async () => { setShowAddPosition(false); await onPortfolioChanged() }}
         />
       )}
       {showAnalysis && (
@@ -716,7 +712,7 @@ function FundDetail({ item, onBack, researchHorizon }: { item: FundWatchItem | F
       )}
       {!tradable && (
         <Card>
-          <div className="flex flex-wrap items-center justify-between gap-2"><SectionTitle icon={LineChart} title="净值走势（近一年）" /><span className="text-xs text-muted">{navSource === 'eastmoney' ? '东方财富公开净值（单位净值，未复权）' : navSource === 'akshare' ? '东方财富 · AKShare' : navSource === 'fuyao' ? '扶摇' : '数据源待确认'}{nav?.length ? ` · 更新至 ${nav[nav.length - 1].nav_date}` : ''}</span></div>
+          <div className="flex flex-wrap items-center justify-between gap-2"><SectionTitle icon={LineChart} title="净值走势（近一年）" /><span className="text-xs text-muted">单位净值（未复权）{nav?.length ? ` · 更新至 ${nav[nav.length - 1].nav_date}` : ''}</span></div>
           {nav && nav.length > 0 ? (
             <NavChart nav={nav} />
           ) : (
@@ -785,7 +781,7 @@ export function FundPage() {
   const addWatch = useCallback(
     async (it: FundSearchItem) => {
       await fundApi.addWatch({ thscode: it.thscode, name: it.name, asset_type: it.asset_type })
-      refresh()
+      await refresh()
     },
     [refresh],
   )
@@ -800,7 +796,7 @@ export function FundPage() {
 
   if (selected) {
     return (
-      <><PageHeader title="基金详情" className="pl-14 sm:pl-5" subtitle={selected.name || selected.thscode} right={<Link to="/ai-fund-screener" className="inline-flex items-center gap-1.5 rounded-btn border border-accent/35 bg-accent/10 px-3 py-1.5 text-xs text-accent"><Sparkles className="h-3.5 w-3.5" />AI 选基</Link>} /><div className="space-y-4 px-5 py-5 md:px-8"><FundDetail item={selected} onBack={closeFund} researchHorizon={researchHorizon} /></div></>
+      <><PageHeader title="基金详情" className="pl-14 sm:pl-5" subtitle={selected.name || selected.thscode} right={<Link to="/ai-fund-screener" className="inline-flex items-center gap-1.5 rounded-btn border border-accent/35 bg-accent/10 px-3 py-1.5 text-xs text-accent"><Sparkles className="h-3.5 w-3.5" />AI 选基</Link>} /><div className="space-y-4 px-5 py-5 md:px-8"><FundDetail key={selected.thscode} item={selected} onBack={closeFund} researchHorizon={researchHorizon} onPortfolioChanged={portfolio.refresh} /></div></>
     )
   }
 
@@ -902,7 +898,7 @@ export function FundPage() {
             <div className="mb-1 text-[10px] text-muted">ETF / LOF</div>
             <ul className="mb-1.5 divide-y divide-border/40">
               {etfItems.map((w) => (
-                <WatchRow key={w.thscode} item={w} onOpen={openFund} onRemove={async () => { await fundApi.removeWatch(w.thscode); refresh() }} />
+                <WatchRow key={w.thscode} item={w} onOpen={openFund} onRemove={async () => { await fundApi.removeWatch(w.thscode); await refresh() }} />
               ))}
             </ul>
           </>
@@ -912,7 +908,7 @@ export function FundPage() {
             <div className="mb-1 text-[10px] text-muted">场外基金</div>
             <ul className="divide-y divide-border/40">
               {otcItems.map((w) => (
-                <WatchRow key={w.thscode} item={w} onOpen={openFund} onRemove={async () => { await fundApi.removeWatch(w.thscode); refresh() }} />
+                <WatchRow key={w.thscode} item={w} onOpen={openFund} onRemove={async () => { await fundApi.removeWatch(w.thscode); await refresh() }} />
               ))}
             </ul>
           </>
@@ -927,7 +923,7 @@ export function FundPage() {
         onOpen={(it) => openFund({ thscode: it.thscode, ticker: null, name: it.name ?? it.thscode, asset_type: 'fund-otc', kind_label: '场外基金' })}
         onRemove={async (thscode) => {
           await fundApi.removePosition(thscode)
-          portfolio.refresh()
+          await portfolio.refresh()
         }}
       />
       {portfolio.loaded && (
@@ -940,7 +936,7 @@ export function FundPage() {
       )}
 
       <p className="text-xs leading-5 text-muted">
-        场外基金净值优先读取扶摇，未配置或暂不可用时使用公开净值来源；页面标注具体数据来源、单位净值口径和更新日期。ETF 行情和穿透估值依赖扶摇对应接口。
+        场外基金以单位净值和净值日期展示；估算净值仅供参考。ETF 行情和穿透估值暂不可用时会显示状态提示。
       </p>
         </>
       )}

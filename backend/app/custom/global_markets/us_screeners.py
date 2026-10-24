@@ -116,6 +116,7 @@ def _normalize_quote(row: dict, screen_id: str, now: float) -> tuple[dict | None
         "price": price,
         "change_pct": change_percent / 100,
         "volume": volume,
+        "market_cap": _number(row.get("marketCap"), positive=True),
         # Yahoo's screener payload has no traded amount, turnover, or industry.
         "amount": None,
         "turnover_rate": None,

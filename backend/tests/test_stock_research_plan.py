@@ -18,7 +18,7 @@ async def test_analysis_selects_plan_prompt_and_preserves_data(monkeypatch, tmp_
 
     frame = pl.DataFrame({"date": [date(2026, 9, 30)], "close": [4.12], "raw_close": [4.15]})
     monkeypatch.setattr(stock_analyzer, "_load_kline", lambda repo, symbol: frame)
-    monkeypatch.setattr(stock_analyzer, "compute_levels", lambda df: {})
+    monkeypatch.setattr(stock_analyzer, "compute_levels", lambda df, **_: {})
     monkeypatch.setattr(paper, "list_account_ids", lambda data_dir: [])
     captured = {}
 
@@ -54,7 +54,7 @@ async def test_screener_plan_does_not_read_or_send_account_positions(monkeypatch
             return "stock"
 
     monkeypatch.setattr(stock_analyzer, "_load_kline", lambda *a: pl.DataFrame({"close": [10.0]}))
-    monkeypatch.setattr(stock_analyzer, "compute_levels", lambda df: {})
+    monkeypatch.setattr(stock_analyzer, "compute_levels", lambda df, **_: {})
     monkeypatch.setattr(stock_analyzer, "_load_financials", lambda *a: {})
     monkeypatch.setattr(paper, "list_account_ids", lambda *a: pytest.fail("Research plan must not read accounts"))
 

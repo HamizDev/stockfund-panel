@@ -1,4 +1,5 @@
-"""AI 个股分析服务 — 技术面 / 基本面 / 财务面 / 消息面 四维综合分析。
+# ruff: noqa: RUF001 -- localized Chinese analysis instructions.
+"""AI 个股分析服务 — 技术状态、技术面、关键价位与风险。
 
 职责:
   组合一只股票的 K 线(含已算好的技术指标)+ 财务表 + 关键价位 →
@@ -8,22 +9,24 @@
   - 角色:客观技术分析师(非 CFA 财务分析师)
   - 数据源:K 线 + 技术指标为主,财务表为辅(财务分析以财务表为主)
   - 输出框架:技术面→基本面→财务面→消息面(四维),落点是客观技术状态与风险提示
-    (财务分析的落点是财务质量评级)。注意:本服务不输出买卖建议、操作指令。
+    (财务分析的落点是财务质量评级)。本服务输出有数据依据的客观研究,不会下单。
 
 不知道: HTTP、前端、配置持久化。
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
 
 from app.indicators.levels import compute_levels, summarize_levels
-from app.market_time import cn_today
+from app.market_time import cn_now, cn_today
+from app.services import analysis_quality
 from app.services.financial_sync import get_financial_df
 
 logger = logging.getLogger(__name__)
@@ -78,7 +81,8 @@ def _clean_rows(df: pl.DataFrame, keep_cols: list[str]) -> list[dict]:
 
 
 def _load_financials(data_dir: Path, symbol: str, *,
-                     frames: dict[str, pl.DataFrame] | None = None) -> dict[str, list[dict]]:
+                     frames: dict[str, pl.DataFrame] | None = None,
+                     as_of: date | None = None) -> dict[str, list[dict]]:
     """读取该标的核心财务指标 + 利润表(只取最有信息量的两张表)。
 
     财务面只需要关键指标(ROE / 增速 / 毛利率 等),不需要把 4 张表全塞进上下文
@@ -93,6 +97,8 @@ def _load_financials(data_dir: Path, symbol: str, *,
             out[table] = []
             continue
         df = df.filter(pl.col("symbol") == symbol)
+        if as_of is not None:
+            df = analysis_quality.published_rows(df, as_of)
         if df.is_empty():
             out[table] = []
             continue
@@ -108,16 +114,14 @@ def _load_financials(data_dir: Path, symbol: str, *,
                 if isinstance(v, float):
                     clean[k] = None if not math.isfinite(v) else v
                 else:
-                    clean[k] = v
+                    clean[k] = v.isoformat() if isinstance(v, date) else v
             rows.append(clean)
         out[table] = rows
     return out
 
 
 # ================================================================
-# 系统提示词 —— 客观技术分析四维框架(与财务分析明确区分)
-# 重要原则:只描述"指标/价位处于什么客观状态",不输出"应该怎么操作"。
-# 本报告定位为客观行情分析,不提供任何买卖建议、仓位建议或交易指令。
+# 系统提示词 —— 客观技术状态与证据。
 # ================================================================
 
 _SYSTEM_PROMPT = """你是一位拥有 15 年 A 股一线研究经验的技术分析分析师,擅长从 K 线、量价、关键价位与基本面交叉验证中客观解读个股的技术状态。你的任务是:基于提供的个股数据,产出一份**客观、中立、不包含任何买卖或操作建议**的技术分析报告。
@@ -194,33 +198,34 @@ _SYSTEM_PROMPT = """你是一位拥有 15 年 A 股一线研究经验的技术�
 
 现在请基于下方数据进行分析。"""
 
+_INDEX_SYSTEM_PROMPT = """你是本地看板的指数行情研究助手。只使用输入行情和指标，先概括当前技术状态，再列趋势、量价、支撑压力及条件失效的证据。标明提问时间、实际行情截至和日K定版状态，不把盘中临时数据当收盘确认。不编造消息、概率或持仓；指数点位本身不可直接下单，不把指数分析写成用户持仓的加减仓指令。若用户问操作，只说明指数层面的信号和需要核对的具体可交易标的。用简洁Markdown输出。"""
+
 
 # ================================================================
 # 用户消息构建
 # ================================================================
 
 _RESEARCH_PLAN_PROMPT = """你是 stockfund-panel 的证券研究助手。
-只使用输入中的行情、关键价位和财务数据, 写一份简洁的 Markdown 研究报告。
+只使用输入中的行情、关键价位和财务数据, 写一份客观、中立的 Markdown 研究报告。
+不输出买卖、加减仓、持有等操作结论, 不制定分批交易计划、金额或仓位比例。
 每个判断引用数据日期与依据; 数据不足时列出待核对项, 不编造数字或消息。
 报告结构:
-## 研究结论: 用「等待确认 / 满足观察条件 / 条件失效」说明技术状态, 不打虚构分数。
+## 技术状态: 用实际量价事实说明趋势及其不确定性, 不打虚构分数。
 ## 依据与风险: 趋势、量价、实际提供的支撑/压力、财务(ETF 不套用公司财务)。
-## 条件买入计划: 表格列出“阶段 | 必须满足的条件 | 研究动作 | 失效条件”。
-阶段包括观察、首批、后续批次; 可描述等待收盘确认、回踩/突破、成交量验证等,
-只用实际提供的指标/价位, 没有依据则写“暂无法定价”, 不可任意生成目标价格。
-## 停止加仓与退出条件: 说明什么变化使假设失效、哪些数据仍需补充。
-## 下单前核对: 行情时点、复权口径、手续费、买卖单位、资金和风险预算。
+## 研究核对表: 列出“观察项 | 已核验事实 | 待确认条件 | 假设失效证据”。
+可描述收盘确认、回踩/突破、成交量验证等技术现象, 但不得附带交易动作。
+只用实际提供的指标/价位, 没有依据则写“暂无法定价”, 不任意生成目标价格。
+## 反向证据与资料缺口: 说明什么变化使技术假设失效、哪些数据仍需补充。
 输入日K及计算价位是历史研究数据, 可能为前复权, 不能视为实时可成交报价;
-不能把复权支撑直接当真实限价, 需核对最新不复权报价、最新公司行为及价差。
-无个人预算或可承受损失时不编造金额、仓位比例、止损比例或预期收益; 分批描述
-是待用户设定预算后的条件步骤。涨跌停、停牌、滑点可能使计划无法成交。
+需要核对最新不复权报价、最新公司行为及价差, 不把复权支撑写成真实限价。
+不编造金额、仓位比例、止损比例或预期收益; 涨跌停、停牌、滑点属于交易约束。
 股票不能假定当日买入可当日卖出。ETF 必须核对具体品种的交易规则, 不能全部
 按 T+0; 还要核对跟踪指数、费率、流动性、折溢价, 缺失这些输入时明确标注。
-本报告不会下单或启用自动交易, 不保证盈利。结尾一句标注“条件研究计划, 供核对”。
+本报告不会下单或启用自动交易, 不保证盈利。结尾标注“客观研究资料, 供核对”。
 """
 
 def _paper_position_part(positions: list[dict], close: float | None, raw_close: float | None) -> str:
-    """虚拟持仓上下文 (V3): 模拟盘持有该标的时注入提示词, 让 AI 结合仓位给建议。
+    """虚拟持仓上下文 (V3): 逐账户说明成本与浮盈, 不推断真实持仓。
 
     positions 为多账户列表 [{account_id, qty, avg_cost}, ...] (V2 账户隔离),
     只收 qty>0 的账户, 逐账户一行; 全空则返回空串 (不注入"空仓"之类误导性表述)。
@@ -236,15 +241,15 @@ def _paper_position_part(positions: list[dict], close: float | None, raw_close: 
         line = f"账户 {item.get('account_id') or 'default'}: 持仓 {qty} 股, 平均成本 {avg_cost:.3f} 元 (不复权)"
         ref = raw_close if (raw_close is not None and raw_close > 0) else close
         if ref is not None and ref > 0:
-            line += f", 现价 {ref:.2f} 元, 浮动盈亏 {(ref / avg_cost - 1) * 100:+.2f}%"
+            line += f", 现价 {ref:.3f} 元, 浮动盈亏 {(ref / avg_cost - 1) * 100:+.2f}%"
         lines.append(line)
     if not lines:
         return ""
     return (
         "\n以下是该标的在模拟盘 (虚拟账户) 的当前持仓:\n"
         + "\n".join(lines)
-        + "\n请在结论中结合该虚拟持仓状态给出持有/减仓/加仓的可执行参考,"
-        "并明确这是基于模拟盘虚拟持仓的建议。\n"
+        + "\n请结合该虚拟持仓客观说明成本、浮盈与技术风险,不提供加减仓指令,"
+        "并明确这是模拟盘虚拟持仓的技术状态说明。\n"
     )
 
 
@@ -258,6 +263,7 @@ def _build_user_prompt(
     asset_type: str = "stock",
     paper_positions: list[dict] | None = None,
     raw_close: float | None = None,
+    snapshot_meta: dict | None = None,
 ) -> str:
     """构建用户消息:标的 + 价位摘要 + 技术指标 JSON + 财务摘要 + 关注点 (+ 虚拟持仓)。
 
@@ -265,7 +271,8 @@ def _build_user_prompt(
     """
     parts: list[str] = [
         f"标的标准代码: {symbol}",
-        f"关键价位概览: {summarize_levels(levels, close)}",
+        f"关键价位概览: {summarize_levels(levels, close, price_precision=3 if asset_type == 'etf' else 2)}",
+        '关键价位原始数值: ' + json.dumps(levels, ensure_ascii=False),
         "",
         "以下是该标的最近日 K 数据(JSON,含 OHLCV 与已计算的技术指标。"
         f"最近 {_KLINE_WINDOW} 个交易日,升序):",
@@ -273,6 +280,23 @@ def _build_user_prompt(
         json.dumps(kline_tail, ensure_ascii=False),
         "```",
     ]
+    if snapshot_meta:
+        if snapshot_meta.get('requested_at'):
+            parts.append(f"本次提问时间: {snapshot_meta['requested_at']}。")
+        parts.extend(["", f"数据截至交易日: {snapshot_meta.get('as_of') or '未知'}; "
+                      f"价格口径: {snapshot_meta.get('price_basis') or '未记录'}。"])
+        if snapshot_meta.get('is_provisional'):
+            parts.append("最后一根为当日未收盘日K, OHLCV及技术指标会随盘中行情变化, "
+                         "不能当作收盘确认信号。")
+        elif snapshot_meta.get('is_provisional') is False:
+            parts.append('日K临时状态 is_provisional=false：本次快照未使用盘中临时日K，按已提供的日线数据判断。')
+        if snapshot_meta.get('intraday_as_of'):
+            parts.append(f"当日分钟行情实际截至: {snapshot_meta['intraday_as_of']}。")
+        if snapshot_meta.get('warning'):
+            parts.append(f"数据提示: {snapshot_meta['warning']}")
+        if snapshot_meta.get('minute_rows'):
+            parts.extend(['', '同一行情快照最近60根1分钟数据（实际根数以数组为准，升序；不是全天走势）:',
+                          '```json', json.dumps(snapshot_meta['minute_rows'], ensure_ascii=False), '```'])
 
     has_fin = any(fins.values())
     if has_fin:
@@ -307,6 +331,7 @@ def _build_user_prompt(
 
     from app.services.ai_provider import build_focus_instruction
     focus_instruction = build_focus_instruction(focus, report_name="个股分析报告")
+    parts.append('持仓、可卖数量、现金、费率或风险预算未提供时不编造；模拟账户与实盘分别标明。')
     if focus_instruction:
         parts.extend(["", focus_instruction])
     paper_part = _paper_position_part(paper_positions or [], close, raw_close)
@@ -346,6 +371,9 @@ async def analyze_stock_stream(
     focus: str = "",
     *,
     research_plan: bool = False,
+    refresh: bool = False,
+    capset=None,
+    request_time: datetime | None = None,
 ) -> AsyncIterator[str]:
     """流式个股分析:yield 出每个 NDJSON 事件。
 
@@ -356,7 +384,18 @@ async def analyze_stock_stream(
       {"type":"done"}
     """
     # 1. 加载 K 线
-    df = _load_kline(repo, symbol)
+    snapshot_meta = {}
+    if refresh:
+        from app.services.analysis_snapshot import load_snapshot
+        requested_at = request_time or cn_now()
+        df, snapshot_meta = await asyncio.to_thread(
+            load_snapshot, repo, capset, symbol, 250, include_current=True, current_wait_seconds=15,
+            as_of_time=requested_at, require_current_minute=True)
+    else:
+        df = _load_kline(repo, symbol)
+    if refresh and snapshot_meta.get('freshness_error'):
+        yield json.dumps({'type': 'error', 'message': snapshot_meta['freshness_error']}, ensure_ascii=False)
+        return
     if df.is_empty():
         yield json.dumps({
             "type": "error",
@@ -364,22 +403,34 @@ async def analyze_stock_stream(
         }, ensure_ascii=False)
         return
 
+    quality = analysis_quality.inspect_frame(df, symbol, cn_today(), strict=refresh)
+    if quality['errors']:
+        yield json.dumps({'type': 'error', 'message': ' '.join(quality['errors'])}, ensure_ascii=False)
+        return
+
     # 2. 价位计算(基于 K 线)
-    levels = compute_levels(df)
+    asset_type = repo.resolve_asset_type(symbol)
+    levels = compute_levels(df, price_precision=3) if asset_type == 'etf' else compute_levels(df)
     close = float(df.tail(1)["close"][0]) if "close" in df.columns else None
 
     # 3. 财务(辅助)。ETF/指数无公司报表, 跳过扫描, 由提示词走对应常态文案。
-    asset_type = repo.resolve_asset_type(symbol)
-    fins = {} if asset_type in {"etf", "index"} else _load_financials(data_dir, symbol)
+    if asset_type in {"etf", "index"}:
+        fins = {}
+    elif quality['as_of']:
+        fins = _load_financials(data_dir, symbol, as_of=date.fromisoformat(quality['as_of']))
+    else:
+        fins = _load_financials(data_dir, symbol)
 
     # 4. meta
     yield json.dumps({
         "type": "meta",
         "symbol": symbol,
-        "summary": summarize_levels(levels, close),
+        "summary": summarize_levels(levels, close, price_precision=3 if asset_type == 'etf' else 2),
         "levels": levels,
         "close": close,
         "as_of": str(df.tail(1)["date"][0]) if "date" in df.columns else None,
+        **{key: snapshot_meta.get(key) for key in
+           ("daily_as_of", "intraday_as_of", "is_provisional", "price_basis", "requested_at")},
     }, ensure_ascii=False)
 
     # 5+6. 构建提示词 + 流式调用 LLM(整体 try-except,任何异常都 yield error,避免前端卡死)
@@ -400,15 +451,20 @@ async def analyze_stock_stream(
             logger.warning("读取模拟盘持仓失败 (跳过注入): %s", e)
         # 浮盈口径用 raw: 持仓成本不复权, 与前复权 close 混算会在除权后失真
         raw_close = float(df.tail(1)["raw_close"][0]) if "raw_close" in df.columns else None
+        if snapshot_meta.get('price_basis') == 'unadjusted':
+            raw_close = close
 
-        kline_tail = _clean_rows(df, _KLINE_KEEP_COLS)
+        kline_tail = _clean_rows(df.tail(_KLINE_WINDOW), _KLINE_KEEP_COLS)
         user_prompt = _build_user_prompt(kline_tail, fins, levels, close, symbol, focus,
                                          asset_type=asset_type, paper_positions=paper_positions,
-                                         raw_close=raw_close)
+                                         raw_close=raw_close, snapshot_meta=snapshot_meta)
+        user_prompt += '\n\n' + analysis_quality.evidence_instruction(
+            quality, snapshot_meta, financials_available=any(fins.values()), asset_type=asset_type)
         got_content = False
         async for delta in stream_ai_text(
             [
-                {"role": "system", "content": _RESEARCH_PLAN_PROMPT if research_plan else _SYSTEM_PROMPT},
+                {"role": "system", "content": _RESEARCH_PLAN_PROMPT if research_plan else (
+                    _INDEX_SYSTEM_PROMPT if asset_type == 'index' else _SYSTEM_PROMPT)},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.5,

@@ -701,6 +701,8 @@ export function AnalysisKChart({
   const displayedIndices = dateRangeToIndexRange(dates, visibleDateRange)
   const displayedRange = displayedIndices ? indexRangeToDateRange(dates, displayedIndices) : null
   const displayedCount = displayedIndices ? displayedIndices.end - displayedIndices.start + 1 : 0
+  const latestDate = dates.at(-1) ?? null
+  const latestIsOutsideRange = !!latestDate && !!displayedRange && displayedRange.end < latestDate
 
   return (
     <div className={className}>
@@ -753,6 +755,20 @@ export function AnalysisKChart({
             <span className="text-[10px] text-muted" aria-live="polite">
               当前显示：{displayedRange.start} ~ {displayedRange.end} · {displayedCount}/{dates.length} 根（日K全部指已加载数据）
             </span>
+            {latestIsOutsideRange && (
+              <span role="status" className="inline-flex flex-wrap items-center gap-1.5 text-[10px] text-amber-300">
+                当前范围未显示最新日K（{latestDate}）
+                <button
+                  type="button"
+                  aria-label="最新K线"
+                  title="显示最近六个月，并随最新日线自动跟随"
+                  onClick={() => selectRangePreset('6m')}
+                  className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-accent hover:bg-accent/20"
+                >
+                  最新K线
+                </button>
+              </span>
+            )}
           </>
         ) : (
           <span className="text-[10px] text-muted" role="status">

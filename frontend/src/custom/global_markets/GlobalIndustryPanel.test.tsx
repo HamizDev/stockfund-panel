@@ -16,6 +16,7 @@ function response(mode: IndustryMode) {
   return {
     market, mode, basis: 'equal_weight_representative_basket',
     source: market === 'us' ? 'tencent_public' : 'panel_stock_snapshot',
+    source_note: '腾讯公开成分报价',
     currency: market === 'us' ? 'USD' : 'CNY', date: '2026-10-16', fetched_at_ms: null,
     loading: false, stale: false, error: null, disclaimer: '代表股票篮子', auto_rule: '测试规则',
     themes: [{ id: 'ai_compute', name: 'AI算力', note: '代表篮子', change_pct: 0.0366,
@@ -82,6 +83,8 @@ it('starts in automatic mode and persists manual A-share and US overrides', asyn
   await chooseMode('美股')
   expect(pressed('美股')).toBe('true')
   expect(mocks.globalIndustries).toHaveBeenCalledWith('us', expect.any(AbortSignal))
+  expect(host.textContent).not.toContain('腾讯公开成分报价')
+  expect(host.textContent).toContain('时区与延迟未确认')
   expect(storage.globalIndustryView.get({})).toMatchObject({ mode: 'us' })
 
   await chooseMode('A股')

@@ -66,10 +66,14 @@ export function JevosNewsStatus({ status, isLoading, isError }: {
   isError: boolean
 }) {
   const count = Object.keys(status?.news ?? {}).length
+  const queueLabel = status?.queued_by_kind
+    ? `快讯待处理 ${status.queued_by_kind.news} 条 · 策略待处理 ${status.queued_by_kind.strategy} 条`
+    : `队列 ${status?.queued ?? '—'}`
+  const cacheLabel = status ? ` · 本机缓存 ${status.completed} 条` : ''
   return <section aria-label="Jevos 本地快讯初筛" className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border bg-surface px-4 py-2.5 text-xs">
     <span className="font-semibold text-foreground" title="优先关注标的，自动初筛最近最多200条；每批最多40条，复用本机缓存。">Jevos 本地初筛</span>
     <span className={status?.status === 'ready' ? 'text-emerald-300' : 'text-muted'}>{statusLabel(status?.status, isError)}</span>
-    <span className="text-muted">已记录 {count} 条 · 队列 {status?.queued ?? '—'} · 完成 {status?.completed ?? '—'}</span>
+    <span className="text-muted">快讯结果 {count} 条 · {queueLabel}{cacheLabel}</span>
     {status?.model && <span className="text-muted" title={`模型状态更新时间：${timestamp(status.last_check_ms)}`}>{status.model}</span>}
     {isLoading && !status && <span className="text-muted">正在连接本机辅助服务…</span>}
     <span className="ml-auto text-[11px] text-muted">判断原文所述事件；不代表全市场方向，不参与交易</span>

@@ -1,4 +1,4 @@
-"""Short-lived, process-local cache for closed-day single-symbol minute fetches."""
+"""Bounded, expiring in-memory cache for on-demand single-symbol minute fetches."""
 from __future__ import annotations
 
 import threading
@@ -118,6 +118,7 @@ class MinuteResponseCache:
         max_inflight: int = 64,
         wait_timeout_seconds: float = 8.0,
         clock: Callable[[], float] = time.monotonic,
+        auto_expire: bool = False,
     ) -> None:
         self._ttl_seconds = max(0.01, float(ttl_seconds))
         self._max_entries = max(1, int(max_entries))
@@ -126,6 +127,9 @@ class MinuteResponseCache:
         self._max_inflight = max(1, int(max_inflight))
         self._wait_timeout_seconds = max(0.0, float(wait_timeout_seconds))
         self._clock = clock
+        self._auto_expire = auto_expire
+        self._expiry_timer: threading.Timer | None = None
+        self._timer_generation = 0
         self._entries: OrderedDict[MinuteFetchKey, _CacheEntry] = OrderedDict()
         self._pending: dict[MinuteFetchKey, _Flight] = {}
         self._cached_rows = 0
@@ -206,6 +210,10 @@ class MinuteResponseCache:
         with self._lock:
             self._entries.clear()
             self._cached_rows = 0
+            self._timer_generation += 1
+            if self._expiry_timer is not None:
+                self._expiry_timer.cancel()
+                self._expiry_timer = None
 
     @property
     def entry_count(self) -> int:
@@ -267,6 +275,31 @@ class MinuteResponseCache:
         ):
             _old_key, evicted = self._entries.popitem(last=False)
             self._cached_rows -= evicted.rows
+        self._schedule_expiry()
+
+    def _schedule_expiry(self) -> None:
+        # One daemon timer per cache releases idle frames without keeping a
+        # market poller alive. It never starts a network request or writes data.
+        if not self._auto_expire or self._expiry_timer is not None or not self._entries:
+            return
+        delay = max(0.01, min(entry.expires_at for entry in self._entries.values()) - self._clock())
+        timer = threading.Timer(delay, self._expire_idle, args=(self._timer_generation,))
+        timer.daemon = True
+        self._expiry_timer = timer
+        timer.start()
+
+    def _expire_idle(self, generation: int) -> None:
+        with self._lock:
+            if generation != self._timer_generation:
+                return
+            self._expiry_timer = None
+            self._remove_expired(self._clock())
+            self._schedule_expiry()
 
 
-minute_response_cache = MinuteResponseCache()
+minute_response_cache = MinuteResponseCache(auto_expire=True)
+# View queries may reuse a just-fetched live response, but must not freeze it
+# until the next minute. Strategies retain their separate observation pipeline.
+live_minute_response_cache = MinuteResponseCache(
+    ttl_seconds=5, max_entries=16, max_rows=4096, max_inflight=8, auto_expire=True,
+)

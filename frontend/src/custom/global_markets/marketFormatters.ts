@@ -1,5 +1,12 @@
 import type { GlobalMarket, GlobalMarketChartInterval, GlobalMarketCurrency, GlobalMarketTimeZone } from './types'
 
+/** Financial responses use the canonical ticker; source listing suffix stays in the request. */
+export function canonicalFinancialSymbol(market: GlobalMarket, symbol: string): string {
+  const value = symbol.trim().toUpperCase()
+  if (market === 'hk' && /^\d{1,5}(\.HK)?$/.test(value)) return `${value.replace(/\.HK$/, '').padStart(5, '0')}.HK`
+  return market === 'us' ? value.replace(/\.([ON])$/, '').replace('.', '-') : value
+}
+
 export const GLOBAL_MARKET_TIMEZONES: Record<GlobalMarket, GlobalMarketTimeZone> = {
   hk: 'Asia/Hong_Kong',
   us: 'America/New_York',

@@ -37,26 +37,26 @@ export function MacroReferencePanel({ market }: { market: MacroMarket }) {
   })
   const data = query.data?.market === market ? query.data : undefined
   return <section className={`${dashboardPanel} mb-1.5`} aria-label={market === 'us' ? '美元利率参考' : '人民币资金利率'}>
-    <SectionTitle icon={Landmark} title={market === 'us' ? '美债收益率 · 美元利率参考' : '人民币资金利率'} hint={<span className="flex items-center gap-2">
-      <span>{data?.date ?? '等待官方数据'} · 日频</span>
-      <button type="button" aria-label="刷新利率参考" disabled={query.isFetching} onClick={() => { void query.refetch() }} className="rounded p-1 hover:bg-elevated disabled:opacity-40"><RefreshCw className={`h-3 w-3 ${query.isFetching ? 'animate-spin' : ''}`} /></button>
+    <SectionTitle icon={Landmark} title={market === 'us' ? '美债收益率 · 美元利率参考' : '人民币资金利率'} hint={<span className="flex min-w-0 flex-wrap items-center justify-end gap-x-2 gap-y-1">
+      <span className="min-w-0 break-words">{data?.date ?? '等待官方数据'} · 日频</span>
+      <button type="button" aria-label="刷新利率参考" title="刷新利率参考" disabled={query.isFetching} onClick={() => { void query.refetch() }} className="inline-flex min-h-9 w-9 shrink-0 items-center justify-center rounded hover:bg-elevated disabled:opacity-40 sm:min-h-7 sm:w-7"><RefreshCw className={`h-3 w-3 ${query.isFetching ? 'animate-spin' : ''}`} /></button>
     </span>} />
     {query.isPending && <p role="status" className="text-xs text-muted">正在读取官方利率…</p>}
     {(query.isError || data?.stale) && <p role="status" className="mb-1 text-xs text-warning">{data ? '旧缓存 · ' : ''}{data?.error || (query.error instanceof Error ? query.error.message : '官方利率暂不可用')}</p>}
     {data && <>
-      <div className={`grid grid-cols-3 gap-1 ${market === 'us' ? 'sm:grid-cols-4 xl:grid-cols-8' : ''}`}>
+      <div className={`grid grid-cols-3 gap-1 ${market === 'us' ? 'sm:grid-cols-4 2xl:grid-cols-8' : ''}`}>
         {data.items.map(item => <div key={item.id} className="min-w-0 rounded border border-border bg-elevated/40 px-2 py-1.5">
-          <div className="text-[10px] text-muted">{item.label}</div>
+          <div className="break-words text-[10px] text-muted">{item.label}</div>
           <div className="mt-1 font-mono text-sm tabular-nums text-foreground">{pct(item.value)}</div>
           <div className="mt-0.5 font-mono text-[10px] text-muted">{item.change_bp == null ? '变化 —' : `较前次 ${bp(item.change_bp)}`}</div>
         </div>)}
       </div>
       {market === 'us' && <YieldCurve data={data} />}
       <div className="mt-1.5 flex flex-wrap items-center justify-between gap-1 text-[10px] text-muted">
-        <span><a href={data.source_url} target="_blank" rel="noreferrer" className="text-accent hover:underline">{data.source}</a> · {data.date}{data.previous_date ? ` / 前次 ${data.previous_date}` : ''}{data.cached ? ' · 缓存' : ''}</span>
+        <span className="min-w-0 break-words">数据日 {data.date}{data.previous_date ? ` / 前次 ${data.previous_date}` : ''}{data.cached ? ' · 缓存' : ''}</span>
         {data.spread_bp != null && <span className="font-mono">10年 − 2年：{bp(data.spread_bp)}</span>}
       </div>
     </>}
-    <p className="mt-1 text-[10px] text-muted">{market === 'us' ? '美国财政部公布的日度国债平价收益率；' : '银行间回购定盘利率，FR001 / FR007 / FR014；'}用于观察资金成本，非盘中行情。1 bp = 0.01个百分点。</p>
+    <p className="mt-1 text-[10px] text-muted">{market === 'us' ? '日度国债平价收益率；' : '银行间回购定盘利率，FR001 / FR007 / FR014；'}用于观察资金成本，非盘中行情。1 bp = 0.01个百分点。</p>
   </section>
 }

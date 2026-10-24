@@ -3,10 +3,15 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { CanvasMarketChart } from '@/components/CanvasMarketChart'
 import { PageHeader } from '@/components/PageHeader'
+import { RecentStockTabs } from '@/components/RecentStockTabs'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { sessionViewportMemory } from '@/lib/canvas-chart/viewportMemory'
+import { INSTRUMENT_VIEW_GC_MS, useInstrumentViewCache } from '@/lib/useInstrumentViewCache'
+import { useLastStock } from '@/lib/useLastStock'
 import { MarketRegionTabs } from './MarketRegionTabs'
+import { ResearchSupplementPanel } from './ResearchSupplementPanel'
+import { CompanyFinancialsPanel } from './CompanyFinancialsPanel'
 import { globalMarketClient } from './client'
 import {
   GLOBAL_MARKET_CURRENCIES,
@@ -80,6 +85,7 @@ function marketResourcesFor(resources: GlobalMarketResource[] | undefined, marke
 }
 
 function MarketResearchPageContent({ market }: { market: GlobalMarket }) {
+  const { recent, remember, clearRecent } = useLastStock(`global-markets-${market}`)
   const [selection, setSelection] = useState(() => readPageState(market))
   const [searchText, setSearchText] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -91,6 +97,10 @@ function MarketResearchPageContent({ market }: { market: GlobalMarket }) {
     storage.pageView[globalMarketStorageKey(market)].set(selection)
   }, [market, selection])
 
+  // Keep the selected symbol's charts warm when navigating away, but release
+  // inactive charts for older symbols as soon as the selection changes.
+  useInstrumentViewCache(`global-market-${market}`, selection.symbol)
+
   const catalogQuery = useQuery({
     queryKey: QK.globalMarketCatalog(market, debouncedSearch),
     queryFn: ({ signal }) => globalMarketClient.catalog(market, debouncedSearch, signal),
@@ -100,6 +110,8 @@ function MarketResearchPageContent({ market }: { market: GlobalMarket }) {
     queryKey: QK.globalMarketChart(market, selection.symbol, selection.interval),
     queryFn: ({ signal }) => globalMarketClient.chart(market, selection.symbol, selection.interval, signal),
     staleTime: selection.interval === '1d' ? 60_000 : 15_000,
+    gcTime: INSTRUMENT_VIEW_GC_MS,
+    meta: { instrumentView: `global-market-${market}`, symbol: selection.symbol },
     refetchOnWindowFocus: false,
   })
   const resourcesQuery = useQuery({
@@ -119,6 +131,11 @@ function MarketResearchPageContent({ market }: { market: GlobalMarket }) {
   const visibleItems = searchIsCurrent ? items : []
   const selectedItem: GlobalMarketCatalogItem | undefined = items.find(item => item.symbol === selection.symbol)
   const displayedName = chart?.name || selectedItem?.name || selection.symbol
+  useEffect(() => {
+    // A validated directory selection remains useful even if quotes fail.
+    // Older selections never schedule a prefetch or retain a price snapshot.
+    if (selectedItem || chart) remember(selection.symbol, displayedName)
+  }, [chart, selectedItem, selection.symbol, displayedName, remember])
   const kind = chart?.kind ?? selectedItem?.kind
   const formatPrice = (value: number | null | undefined) => formatGlobalInstrumentPrice(value, currency, kind)
   const resources = marketResourcesFor(resourcesQuery.data?.items, market)
@@ -152,7 +169,7 @@ function MarketResearchPageContent({ market }: { market: GlobalMarket }) {
           <div className="flex flex-wrap items-center justify-end gap-1.5">
             <Link
               to={`/?market=${market}`}
-              className="inline-flex min-h-7 items-center rounded-btn border border-border bg-surface px-2 py-1 text-[11px] text-secondary transition-colors hover:border-accent/40 hover:text-accent sm:px-2.5 sm:text-xs"
+              className="inline-flex min-h-9 items-center rounded-btn border border-border bg-surface px-2 py-1 text-[11px] text-secondary transition-colors hover:border-accent/40 hover:text-accent sm:min-h-7 sm:px-2.5 sm:text-xs"
             >
               返回市场看板
             </Link>
@@ -162,6 +179,8 @@ function MarketResearchPageContent({ market }: { market: GlobalMarket }) {
       />
 
       <div className="mx-auto w-full max-w-[1500px] space-y-2.5 p-1.5 sm:p-2.5">
+        <RecentStockTabs items={recent} selected={selection.symbol}
+          onSelect={symbol => updateSelection({ symbol })} onClear={clearRecent} />
         <div className="grid min-w-0 gap-2.5 xl:grid-cols-[minmax(0,1fr)_minmax(250px,300px)]">
           <main className="min-w-0 space-y-2.5">
             <section className="rounded-card border border-border/60 bg-surface/80 p-2.5 sm:p-3">
@@ -190,7 +209,8 @@ function MarketResearchPageContent({ market }: { market: GlobalMarket }) {
                     aria-label="刷新行情"
                     onClick={() => void chartQuery.refetch()}
                     disabled={chartQuery.isFetching}
-                    className="inline-flex min-h-8 items-center rounded-btn border border-border bg-surface px-2.5 py-1.5 text-xs text-secondary transition-colors hover:border-accent/40 hover:text-accent disabled:cursor-wait disabled:opacity-60"
+                    title="刷新当前标的行情"
+                    className="inline-flex min-h-9 items-center rounded-btn border border-border bg-surface px-2.5 py-1.5 text-xs text-secondary transition-colors hover:border-accent/40 hover:text-accent disabled:cursor-wait disabled:opacity-60 sm:min-h-8"
                   >
                     {chartQuery.isFetching ? '正在刷新…' : '刷新'}
                   </button>
@@ -204,7 +224,7 @@ function MarketResearchPageContent({ market }: { market: GlobalMarket }) {
                     key={interval.value}
                     aria-pressed={selection.interval === interval.value}
                     onClick={() => updateSelection({ interval: interval.value })}
-                    className={`min-h-8 rounded-btn border px-2.5 py-1.5 text-xs transition-colors ${selection.interval === interval.value
+                    className={`min-h-9 rounded-btn border px-2.5 py-1.5 text-xs transition-colors sm:min-h-8 ${selection.interval === interval.value
                       ? 'border-accent/40 bg-accent/10 text-accent'
                       : 'border-border bg-base/60 text-secondary hover:border-accent/30 hover:text-foreground'}`}
                   >
@@ -245,16 +265,23 @@ function MarketResearchPageContent({ market }: { market: GlobalMarket }) {
               )}
 
               {chart && (
-                <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted">
-                  <span>数据源：{chart.source === 'yahoo_public' ? 'Yahoo Finance 公共接口' : chart.source}</span>
-                  <span>价格口径：源站价格（未做分红复权）</span>
-                  <span>缓存有效期：{chart.interval === '1d' ? '15 分钟（日K）' : '30 秒（分钟K）'}</span>
-                  <span>更新时间：{formatGlobalMarketTime(Math.floor(chart.fetched_at_ms / 1_000), timezone, true)}</span>
-                  {chart.quote_at_ms != null && <span>报价时间：{formatGlobalMarketTime(Math.floor(chart.quote_at_ms / 1_000), timezone, true)}</span>}
+                <div className="mt-2 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted">
+                  <span className="min-w-0 break-words">价格口径：源站价格（未做分红复权）</span>
+                  <span className="min-w-0 break-words">缓存有效期：{chart.interval === '1d' ? '15 分钟（日K）' : '30 秒（分钟K）'}</span>
+                  <span className="min-w-0 break-words">更新时间：{formatGlobalMarketTime(Math.floor(chart.fetched_at_ms / 1_000), timezone, true)}</span>
+                  {chart.quote_at_ms != null && <span className="min-w-0 break-words">报价时间：{formatGlobalMarketTime(Math.floor(chart.quote_at_ms / 1_000), timezone, true)}</span>}
+                  {chart.classification?.industry && <span className="min-w-0 break-words">
+                    公司行业 · {chart.classification.industry}{Number.isFinite(chart.classification.fetched_at_ms)
+                      ? ` · 获取于 ${formatGlobalMarketTime(Math.floor(chart.classification.fetched_at_ms / 1_000), timezone, true)}`
+                      : ''}
+                  </span>}
                   {chart.cached && <span>缓存数据</span>}
                 </div>
               )}
             </section>
+
+            {market === 'us' && <ResearchSupplementPanel symbol={selection.symbol} />}
+            <CompanyFinancialsPanel key={`${market}:${selection.symbol}`} market={market} symbol={selection.symbol} kind={kind} />
 
             <section className="rounded-card border border-border/60 bg-surface/80 p-2.5 sm:p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -273,9 +300,9 @@ function MarketResearchPageContent({ market }: { market: GlobalMarket }) {
                   value={searchText}
                   onChange={event => setSearchText(event.target.value)}
                   placeholder="输入代码、中文名或英文名"
-                  className="h-8 min-w-0 flex-1 rounded-btn border border-border bg-base px-2.5 text-xs text-foreground outline-none placeholder:text-muted focus:border-accent/50"
+                  className="h-9 min-w-0 flex-1 rounded-btn border border-border bg-base px-2.5 text-xs text-foreground outline-none placeholder:text-muted focus:border-accent/50 sm:h-8"
                 />
-                <button type="submit" className="h-8 rounded-btn bg-accent px-3 text-xs font-medium text-white transition-colors hover:bg-accent/90">搜索</button>
+                <button type="submit" className="h-9 rounded-btn bg-accent px-3 text-xs font-medium text-white transition-colors hover:bg-accent/90 sm:h-8">搜索</button>
               </form>
               <p className="mt-1.5 text-[10px] text-muted">搜索请求会在停止输入后提交，支持后端目录中的代码、中文名和英文名。</p>
 
@@ -293,7 +320,7 @@ function MarketResearchPageContent({ market }: { market: GlobalMarket }) {
                       key={item.symbol}
                       aria-pressed={selection.symbol === item.symbol}
                       onClick={() => updateSelection({ symbol: item.symbol })}
-                      className={`flex min-w-0 items-center justify-between gap-2 rounded-md border px-2.5 py-2 text-left transition-colors ${selection.symbol === item.symbol
+                      className={`flex min-h-9 min-w-0 items-center justify-between gap-2 rounded-md border px-2.5 py-2 text-left transition-colors sm:min-h-8 ${selection.symbol === item.symbol
                         ? 'border-accent/35 bg-accent/10'
                         : 'border-border/70 bg-base/40 hover:bg-elevated/60'}`}
                     >

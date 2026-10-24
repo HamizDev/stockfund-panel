@@ -41,6 +41,8 @@ it('shows official dates, percentage units, bp changes and a labeled yield curve
   expect(host.textContent).toContain('2026-10-16 / 前次 2026-10-15')
   expect(host.querySelector('svg[role="img"]')?.getAttribute('aria-label')).toContain('单位百分比')
   expect(host.textContent).not.toContain('NaN')
+  expect(host.querySelector('a')).toBeNull()
+  expect(host.textContent).not.toContain('美国财政部')
 })
 it('keeps market caches separate and returning to a page reuses its existing daily reference', async () => {
   await render('us'); await render('cn'); await render('us')

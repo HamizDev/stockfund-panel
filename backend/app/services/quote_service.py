@@ -669,12 +669,16 @@ class QuoteService:
             df = df.with_columns(pl.col("close").alias("last_price"))
         return df
 
-    def get_index_quotes(self, symbols: list[str] | None = None) -> pl.DataFrame:
+    def get_index_quotes(self, symbols: list[str] | None = None, *, allow_unverified: bool = False) -> pl.DataFrame:
         """返回实时指数行情缓存。不会触发 TickFlow 请求。"""
         with self._lock:
             df = self._index_quotes_cache.clone() if self._index_quotes_cache is not None else pl.DataFrame()
         if df.is_empty():
             return df
+        if not allow_unverified and '_source_timestamp_verified' in df.columns:
+            # This cache is also consumed by deviation/abnormal-move engines.
+            # An explicitly unverified display quote must not enter indicators.
+            df = df.filter(pl.col('_source_timestamp_verified').fill_null(True))
         if symbols:
             return df.filter(pl.col("symbol").is_in(symbols))
         return df
@@ -1004,10 +1008,12 @@ class QuoteService:
         # ---- final 定版确认: 快照最大时间戳达到边界 (含容差) 才允许落盘 ----
         confirmed_final: bool | None = None
         if final_boundary_ms is not None:
-            ts_vals = [t for t in (r.get("timestamp") for r in records) if t]
+            ts_vals = [r.get("timestamp") for r in records
+                       if r.get("timestamp") and r.get('_source_timestamp_verified', True)]
             max_ts = max(ts_vals) if ts_vals else None
             confirmed_final = bool(
                 max_ts is not None and max_ts >= final_boundary_ms - _FINAL_CONFIRM_SLACK_MS
+                and all(r.get('_source_timestamp_verified', True) for r in records)
             )
             self._last_final_confirmed = confirmed_final
 
@@ -1015,7 +1021,10 @@ class QuoteService:
         etf_records = [r for r in records if r.get("symbol") in all_etf_symbols]
         shortterm = getattr(self._app_state, "etf_shortterm_service", None) if self._app_state else None
         if shortterm:
-            shortterm.update_quotes(etf_records, source_timestamps=preferences.get_realtime_data_provider() in {"stocksdk", "tickflow"})
+            trusted_default = preferences.get_realtime_data_provider() in {"stocksdk", "tickflow"}
+            trusted_records = [r for r in etf_records
+                               if r.get('_source_timestamp_verified', trusted_default)]
+            shortterm.update_quotes(trusted_records, source_timestamps=bool(trusted_records))
         stock_records = [
             r for r in records
             if r.get("symbol") not in all_index_symbols and r.get("symbol") not in all_etf_symbols
@@ -1024,7 +1033,8 @@ class QuoteService:
         fetch_ms = (time.perf_counter() - t0) * 1000
         fetched_at = time.time() * 1000
         source_times = [float(r['timestamp']) for r in records
-            if isinstance(r.get('timestamp'), (int, float)) and not isinstance(r.get('timestamp'), bool)
+            if r.get('_source_timestamp_verified', True)
+            and isinstance(r.get('timestamp'), (int, float)) and not isinstance(r.get('timestamp'), bool)
             and 1_000_000_000_000 <= r['timestamp'] <= fetched_at + 5000]
 
         # ---- 更新元信息 ----
@@ -1055,17 +1065,19 @@ class QuoteService:
             return
 
         # 轮询放量状态更新 (volume_delta 规则的差值来源)
-        self._update_volume_delta(stock_records, fetched_at)
+        trusted_stock_records = [r for r in stock_records if r.get('_source_timestamp_verified', True)]
+        trusted_etf_records = [r for r in etf_records if r.get('_source_timestamp_verified', True)]
+        self._update_volume_delta(trusted_stock_records, fetched_at)
 
         # ---- 写 kline_daily (不复权原始价格, 只有 OHLCV) ----
-        daily_df = self._build_daily(stock_records)
+        daily_df = self._build_daily(trusted_stock_records)
         if not daily_df.is_empty() and self._repo:
             try:
                 self._repo.flush_live_daily(daily_df)
             except Exception as e:  # noqa: BLE001
                 logger.warning("日K写盘失败: %s", e)
 
-        etf_daily_df = self._build_daily(etf_records)
+        etf_daily_df = self._build_daily(trusted_etf_records)
         if not etf_daily_df.is_empty() and self._repo:
             try:
                 self._repo.flush_live_daily_asset("etf", etf_daily_df)
@@ -1073,8 +1085,8 @@ class QuoteService:
                 logger.warning("ETF 日K写盘失败: %s", e)
 
         # ---- 构建 API 直接值的补充表 (不写 daily, 只用于 enriched 计算) ----
-        quote_extra = self._build_quote_extra(stock_records)
-        etf_quote_extra = self._build_quote_extra(etf_records)
+        quote_extra = self._build_quote_extra(trusted_stock_records)
+        etf_quote_extra = self._build_quote_extra(trusted_etf_records)
 
         # ---- 增量计算 enriched + 写盘 + 更新缓存 ----
         if not daily_df.is_empty() and self._repo:
@@ -1098,7 +1110,8 @@ class QuoteService:
         self._broadcast_quote_updated()
 
         # ---- 策略监控 + 告警评估 ----
-        self._evaluate_monitors(daily_df, quote_extra)
+        if all(r.get('_source_timestamp_verified', True) for r in records):
+            self._evaluate_monitors(daily_df, quote_extra)
 
     # ================================================================
     # 工具
@@ -1119,6 +1132,7 @@ class QuoteService:
     @staticmethod
     def _build_daily(records: list[dict]) -> pl.DataFrame:
         """将 API records 转为日K格式 DataFrame (OHLCV + quote_ts, 写 kline_daily 用)。"""
+        records = [row for row in records if row.get('_source_timestamp_verified', True)]
         if not records:
             return pl.DataFrame()
         df = pl.DataFrame(records)
@@ -1211,6 +1225,7 @@ class QuoteService:
         keep = [c for c in [
             "symbol", "name", "last_price", "prev_close", "open", "high", "low",
             "volume", "amount", "change_pct", "change_amount", "amplitude", "timestamp", "session",
+            "_source_timestamp_verified",
         ] if c in df.columns]
         if not keep or "symbol" not in keep:
             return pl.DataFrame()

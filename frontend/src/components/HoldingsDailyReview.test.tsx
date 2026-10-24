@@ -81,6 +81,23 @@ function render(scopes: HoldingsDailyReviewScope[] = ['lots'], signature = 'hold
 }
 
 describe('HoldingsDailyReview', () => {
+  it('shows neutral assessment labels and review conditions', async () => {
+    const result = completeState()
+    result.report!.actions = [{
+      symbol: '600000.SH', name: '浦发银行', asset_type: 'stock', data_date: '2026-10-05',
+      action: '证据分歧', reason: '历史样本有限', trigger: '最新行情到达后复核',
+      invalidation: '量价结构出现反向证据', missing_data: ['当前报价'],
+    }]
+    mocks.get.mockResolvedValue(result)
+    render()
+    await settle()
+    expect(host.querySelector('[aria-label="逐持仓研究评估"]')).not.toBeNull()
+    expect(host.textContent).toContain('证据分歧')
+    expect(host.textContent).toContain('复核条件')
+    expect(host.textContent).not.toContain('执行条件')
+    expect(mocks.start).not.toHaveBeenCalled()
+  })
+
   it('does not query or charge before holdings finish loading', () => {
     act(() => root.render(
       <QueryClientProvider client={client}>

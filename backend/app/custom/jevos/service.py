@@ -118,6 +118,9 @@ class JevosService:
         self.thread: threading.Thread | None = None
         self.queues: dict[str, deque] = {'news': deque(), 'strategy': deque()}
         self.pending: set[str] = set()
+        self._next_kind = 'news'
+        self._active_kind: str | None = None
+        self.last_error: dict | None = None
         self.records: dict[str, dict] = {}
         self.latest: dict[str, dict[str, str]] = {'news': {}, 'strategy': {}}
         self.identity: ModelInfo | None = None
@@ -181,9 +184,18 @@ class JevosService:
             previous = self.records.get(key)
             cached = previous and self.identity and previous['fingerprint'] == self.identity.fingerprint
             if key not in self.pending and not cached and len(self.pending) >= MAX_QUEUE:
-                # Do not retain rejected IDs or keep an old label for edited text.
-                self.latest[kind].pop(identifier, None)
-                return
+                # News may displace the oldest strategy that has not started.
+                # Active work is absent from the queue and is never cancelled.
+                if kind == 'news' and self.queues['strategy']:
+                    displaced = self.queues['strategy'].popleft()
+                    self.pending.discard(displaced['input_key'])
+                    if self.latest['strategy'].get(displaced['id']) == displaced['input_key']:
+                        self.latest['strategy'].pop(displaced['id'], None)
+                else:
+                    # Strategy-only callers retain the original hard capacity.
+                    # Do not retain rejected IDs or keep an old label for edited text.
+                    self.latest[kind].pop(identifier, None)
+                    return
             self.latest[kind].pop(identifier, None)
             self.latest[kind][identifier] = key
             while len(self.latest[kind]) > MAX_RECORDS:
@@ -204,6 +216,8 @@ class JevosService:
             self.identity = identity
             self.status = status
             self.last_check_ms = _now()
+            if status != 'ready':
+                self.last_error = {'kind': 'health', 'category': status, 'at_ms': self.last_check_ms}
             self.next_health = time.monotonic() + 30
 
     def offer_news(self, items: list[dict], related_symbols: list[str]):
@@ -219,7 +233,11 @@ class JevosService:
                 if not self.identity or not self.pending:
                     self.condition.wait(timeout=5)
                     continue
-                task = self.queues['strategy'].popleft() if self.queues['strategy'] else self.queues['news'].popleft()
+                other_kind = 'strategy' if self._next_kind == 'news' else 'news'
+                kind = self._next_kind if self.queues[self._next_kind] else other_kind
+                task = self.queues[kind].popleft()
+                self._active_kind = kind
+                self._next_kind = 'strategy' if kind == 'news' else 'news'
                 identity = self.identity
             try:
                 if task['kind'] == 'news':
@@ -247,13 +265,16 @@ class JevosService:
                 with self.condition:
                     self.status = exc.category
                     self.identity = None
+                    self.last_error = {'kind': task['kind'], 'category': exc.category, 'at_ms': _now()}
                     self.next_health = time.monotonic() + 30
             except (OSError, ValueError, TypeError, KeyError):
                 with self.condition:
                     self.status = 'invalid_response'
+                    self.last_error = {'kind': task['kind'], 'category': 'invalid_response', 'at_ms': _now()}
             finally:
                 with self.condition:
                     self.pending.discard(task['input_key'])
+                    self._active_kind = None
 
     def snapshot(self) -> dict:
         with self.condition:
@@ -263,10 +284,16 @@ class JevosService:
                       for kind, rows in self.latest.items()}
             history = sorted((copy.deepcopy(row) for row in self.records.values() if row['kind'] == 'strategy'),
                              key=lambda row: row['generated_at_ms'], reverse=True)[:30]
+            queued_by_kind = {
+                kind: len(queue) + int(self._active_kind == kind)
+                for kind, queue in self.queues.items()
+            }
             return {'mode': 'shadow', 'status': self.status,
                     'model': self.identity.model if self.identity else None,
                     'fingerprint': self.identity.fingerprint if self.identity else None,
-                    'last_check_ms': self.last_check_ms, 'queued': len(self.pending), 'completed': len(self.records),
+                    'last_check_ms': self.last_check_ms, 'queued': len(self.pending),
+                    'queued_by_kind': queued_by_kind, 'last_error': copy.deepcopy(self.last_error),
+                    'completed': len(self.records),
                     'news': latest['news'], 'strategies': latest['strategy'], 'strategy_history': history}
 
 

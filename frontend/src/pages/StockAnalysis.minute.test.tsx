@@ -6,9 +6,11 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { StockAnalysisBoard } from './StockAnalysis'
 import { QK } from '@/lib/queryKeys'
 
+vi.mock('@/lib/useMediaQuery', () => ({ useMediaQuery: () => false }))
+
 const calls = vi.hoisted(() => ({ daily: vi.fn(), levels: vi.fn(), search: vi.fn() }))
 vi.mock('@/lib/api', () => ({ api: { stockAnalysisSnapshot: calls.daily, instrumentSearch: calls.search } }))
-vi.mock('@/components/stock-analysis/AnalysisKChart', () => ({ AnalysisKChart: ({ rows, onDateClick, linkedPrice }: any) => <div data-testid="daily" data-linked-price={linkedPrice ?? ''}><button onClick={() => onDateClick(rows[0].date)}>选择历史日线</button></div> }))
+vi.mock('@/components/stock-analysis/AnalysisKChart', () => ({ AnalysisKChart: ({ rows, onDateClick, linkedPrice }: any) => <div data-testid="daily" data-linked-price={linkedPrice ?? ''} data-latest-date={rows.at(-1)?.date ?? ''}><button onClick={() => onDateClick(rows[0].date)}>选择历史日线</button></div> }))
 vi.mock('@/components/stock-analysis/AnalysisMinutePanel', () => ({ AnalysisMinutePanel: (props: any) => <div data-testid="minute" data-symbol={props.symbol} data-asset={props.assetType ?? ''} data-date={props.date ?? 'latest'} data-view={props.view}>
   <button onClick={() => props.onDateChange(null)}>最新分钟</button>
   <button onClick={() => props.onViewChange('candles')}>分钟蜡烛</button>
@@ -115,6 +117,39 @@ it('shows actual source date and keeps a successful chart during a failed refres
   await click('更新日线')
   expect(host.textContent).toContain('日线更新失败，保留上次有效图表。')
   expect(host.textContent).toContain('选择历史日线')
+})
+
+it('shows the provisional daily bar using its actual intraday quote time and retains it on refresh failure', async () => {
+  const provisionalRows = [
+    { ...rows[0], date: '2026-10-21', close: 1.1 },
+    { ...rows[0], date: '2026-10-22', open: 1.1, high: 1.13, low: 1.08, close: 1.12 },
+  ]
+  calls.daily.mockImplementation(async (symbol: string) => ({
+    symbol, rows: provisionalRows,
+    analysis: { symbol, close: 1.12, levels: {} },
+    as_of: '2026-10-22', daily_as_of: '2026-10-21',
+    intraday_as_of: '2026-10-22T03:30:00Z', is_provisional: true,
+    checked_at: '2026-10-22T03:31:00Z', source: 'online', price_basis: 'unadjusted',
+  }))
+  await render()
+
+  expect(host.querySelector<HTMLElement>('[data-testid="daily"]')?.dataset.latestDate).toBe('2026-10-22')
+  expect(host.textContent).toContain('含当日未收盘日K（2026-10-22）')
+  expect(host.textContent).toContain('正式日线截至 2026-10-21')
+  expect(host.textContent).toContain('行情截至 2026-10-22 11:30（北京时间）')
+  expect(host.textContent).not.toContain('11:31')
+  const snapshotQuery = query.getQueryCache().find({ queryKey: QK.stockAnalysisSnapshot('510300.SH', 250) })
+  const snapshotObserver = snapshotQuery?.observers[0]
+  expect(snapshotObserver).toBeDefined()
+  expect(typeof snapshotObserver?.options.refetchInterval).toBe('function')
+
+  calls.daily.mockRejectedValueOnce(new Error('snapshot refresh unavailable'))
+  await click('更新日线')
+  expect(host.querySelector<HTMLElement>('[data-testid="daily"]')?.dataset.latestDate).toBe('2026-10-22')
+  expect(host.textContent).toContain('含当日未收盘日K（2026-10-22）')
+  expect(host.textContent).toContain('正式日线截至 2026-10-21')
+  expect(host.textContent).toContain('行情截至 2026-10-22 11:30（北京时间）')
+  expect(host.textContent).toContain('日线更新失败，保留上次有效图表。')
 })
 
 it('never displays a returned snapshot from another instrument', async () => {

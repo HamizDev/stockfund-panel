@@ -55,6 +55,36 @@ def test_raw_prices_percent_and_share_volume_are_not_mixed_with_adjusted_prices(
     assert result["price_basis"] == "source_ohlc"
 
 
+def test_daily_chart_uses_five_year_source_window_and_keeps_more_than_520_bars(monkeypatch):
+    now = int(datetime.now(UTC).timestamp()) - 60
+    stamps = [now - (599 - index) * 86_400 for index in range(600)]
+    payload = fixture()
+    result = payload["chart"]["result"][0]
+    result["timestamp"] = stamps
+    result["indicators"]["quote"][0] = {
+        "open": [10.0] * len(stamps),
+        "high": [11.0] * len(stamps),
+        "low": [9.0] * len(stamps),
+        "close": [10.5] * len(stamps),
+        "volume": [100] * len(stamps),
+    }
+    calls = []
+
+    def read(path, params):
+        calls.append((path, params))
+        return payload
+
+    monkeypatch.setattr(provider, "_json", read)
+    chart = provider.fetch_chart("us", "AAPL", "1d")
+
+    assert provider.INTERVALS["1d"] == "5y"
+    assert calls == [("/v8/finance/chart/AAPL", {
+        "interval": "1d", "range": "5y", "includePrePost": "false",
+    })]
+    assert len(chart["bars"]) == 600
+    assert chart["price_basis"] == "source_ohlc"
+
+
 def test_minute_timestamps_remain_unambiguous_epoch_seconds():
     result = provider.parse_chart("us", "AAPL", "1m", fixture(interval="1m"))
     assert result["bars"][-1]["time"] == 1792157400

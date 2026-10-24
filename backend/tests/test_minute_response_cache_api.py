@@ -166,17 +166,20 @@ def test_new_incomplete_local_partition_invalidates_cached_fallback(monkeypatch,
     assert calls == 2
 
 
-def test_current_day_intraday_fallback_is_never_cached(monkeypatch, tmp_path):
+def test_current_day_intraday_fallback_reuses_short_cache_then_fetches_new_bar(monkeypatch, tmp_path):
     import app.api.kline as kline_api
 
     now = datetime(2026, 10, 19, 10, 0, tzinfo=CN_TZ)
     _patch_api(monkeypatch, now=now, data_dir=tmp_path)
+    clock = [0.0]
+    cache = minute_response_cache.MinuteResponseCache(ttl_seconds=5, clock=lambda: clock[0])
+    monkeypatch.setattr(minute_response_cache, "live_minute_response_cache", cache, raising=False)
     calls = 0
 
     def fetch(symbol, trade_date, asset_type="stock", *, capset, raw_basis=False):
         nonlocal calls
         calls += 1
-        return _frame(20, day=trade_date, symbol=symbol)
+        return _frame(20 + calls, day=trade_date, symbol=symbol)
 
     monkeypatch.setattr(kline_api.kline_sync, "fetch_minute_single", fetch)
     client = _client(_Repo(tmp_path, _frame(0, day=_TODAY)))
@@ -185,8 +188,39 @@ def test_current_day_intraday_fallback_is_never_cached(monkeypatch, tmp_path):
         assert response.status_code == 200
         assert response.json()["source"] == "live"
 
+    assert calls == 1
+    assert len(response.json()["rows"]) == 21
+    assert cache.entry_count == 1
+    clock[0] = 5.01
+    fresh = client.get("/api/kline/minute", params={"symbol": "515880.SH", "date": str(_TODAY)})
     assert calls == 2
+    assert len(fresh.json()["rows"]) == 22
     assert minute_response_cache.minute_response_cache.entry_count == 0
+
+
+def test_intraday_live_view_reuses_only_requested_instrument_without_local_writes(monkeypatch, tmp_path):
+    import app.api.kline as kline_api
+
+    now = datetime(2026, 10, 19, 10, 0, tzinfo=CN_TZ)
+    _patch_api(monkeypatch, now=now, data_dir=tmp_path)
+    monkeypatch.setattr(kline_api, "in_continuous_session", lambda: True)
+    cache = minute_response_cache.MinuteResponseCache(ttl_seconds=5)
+    monkeypatch.setattr(minute_response_cache, "live_minute_response_cache", cache, raising=False)
+    calls = []
+
+    def fetch(symbol, trade_date, asset_type="stock", *, capset, raw_basis=False):
+        calls.append(symbol)
+        return _frame(20, day=trade_date, symbol=symbol)
+
+    monkeypatch.setattr(kline_api.kline_sync, "fetch_minute_single", fetch)
+    client = _client(_Repo(tmp_path))
+    for symbol in ("515880.SH", "515880.SH", "512800.SH"):
+        response = client.get("/api/kline/minute", params={"symbol": symbol, "date": str(_TODAY), "live": 1})
+        assert response.status_code == 200
+        assert response.json()["symbol"] == symbol
+        assert response.json()["rows"][0]["symbol"] == symbol
+    assert calls == ["515880.SH", "512800.SH"]
+    assert not list(tmp_path.rglob("*.parquet"))
 
 
 def test_current_day_post_close_fallback_can_be_cached(monkeypatch, tmp_path):

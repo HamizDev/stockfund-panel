@@ -26,6 +26,12 @@ export interface ActiveTask {
     summary?: string
     levels?: Record<LevelType, PriceLevel[]>
     close?: number | null
+    as_of?: string | null
+    requested_at?: string | null
+    daily_as_of?: string | null
+    intraday_as_of?: string | null
+    is_provisional?: boolean
+    price_basis?: string
   } | null
   createdAt: number
   savedReportId?: string
@@ -42,6 +48,12 @@ export interface HistoryReport {
   summary?: string
   close?: number | null
   levels?: Record<LevelType, PriceLevel[]>
+  as_of?: string | null
+  requested_at?: string | null
+  daily_as_of?: string | null
+  intraday_as_of?: string | null
+  is_provisional?: boolean
+  price_basis?: string
   created_at: string
 }
 
@@ -217,7 +229,17 @@ async function runStream(id: string, symbol: string, _name: string, focus: strin
       if (!cur) return
       switch (chunk.type) {
         case 'meta':
-          patchTask(id, { meta: { summary: chunk.summary, levels: chunk.levels, close: chunk.close } })
+          patchTask(id, { meta: {
+            summary: chunk.summary,
+            levels: chunk.levels,
+            close: chunk.close,
+            as_of: chunk.as_of,
+            requested_at: chunk.requested_at,
+            daily_as_of: chunk.daily_as_of,
+            intraday_as_of: chunk.intraday_as_of,
+            is_provisional: chunk.is_provisional,
+            price_basis: chunk.price_basis,
+          } })
           break
         case 'delta':
           if (firstDelta) { patchTask(id, { phase: 'streaming' }); firstDelta = false }
@@ -243,6 +265,12 @@ async function runStream(id: string, symbol: string, _name: string, focus: strin
           symbol: final.symbol, name: final.name, focus: final.focus,
           content: final.content, summary: final.meta?.summary ?? '',
           close: final.meta?.close ?? null, levels: final.meta?.levels,
+          as_of: final.meta?.as_of,
+          requested_at: final.meta?.requested_at,
+          daily_as_of: final.meta?.daily_as_of,
+          intraday_as_of: final.meta?.intraday_as_of,
+          is_provisional: final.meta?.is_provisional,
+          price_basis: final.meta?.price_basis,
         })
         if (res.report) {
           patchTask(id, { savedReportId: res.report.id })

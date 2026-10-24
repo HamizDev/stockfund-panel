@@ -31,6 +31,14 @@ def evidence(rows):
              "warning": "旧盘后资料，非实时价"} for row in rows]
 
 
+def model_report():
+    return json.dumps({"content": "技术证据需结合数据日期核对。", "actions": [{
+        "symbol": "600000.SH", "action": "证据分歧", "reason": "历史日线与当前时点存在间隔",
+        "trigger": "取得最新有日期行情后复核", "invalidation": "最新行情与历史结构出现差异",
+        "missing_data": ["当前报价"],
+    }]}, ensure_ascii=False)
+
+
 async def wait_jobs():
     await asyncio.gather(*list(review._jobs.values()))
 
@@ -51,7 +59,7 @@ def test_concurrent_start_and_same_day_reopen_call_model_once(tmp_path, monkeypa
         calls.append(messages)
         await asyncio.sleep(0)
         assert kwargs == {"temperature": 0.2, "max_tokens": None, "timeout": 600}
-        return "维持观察，先核对实时价格。"
+        return model_report()
 
     monkeypatch.setattr(review.ai_provider, "generate_ai_text", model)
 
@@ -66,7 +74,7 @@ def test_concurrent_start_and_same_day_reopen_call_model_once(tmp_path, monkeypa
         assert state["report"]["model"] == "test-model"
         assert "holdings_fingerprint" not in state["report"]
         context = json.loads(calls[0][1]["content"])
-        assert context["holdings"][0]["registered_lot"]["cost_price"] == 12
+        assert context["holdings"][0]["registered_batches"][0]["cost_price"] == 12
         assert context["holdings"][0]["daily"][0]["raw_close"] == 15
         assert "登记成本不复权" in calls[0][0]["content"]
 
@@ -116,7 +124,7 @@ def test_scope_date_holdings_and_model_changes(tmp_path, monkeypatch):
 
     async def model(*args, **kwargs):
         calls.append(1)
-        return "观察"
+        return model_report()
 
     monkeypatch.setattr(review.ai_provider, "generate_ai_text", model)
 
@@ -125,7 +133,7 @@ def test_scope_date_holdings_and_model_changes(tmp_path, monkeypatch):
         await wait_jobs()
         changed = [{**HOLDINGS[0], "qty": 200}]
         state = await review.start(tmp_path, "lots", changed, evidence)
-        assert state["status"] == "complete" and state["holdings_changed"]
+        assert state["status"] == "outdated" and state["holdings_changed"]
         monkeypatch.setattr(review, "_model", lambda: {"model": "new-model"})
         state = review.status(tmp_path, "lots", changed)
         assert state["model_changed"]
@@ -150,7 +158,7 @@ def test_manual_regenerate_retries_failure_without_leaking_upstream_error(tmp_pa
         calls.append(1)
         if len(calls) == 1:
             raise RuntimeError("api-key=do-not-expose")
-        return "成功"
+        return model_report()
 
     monkeypatch.setattr(review.ai_provider, "generate_ai_text", model)
 
@@ -167,7 +175,9 @@ def test_manual_regenerate_retries_failure_without_leaking_upstream_error(tmp_pa
 
 
 def test_restart_interrupted_job_requires_explicit_retry(tmp_path):
-    review._save(tmp_path, "lots", {"scope": "lots", "status": "running", "report_date": "2026-10-05"})
+    review._save(tmp_path, "lots", {"scope": "lots", "status": "running", "report_date": "2026-10-05",
+        "version": review.REPORT_VERSION, "auto_attempt_date": "2026-10-05",
+        "holdings_fingerprint": review._fingerprint(HOLDINGS), "model_identity": review._model()})
     state = review.status(tmp_path, "lots", HOLDINGS)
     assert state["status"] == "failed"
     assert "中断" in state["report"]["error"]

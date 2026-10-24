@@ -88,6 +88,16 @@ def test_fetch_unions_three_bounded_screens_and_preserves_normalized_quote_field
     assert by_symbol["NVDA"]["kind"] == "etf"
 
 
+def test_market_cap_is_source_usd_value_not_traded_amount_or_turnover():
+    source = {**quote('AAPL'), 'marketCap': 1_000_000_000}
+    row, error = us_screeners._normalize_quote(source, 'most_actives', time.time())
+    assert error is None and row['market_cap'] == 1_000_000_000
+    assert row['volume'] == 500 and row['amount'] is None and row['turnover_rate'] is None
+    for invalid in (True, '1000', float('nan'), 0, -100):
+        row, _ = us_screeners._normalize_quote({**source, 'marketCap': invalid}, 'most_actives', time.time())
+        assert row['market_cap'] is None
+
+
 def test_any_screen_failure_aborts_instead_of_returning_a_partial_pool():
     calls = []
 

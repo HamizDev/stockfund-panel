@@ -225,6 +225,106 @@ def test_pending_queue_and_latest_index_stay_bounded_without_a_worker(tmp_path: 
     assert set(service.latest["news"].values()) <= service.pending
 
 
+def test_strategy_only_queue_keeps_the_global_capacity_contract(tmp_path: Path, make_service):
+    service = make_service(tmp_path, FakeClient())
+
+    for index in range(jevos_service.MAX_QUEUE):
+        service.offer("strategy", f"bot-{index}", {"marker": f"strategy-{index}"})
+    service.offer("strategy", "overflow", {"marker": "overflow"})
+
+    assert len(service.pending) == jevos_service.MAX_QUEUE
+    assert len(service.queues["strategy"]) == jevos_service.MAX_QUEUE
+    assert not service.queues["news"]
+    assert "overflow" not in service.latest["strategy"]
+
+
+def test_news_can_replace_queued_strategy_when_global_capacity_is_full(tmp_path: Path, make_service):
+    service = make_service(tmp_path, FakeClient())
+    service.offer("strategy", "bot-revised", {"marker": "old"})
+    evicted_key = service.queues["strategy"][0]["input_key"]
+    service.offer("strategy", "bot-revised", {"marker": "new"})
+    latest_key = service.latest["strategy"]["bot-revised"]
+    for index in range(jevos_service.MAX_QUEUE - 2):
+        service.offer("strategy", f"bot-{index}", {"marker": f"strategy-{index}"})
+
+    service.offer("news", "article-1", {"untrusted_news_text": "A headline"})
+
+    assert len(service.pending) == jevos_service.MAX_QUEUE
+    assert len(service.queues["strategy"]) == jevos_service.MAX_QUEUE - 1
+    assert len(service.queues["news"]) == 1
+    assert evicted_key not in service.pending
+    assert service.latest["strategy"]["bot-revised"] == latest_key
+    assert latest_key in service.pending
+    assert service.latest["news"]["article-1"] == service.queues["news"][0]["input_key"]
+
+
+def test_capacity_eviction_never_removes_active_strategy(tmp_path: Path, make_service):
+    client = FakeClient(block_judge=True)
+    service = make_service(tmp_path, client)
+    _start_ready(service)
+    active_state = {"marker": "active-strategy"}
+    active_key = jevos_service._input_key("strategy", "active", active_state)
+    service.offer("strategy", "active", active_state)
+    assert client.judge_started.wait(timeout=3)
+    try:
+        for index in range(jevos_service.MAX_QUEUE - 1):
+            service.offer("strategy", f"queued-{index}", {"marker": f"queued-{index}"})
+        queued_key = service.queues["strategy"][0]["input_key"]
+
+        service.offer("news", "article-1", {"untrusted_news_text": "A headline"})
+
+        assert service._active_kind == "strategy"
+        assert active_key in service.pending
+        assert queued_key not in service.pending
+        assert len(service.pending) == jevos_service.MAX_QUEUE
+        assert len(service.queues["strategy"]) == jevos_service.MAX_QUEUE - 2
+        assert len(service.queues["news"]) == 1
+    finally:
+        client.release_judge.set()
+
+
+def test_news_is_not_starved_by_a_backlogged_strategy_queue(tmp_path: Path, make_service):
+    client = FakeClient()
+    service = make_service(tmp_path, client)
+    for index in range(3):
+        service.offer("strategy", f"bot-{index}", {"marker": f"strategy-{index}"})
+    for index in range(2):
+        service.offer("news", f"article-{index}", {"untrusted_news_text": f"news-{index}"})
+
+    _start_ready(service)
+    _wait_until(lambda: service.snapshot()["queued"] == 0)
+
+    markers = [
+        call["state"].get("marker", call["state"].get("untrusted_news_text"))
+        for call in client.judgements
+    ]
+    assert markers == ["news-0", "strategy-0", "news-1", "strategy-1", "strategy-2"]
+
+
+def test_snapshot_reports_queue_kinds_and_safe_last_error(tmp_path: Path, make_service):
+    client = FakeClient()
+    service = make_service(tmp_path, client)
+    service.offer("news", "article-1", {"untrusted_news_text": "A headline"})
+
+    waiting = service.snapshot()
+
+    assert waiting["queued_by_kind"] == {"news": 1, "strategy": 0}
+    assert waiting["last_error"] is None
+    error_client = FakeClient()
+    error_service = make_service(tmp_path / "error-case", error_client)
+    _start_ready(error_service)
+    error_client.fail_next_judge(JevosError("invalid_response"))
+    error_service.offer("news", "article-2", {"untrusted_news_text": "Another headline"})
+    _wait_until(lambda: error_service.snapshot()["last_error"] is not None)
+
+    error = error_service.snapshot()["last_error"]
+    assert set(error) == {"kind", "category", "at_ms"}
+    assert error["kind"] == "news"
+    assert error["category"] == "invalid_response"
+    assert isinstance(error["at_ms"], int) and error["at_ms"] > 0
+    assert "Another headline" not in json.dumps(error)
+
+
 @pytest.mark.parametrize("change", ["content", "association"])
 def test_cached_article_outside_work_cap_is_invalidated_when_current_input_changes(
     tmp_path: Path, make_service, change,

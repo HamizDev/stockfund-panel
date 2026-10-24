@@ -7,6 +7,9 @@ import { MarketBoardTabs } from '@/components/dashboard/MarketBoardTabs'
 import { dashboardPanel, KpiCell, SectionTitle } from '@/components/dashboard/Primitives'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
+import { useInstrumentViewCache } from '@/lib/useInstrumentViewCache'
+import { DASHBOARD_QUERY_GC_MS, preserveDashboardOverview } from '@/lib/dashboardQueryCache'
+import { progressiveLoadingInterval } from '@/lib/progressivePolling'
 import { sessionViewportMemory } from '@/lib/canvas-chart/viewportMemory'
 import { globalMarketClient } from './client'
 import { GLOBAL_MARKET_CURRENCIES, GLOBAL_MARKET_TIMEZONES, formatGlobalMarketChange, formatGlobalInstrumentPrice, formatGlobalMarketTime } from './marketFormatters'
@@ -72,17 +75,39 @@ export default function GlobalDashboard({ market }: { market: GlobalMarket }) {
   const [picked, setPicked] = useState<MarketSnapshotItem | null>(null)
   const title = market === 'hk' ? '港股' : '美股'
   const timezone = GLOBAL_MARKET_TIMEZONES[market]
+  useInstrumentViewCache(`global-dashboard-${market}`, selection.symbol)
   const overview = useQuery({
     queryKey: QK.globalMarketOverview(market),
     queryFn: ({ signal }) => globalMarketClient.overview(market, signal),
     staleTime: 30_000,
-    refetchInterval: query => query.state.data?.loading || query.state.data?.market_snapshot?.loading ? 2_000 : 60_000,
+    gcTime: DASHBOARD_QUERY_GC_MS,
+    structuralSharing: preserveDashboardOverview,
+    refetchInterval: query => {
+      const data = query.state.data
+      const completedItems = data?.items.filter(item => item.status !== 'loading').length ?? 0
+      const snapshot = data?.market_snapshot?.data
+      const progress = [
+        data?.completed_count ?? completedItems,
+        data?.items.length ?? 0,
+        snapshot?.received ?? 0,
+        snapshot?.total_reported ?? 0,
+        snapshot?.complete ?? false,
+      ].join(':')
+      return progressiveLoadingInterval(
+        query,
+        data?.loading === true || data?.market_snapshot?.loading === true,
+        progress,
+        60_000,
+      )
+    },
     refetchOnWindowFocus: false,
   })
   const chartQuery = useQuery({
     queryKey: QK.globalMarketChart(market, selection.symbol, selection.interval),
     queryFn: ({ signal }) => globalMarketClient.chart(market, selection.symbol, selection.interval, signal),
     staleTime: selection.interval === '1d' ? 60_000 : 15_000,
+    gcTime: DASHBOARD_QUERY_GC_MS,
+    meta: { instrumentView: `global-dashboard-${market}`, symbol: selection.symbol },
     refetchInterval: selection.interval === '1d' ? 60_000 : 30_000,
     refetchOnWindowFocus: false,
   })
@@ -114,23 +139,23 @@ export default function GlobalDashboard({ market }: { market: GlobalMarket }) {
   const last = chart?.bars.at(-1)
 
   return <div className="min-h-full bg-base p-1.5">
-    <header className="relative mb-1.5 flex flex-wrap items-center justify-between gap-2 overflow-hidden rounded-card border border-border bg-gradient-to-r from-surface/90 to-surface/70 px-3 py-1.5 pl-12 md:pl-3">
+    <header className="relative mb-1.5 flex flex-wrap items-center justify-between gap-2 rounded-card border border-border bg-gradient-to-r from-surface/90 to-surface/70 px-3 py-1.5 pl-12 md:pl-3">
       <div className="pointer-events-none absolute left-0 top-0 h-full w-1 bg-gradient-to-b from-accent to-accent/20" />
-      <div className="flex items-center gap-2"><Gauge className="h-4 w-4 text-accent" /><h1 className="text-[16px] font-semibold text-foreground">{title}看板</h1><span className="rounded bg-elevated px-1.5 py-0.5 text-[10px] text-muted">免费公开行情</span></div>
+      <div className="flex min-w-0 flex-wrap items-center gap-2"><Gauge className="h-4 w-4 shrink-0 text-accent" /><h1 className="min-w-0 text-[16px] font-semibold text-foreground">{title}看板</h1><span className="shrink-0 rounded bg-elevated px-1.5 py-0.5 text-[10px] text-muted">免费公开行情</span></div>
       <MarketBoardTabs market={market} />
-      <div className="flex items-center gap-2 text-[11px] text-muted">
-        <span>{data?.loading ? `取数中 ${data.completed_count ?? items.filter(item => item.status !== 'loading').length}/${items.length}` : '观察池缓存60秒'}</span>
-        <button type="button" aria-label="刷新看板" disabled={overview.isFetching} onClick={() => { void overview.refetch(); void chartQuery.refetch() }} className="inline-flex items-center gap-1 rounded-btn border border-border bg-elevated px-2 py-1.5 text-secondary hover:text-foreground disabled:opacity-50"><RefreshCw className={`h-3 w-3 ${overview.isFetching ? 'animate-spin' : ''}`} />刷新</button>
+      <div className="flex min-w-0 flex-wrap items-center gap-2 text-[11px] text-muted">
+        <span>{overview.isFetching && data ? '后台更新中 · 暂保留上次完整快照' : data?.loading ? `取数中 ${data.completed_count ?? items.filter(item => item.status !== 'loading').length}/${items.length}` : '观察池缓存60秒'}</span>
+        <button type="button" aria-label="刷新看板" title="刷新指数、观察池和当前图表" disabled={overview.isFetching} onClick={() => { void overview.refetch(); void chartQuery.refetch() }} className="inline-flex min-h-9 items-center gap-1 rounded-btn border border-border bg-elevated px-2 text-secondary hover:text-foreground disabled:opacity-50 sm:min-h-7"><RefreshCw className={`h-3 w-3 ${overview.isFetching ? 'animate-spin' : ''}`} />刷新</button>
         <Link to={`/markets/${market}`} className="inline-flex items-center gap-1 text-accent">{title}分析<ArrowUpRight className="h-3 w-3" /></Link>
       </div>
     </header>
 
-    <div className="mb-1.5 flex items-start gap-2 rounded-card border border-border bg-surface px-2 py-1.5 text-[11px] text-muted"><Info className="mt-0.5 h-3 w-3 shrink-0 text-accent" /><p>市场概览优先东财公开快照；美股失败时降级为Yahoo筛选池。核心观察池与K线用Yahoo，免费行情均可能延迟。{GLOBAL_MARKET_CURRENCIES[market]} · {timezone}；指数为点位。核心观察池非全市场涨跌排行，各板块分别标注范围和报价时间。</p></div>
+    <div className="mb-1.5 flex min-w-0 items-start gap-2 rounded-card border border-border bg-surface px-2 py-1.5 text-[11px] text-muted"><Info className="mt-0.5 h-3 w-3 shrink-0 text-accent" /><p className="min-w-0 flex-1 break-words">{GLOBAL_MARKET_CURRENCIES[market]} · {timezone} · 指数为点位。行情可能延迟；覆盖池与观察池均不代表全市场，请以各板块标注的范围和报价时间为准。</p></div>
     {overview.isError && <div role="alert" className="mb-1.5 rounded-card border border-danger/30 bg-danger/10 p-2 text-xs text-danger">看板更新失败：{overview.error instanceof Error ? overview.error.message : '请重试'}{data ? '；保留最近可用数据。' : ''}</div>}
     {overview.isPending && <p role="status" className="mb-1.5 text-xs text-muted">正在加载指数与观察池…</p>}
 
     <div className={`mb-1.5 grid grid-cols-2 gap-1 ${market === 'us' ? 'xl:grid-cols-4' : ''}`}>
-      {items.filter(item => item.kind === 'index').map(item => <button type="button" key={item.symbol} aria-pressed={selection.symbol === item.symbol} onClick={() => choose(item.symbol)} className={`grid min-w-0 grid-cols-[1fr_auto] gap-1 rounded-lg border bg-elevated/45 px-2 py-1.5 text-left hover:border-accent/40 ${selection.symbol === item.symbol ? 'border-accent/50' : 'border-border'}`}>
+      {items.filter(item => item.kind === 'index').map(item => <button type="button" key={item.symbol} aria-pressed={selection.symbol === item.symbol} onClick={() => choose(item.symbol)} className={`grid min-h-9 min-w-0 grid-cols-[1fr_auto] gap-1 rounded-lg border bg-elevated/45 px-2 py-1.5 text-left hover:border-accent/40 sm:min-h-7 ${selection.symbol === item.symbol ? 'border-accent/50' : 'border-border'}`}>
         <span className="truncate text-xs font-medium text-foreground">{item.name}</span><span className={`font-mono text-xs font-semibold ${changeClass(item.change_pct)}`}>{formatGlobalMarketChange(item.change_pct)}</span>
         <span className={`font-mono text-[11px] ${changeClass(item.change_pct)}`}>{valuePrice(item.price, true, market)}</span><span className="text-right text-[9px] text-muted">{item.error ? '暂不可用' : item.status === 'loading' ? '取数中' : quoteTime(item.quote_at_ms, timezone)}</span>
       </button>)}
@@ -153,7 +178,7 @@ export default function GlobalDashboard({ market }: { market: GlobalMarket }) {
           <SectionTitle icon={LineChart} title={`${name} · ${isIndex ? '指数走势' : '行情走势'}`} hint={<span className="font-mono">{selection.symbol}</span>} />
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2 border-b border-border pb-2">
             <div className="flex items-baseline gap-3"><span className="font-mono text-lg font-semibold text-foreground">{valuePrice(price, isIndex, market)}</span><span className={`font-mono text-xs ${changeClass(change)}`}>{formatGlobalMarketChange(change)}</span></div>
-            <div role="group" aria-label="看板K线周期" className="flex gap-1">{intervals.map(([id, label]) => <button type="button" key={id} aria-pressed={selection.interval === id} onClick={() => setSelection(value => ({ ...value, interval: id }))} className={`rounded-btn border px-2 py-1.5 text-[11px] ${selection.interval === id ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border bg-elevated text-muted hover:text-foreground'}`}>{label}</button>)}</div>
+            <div role="group" aria-label="看板K线周期" className="flex flex-wrap gap-1">{intervals.map(([id, label]) => <button type="button" key={id} aria-pressed={selection.interval === id} onClick={() => setSelection(value => ({ ...value, interval: id }))} className={`min-h-9 rounded-btn border px-2 text-[11px] sm:min-h-7 ${selection.interval === id ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border bg-elevated text-muted hover:text-foreground'}`}>{label}</button>)}</div>
           </div>
           {chartQuery.isPending && <div role="status" className="flex h-[360px] items-center justify-center text-xs text-muted">正在加载{name}K线…</div>}
           {chartQuery.isError && <div role="alert" className="rounded border border-danger/30 bg-danger/10 p-3 text-xs text-danger">图表加载失败：{chartQuery.error instanceof Error ? chartQuery.error.message : '请重试'}</div>}
@@ -163,7 +188,7 @@ export default function GlobalDashboard({ market }: { market: GlobalMarket }) {
             <div className="mt-1 flex flex-wrap justify-between gap-1 text-[10px] text-muted"><span>图表报价 {quoteTime(chart.quote_at_ms, timezone, true)}</span><span>图表采集 {formatGlobalMarketTime(chart.fetched_at_ms / 1000, timezone, true)}</span></div>
           </>}
         </section>
-        <div className="grid min-w-0 gap-1.5 md:grid-cols-2">
+        <div className="grid min-w-0 gap-1.5 lg:grid-cols-2">
           <ObservationList title="股票观察" rows={stocks} market={market} symbol={selection.symbol} onSelect={choose} />
           <ObservationList title="ETF观察" rows={etfs} market={market} symbol={selection.symbol} onSelect={choose} />
         </div>
@@ -174,7 +199,6 @@ export default function GlobalDashboard({ market }: { market: GlobalMarket }) {
           <p className="mb-2 text-sm font-semibold text-foreground">{name}</p>
           <div className="space-y-1.5 text-[11px] text-muted">
             <p>报价时间 <span className="text-secondary">{quoteTime(selected ? selected.quote_at_ms : chart?.quote_at_ms, timezone, true)}</span></p>
-            <p>报价来源 <span className="text-secondary">{selected && 'source' in selected && selected.source === 'eastmoney_public' ? '东财市场快照' : 'Yahoo核心观察报价'} · 图表Yahoo</span></p>
             {selected?.error && <p className="text-warning">{selected.stale ? '旧缓存 · ' : ''}{selected.error}</p>}
             <div className="border-t border-border pt-2"><p className="mb-1">最新{intervals.find(([id]) => id === selection.interval)?.[1]}K线</p><div className="grid grid-cols-2 gap-1 rounded bg-elevated/60 p-2">{(['open', 'high', 'low', 'close'] as const).map((field, index) => <p key={field}>{['开', '高', '低', '收'][index]} <span className="font-mono text-secondary">{valuePrice(last?.[field], isIndex, market)}</span></p>)}</div></div>
           </div>

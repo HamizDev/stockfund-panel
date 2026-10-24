@@ -20,6 +20,32 @@ import { anchoredVwap } from '@/lib/chartResearch'
 const SUB_INFO_H = 16
 const SUB_GAP = 4
 const DEFAULT_VOLUME_COMPARE: VolumeCompareConfig = { enabled: true, days: 1 }
+const DEFAULT_ACTIVE_INDICATORS = ['vol']
+const VALID_INDICATOR_KEYS = new Set([...SUB_CHARTS, ...OVERLAY_INDICATORS].map(indicator => indicator.key))
+type ChartMode = 'canvas' | 'professional'
+
+function defaultActiveIndicators(): string[] {
+  return DEFAULT_ACTIVE_INDICATORS.filter(key => VALID_INDICATOR_KEYS.has(key))
+}
+
+function normalizeActiveIndicators(value: unknown): string[] {
+  if (!Array.isArray(value)) return defaultActiveIndicators()
+  if (value.length === 0) return []
+
+  const seen = new Set<string>()
+  const indicators: string[] = []
+  for (const key of value) {
+    if (typeof key !== 'string' || !VALID_INDICATOR_KEYS.has(key) || seen.has(key)) continue
+    seen.add(key)
+    indicators.push(key)
+    if (indicators.length >= VALID_INDICATOR_KEYS.size) break
+  }
+  return indicators.length > 0 ? indicators : defaultActiveIndicators()
+}
+
+function normalizeChartMode(value: unknown): ChartMode {
+  return value === 'professional' ? 'professional' : 'canvas'
+}
 
 function normalizeVolumeCompare(config: VolumeCompareConfig): VolumeCompareConfig {
   return {
@@ -121,9 +147,13 @@ export function StockDailyKChart({
   extColumns,
   addedDate,
 }: Props) {
-  const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
+  const [activeIndicators, setActiveIndicators] = useState<string[]>(() =>
+    normalizeActiveIndicators(storage.stockChartIndicators.get(DEFAULT_ACTIVE_INDICATORS)),
+  )
   const [showMarkers, setShowMarkers] = useState(true)
-  const [requestedChartMode, setRequestedChartMode] = useState<'canvas' | 'professional'>('canvas')
+  const [requestedChartMode, setRequestedChartMode] = useState<ChartMode>(() =>
+    normalizeChartMode(storage.stockChartMode.get('canvas')),
+  )
   // 加入自选日标注（与「异动」标记相互独立）
   const [showAddedMark, setShowAddedMark] = useState(true)
   const [showResearch, setShowResearch] = useState(false)
@@ -137,6 +167,9 @@ export function StockDailyKChart({
   const kline = useQuery({ ...klineDailyQueryOptions(symbol, dateRange, extColumns), enabled: !!symbol })
 
   const rows = useMemo(() => toOHLC(kline.data?.rows ?? []), [kline.data?.rows])
+  useEffect(() => {
+    storage.stockChartIndicators.set(activeIndicators)
+  }, [activeIndicators])
   const researchContext = [symbol, dateRange.start, dateRange.end].join('|')
   useEffect(() => {
     setResearchSelection(previous => previous.context === researchContext ? previous
@@ -162,7 +195,13 @@ export function StockDailyKChart({
   const chartMode = requiresProfessional ? 'professional' : requestedChartMode
 
   const toggleIndicator = useCallback((key: string) => {
+    if (!VALID_INDICATOR_KEYS.has(key)) return
     setActiveIndicators(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])
+  }, [])
+
+  const chooseChartMode = useCallback((mode: ChartMode) => {
+    setRequestedChartMode(mode)
+    storage.stockChartMode.set(mode)
   }, [])
 
   const updateVolumeCompare = useCallback((patch: Partial<VolumeCompareConfig>) => {
@@ -191,7 +230,7 @@ export function StockDailyKChart({
           aria-pressed={chartMode === 'canvas'}
           disabled={requiresProfessional}
           title={requiresProfessional ? professionalReasons.join('、') + '仅在专业指标图中完整显示' : undefined}
-          onClick={() => setRequestedChartMode('canvas')}
+          onClick={() => chooseChartMode('canvas')}
           className={chartMode === 'canvas'
             ? 'rounded px-2 py-0.5 text-[10px] transition-colors bg-accent/20 text-accent'
             : 'rounded px-2 py-0.5 text-[10px] transition-colors bg-elevated text-muted hover:text-secondary disabled:cursor-not-allowed disabled:opacity-40'}
@@ -201,7 +240,7 @@ export function StockDailyKChart({
         <button
           type="button"
           aria-pressed={chartMode === 'professional'}
-          onClick={() => setRequestedChartMode('professional')}
+          onClick={() => chooseChartMode('professional')}
           className={chartMode === 'professional'
             ? 'rounded px-2 py-0.5 text-[10px] transition-colors bg-accent/20 text-accent'
             : 'rounded px-2 py-0.5 text-[10px] transition-colors bg-elevated text-muted hover:text-secondary'}

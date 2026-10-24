@@ -106,7 +106,7 @@ export function HoldingsDailyReview({
 
       <div className="space-y-3 p-4">
         <p className="text-[11px] leading-5 text-muted">
-          登记持仓及行情研究资料会发送给已配置的 AI，生成条件式研究建议，不修改持仓、不下单。登记值不是实时券商余额；首次打开当天自动生成会使用 AI 额度。
+          登记持仓及行情研究资料会发送给已配置的 AI，生成客观研究评估，不修改持仓、不下单。登记值不是实时券商余额；首次打开当天自动生成会使用 AI 额度。
         </p>
         {holdingsRefreshError && (
           <div className="rounded-lg border border-warning/30 bg-warning/5 p-3 text-xs text-secondary" role="status">
@@ -140,7 +140,7 @@ export function HoldingsDailyReview({
           </div>
         ) : state?.status === 'outdated' ? (
           <div className="rounded-lg border border-warning/30 bg-warning/5 p-3 text-xs text-secondary" role="status">
-            当前持仓或模型已有变化；今天已生成过一次。请手动重新生成以更新操作分析，避免自动反复消耗额度。
+            当前持仓或模型已有变化；今天已生成过一次。请手动重新生成以更新研究评估，避免自动反复消耗额度。
           </div>
         ) : state?.status === 'not_generated' ? (
           startMutation.isError ? (
@@ -209,17 +209,17 @@ export function HoldingsDailyReview({
               </details>
             )}
             {!!report.actions?.length && (
-              <div className="grid gap-3 xl:grid-cols-2" aria-label="逐持仓操作分析">
+              <div className="grid gap-3 xl:grid-cols-2" aria-label="逐持仓研究评估">
                 {report.actions.map(item => (
                   <article key={item.symbol} className="rounded-lg border border-border bg-base/40 p-3">
                     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                       <h3 className="text-xs font-semibold text-foreground">{item.name} <span className="font-mono font-normal text-muted">{item.symbol}</span></h3>
                       <span className="rounded-md border border-accent/25 bg-accent/10 px-2 py-1 text-[11px] text-accent">{item.action}</span>
                     </div>
-                    <p className="mb-2 text-[10px] text-muted">依据数据日 {item.data_date || '未知'} · 条件式研究建议</p>
+                    <p className="mb-2 text-[10px] text-muted">依据数据日 {item.data_date || '未知'} · 客观研究评估</p>
                     <dl className="space-y-2 text-[11px] leading-5 text-secondary">
                       <div><dt className="text-muted">依据</dt><dd>{item.reason}</dd></div>
-                      <div><dt className="text-muted">执行条件</dt><dd>{item.trigger}</dd></div>
+                      <div><dt className="text-muted">复核条件</dt><dd>{item.trigger}</dd></div>
                       <div><dt className="text-muted">失效 / 反向条件</dt><dd>{item.invalidation}</dd></div>
                       {!!item.missing_data.length && <div><dt className="text-warning">待补资料</dt><dd>{item.missing_data.join('、')}</dd></div>}
                     </dl>

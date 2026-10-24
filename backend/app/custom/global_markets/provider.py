@@ -7,9 +7,12 @@ Dividend-adjusted adjclose is deliberately not mixed into them.
 """
 from __future__ import annotations
 
+import asyncio
 import math
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -18,13 +21,30 @@ import httpx
 from .analytics import daily_technicals
 from .catalog import INDICES, MARKETS, MarketDataError, display_name, normalize_symbol, yahoo_symbol
 
-INTERVALS = {"1d": "2y", "5m": "1mo", "1m": "5d"}
+INTERVALS = {"1d": "5y", "5m": "1mo", "1m": "5d"}
+_YAHOO_QUERY_HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
+_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_REQUEST_BUDGET_SECONDS = 8.0
+_CONNECT_BUDGET_SECONDS = 4.0
 _US_EXCHANGES = {"NMS", "NGM", "NCM", "NYQ", "ASE", "PCX", "BTS", "BATS"}
 _HEALTH_LOCK = threading.Lock()
 _clock = time.monotonic
 _failures = 0
 _health_generation = 0
 _cooldown_until = 0.0
+_FAILOVER_HEALTH_LOCK = threading.Lock()
+_FAILOVER_HEALTH = None
+
+
+@dataclass(frozen=True)
+class _HTTPStatus:
+    """A non-retryable HTTP status; kept separate from transport health."""
+
+    status_code: int
+
+
+class _RetryableSourceError(Exception):
+    """An upstream response that should be retried at the sibling host."""
 
 
 def _request_gate() -> int:
@@ -52,7 +72,118 @@ def _source_succeeded(generation: int):
             _failures = 0
 
 
+def _failover_enabled() -> bool:
+    """Read the per-user opt-in on demand so preference changes take effect."""
+    try:
+        from app.services import preferences
+
+        current = preferences.load()
+    except Exception:
+        return False
+    return isinstance(current, dict) and current.get("data_source_failover_enabled") is True
+
+
+def _get_failover_health():
+    global _FAILOVER_HEALTH
+    if _FAILOVER_HEALTH is None:
+        with _FAILOVER_HEALTH_LOCK:
+            if _FAILOVER_HEALTH is None:
+                from app.data_providers.source_health import SourceHealth
+
+                _FAILOVER_HEALTH = SourceHealth(
+                    clock=time.monotonic,
+                    base_cooldown=30,
+                    max_cooldown=300,
+                    max_entries=128,
+                )
+    return _FAILOVER_HEALTH
+
+
+async def _fetch_json_from_host_async(host: str, path: str, params: dict) -> dict | _HTTPStatus:
+    """Read one fixed Yahoo host within its eight-second end-to-end budget."""
+    content = bytearray()
+    async with asyncio.timeout(_REQUEST_BUDGET_SECONDS):
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(_REQUEST_BUDGET_SECONDS, connect=_CONNECT_BUDGET_SECONDS),
+            follow_redirects=False,
+        ) as client:
+            async with client.stream(
+                "GET",
+                f"https://{host}{path}",
+                params=params,
+                headers={"User-Agent": "Mozilla/5.0 stockfund-panel"},
+            ) as response:
+                status = response.status_code
+                if status == 404:
+                    return _HTTPStatus(status)
+                if status == 429 or status >= 500 or status in (401, 403):
+                    raise _RetryableSourceError()
+                if status != 200:
+                    return _HTTPStatus(status)
+                async for block in response.aiter_bytes():
+                    content.extend(block)
+                    if len(content) > _MAX_RESPONSE_BYTES:
+                        raise ValueError("Yahoo response exceeds the read limit")
+    payload = httpx.Response(200, content=bytes(content)).json()
+    if not isinstance(payload, dict):
+        raise ValueError("Yahoo response is not an object")
+    return payload
+
+
+def _fetch_json_from_host(host: str, path: str, params: dict) -> dict | _HTTPStatus:
+    """Run the bounded async request from the provider's synchronous call path."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_fetch_json_from_host_async(host, path, params))
+    raise RuntimeError("Yahoo provider must be called from a synchronous context")
+
+
+def _json_with_failover(
+    path: str,
+    params: dict,
+    *,
+    validate: Callable[[dict], bool] | None = None,
+) -> dict:
+    health = _get_failover_health()
+
+    def accept(value) -> bool:
+        if isinstance(value, _HTTPStatus):
+            return True
+        return isinstance(value, dict) and (validate is None or bool(validate(value)))
+
+    for host in _YAHOO_QUERY_HOSTS:
+        attempt = health.attempt(
+            ("yahoo_public", host),
+            lambda host=host: _fetch_json_from_host(host, path, params),
+            accept=accept,
+        )
+        if attempt.skipped or not attempt.success:
+            continue
+        if isinstance(attempt.value, _HTTPStatus):
+            if attempt.value.status_code == 404:
+                raise MarketDataError("免费数据源未收录该标的")
+            raise MarketDataError("免费数据源暂不可用，或未收录该标的")
+        if not isinstance(attempt.value, dict):
+            raise MarketDataError("免费数据源返回格式无效")
+        return attempt.value
+    raise MarketDataError("免费行情域名暂不可用，请稍后重试；旧缓存会保留")
+
+
+def _endpoint_json(path: str, params: dict, *, validate: Callable[[dict], bool]) -> dict:
+    """Validate endpoint semantics inside each opt-in host health attempt."""
+    if _failover_enabled():
+        return _json_with_failover(path, params, validate=validate)
+    # Keep existing two-argument _json integrations and single-host behavior.
+    return _json(path, params)
+
+
 def _json(path: str, params: dict) -> dict:
+    if _failover_enabled():
+        return _json_with_failover(path, params)
+
+    # Keep the existing single-host health gate unchanged for users who have
+    # not opted in to failover.
     generation = _request_gate()
     try:
         with (
@@ -155,7 +286,7 @@ def parse_chart(market: str, symbol: str, interval: str, payload: dict) -> dict:
                 "cached": False, "stale": False, "error": None, "warnings": warnings,
                 "quote": {"price": number(meta.get("regularMarketPrice"), positive=True),
                           "change_pct": pct / 100 if pct is not None else None},
-                "bars": bars[-(520 if interval == "1d" else 2200):]}
+                "bars": bars if interval == "1d" else bars[-2200:]}
     except (AttributeError, KeyError, TypeError, IndexError, OverflowError, ValueError) as error:
         raise MarketDataError("数据源字段无效，未展示未经核验的行情") from error
 
@@ -164,16 +295,27 @@ def fetch_chart(market: str, symbol: str, interval: str) -> dict:
     if interval not in INTERVALS:
         raise ValueError("图表周期无效")
     code = yahoo_symbol(market, symbol)
-    payload = _json("/v8/finance/chart/" + code,
-                    {"interval": interval, "range": INTERVALS[interval], "includePrePost": "false"})
+    payload = _endpoint_json(
+        "/v8/finance/chart/" + code,
+        {"interval": interval, "range": INTERVALS[interval], "includePrePost": "false"},
+        validate=lambda value: _chart_payload_valid(market, symbol, interval, value),
+    )
     return parse_chart(market, symbol, interval, payload)
+
+
+def _chart_payload_valid(market: str, symbol: str, interval: str, payload: dict) -> bool:
+    parse_chart(market, symbol, interval, payload)
+    return True
 
 
 def fetch_quote(market: str, symbol: str) -> dict:
     """One bounded three-month response supplies quote and daily technicals."""
     code = yahoo_symbol(market, symbol)
-    payload = _json('/v8/finance/chart/' + code,
-                    {'interval': '1d', 'range': '3mo', 'includePrePost': 'false'})
+    payload = _endpoint_json(
+        '/v8/finance/chart/' + code,
+        {'interval': '1d', 'range': '3mo', 'includePrePost': 'false'},
+        validate=lambda value: _chart_payload_valid(market, symbol, '1d', value),
+    )
     value = parse_chart(market, symbol, '1d', payload)
     return {key: value[key] for key in ('market', 'symbol', 'name', 'kind', 'currency', 'timezone',
                                       'source', 'fetched_at_ms', 'quote_at_ms', 'stale', 'error')} | value['quote'] | {
@@ -184,7 +326,11 @@ def search(market: str, query: str) -> list[dict]:
     query = query.strip()
     if not query:
         return []
-    payload = _json("/v1/finance/search", {"q": query, "quotesCount": 15, "newsCount": 0})
+    payload = _endpoint_json(
+        "/v1/finance/search",
+        {"q": query, "quotesCount": 15, "newsCount": 0},
+        validate=_search_payload_valid,
+    )
     rows = payload.get("quotes")
     if not isinstance(rows, list) or len(rows) > 50:
         raise MarketDataError("名称检索暂不可用，请尝试股票代码")
@@ -211,3 +357,8 @@ def search(market: str, query: str) -> list[dict]:
                       "name": display_name(market, symbol, row.get("longname") or row.get("shortname") or symbol),
                       "kind": "etf" if row["quoteType"] == "ETF" else "stock"})
     return items
+
+
+def _search_payload_valid(payload: dict) -> bool:
+    rows = payload.get("quotes")
+    return isinstance(rows, list) and len(rows) <= 50

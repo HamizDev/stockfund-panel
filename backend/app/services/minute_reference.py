@@ -7,14 +7,14 @@ import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from contextlib import suppress
-from datetime import date
+from datetime import date, timedelta
 from datetime import time as day_time
 from pathlib import Path
 
 import polars as pl
 
 from app.market_time import cn_today
-from app.services import analysis_snapshot, minute_adjust, preferences
+from app.services import analysis_snapshot, minute_adjust, preferences, trading_calendar
 
 _CACHE: OrderedDict = OrderedDict()
 _LOCK = threading.Lock()
@@ -22,6 +22,31 @@ _PENDING: dict = {}
 _MAX_ENTRIES = 16
 _POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix='minute-reference')
 _WAIT_SECONDS = 4
+
+
+def _weekday_before(day: date) -> date:
+    expected = day - timedelta(days=1)
+    while expected.weekday() >= 5:
+        expected -= timedelta(days=1)
+    return expected
+
+
+def _expected_previous_session(day: date) -> date:
+    """Use the official calendar when available; unknown falls back conservatively."""
+    return trading_calendar.previous_trading_day(day) or _weekday_before(day)
+
+
+def _known_raw_source(name: str, asset_type: str) -> bool:
+    if name == 'stocksdk':
+        return True
+    try:
+        from app.data_providers import custom
+        provider = custom.get_provider(name)
+        return (getattr(provider, 'minute_intraday_reference', False) is True
+                and asset_type in getattr(provider, 'minute_asset_types', ())
+                and getattr(provider, 'minute_price_basis', None) == 'raw')
+    except Exception:
+        return False
 
 
 def prefetch(repo, capset, symbol: str) -> None:
@@ -133,12 +158,22 @@ def resolve(repo, capset, symbol: str, trade_date: date, asset_type: str,
         return missing
     session = frame.filter(pl.col('date') == trade_date)
     before = frame.filter(pl.col('date') < trade_date).sort('date')
-    if session.is_empty() or before.is_empty():
+    if before.is_empty():
+        return missing
+
+    provider = preferences.get_minute_data_provider()
+    current_raw_session = (closing.is_empty() and trade_date == cn_today()
+                           and _known_raw_source(provider, asset_type))
+    expected = _expected_previous_session(trade_date)
+    if before['date'][-1] != expected:
+        return missing
+    # Today's daily candle need not exist for an explicitly declared raw feed,
+    # but the previous close must belong to the immediately preceding session.
+    if session.is_empty() and not current_raw_session:
         return missing
 
     # Raw minute partitions are projected by the shared factor layer on reads.
     # Keep the reference in that very same basis. Legacy stock-sdk reads are raw.
-    provider = preferences.get_minute_data_provider()
     if minute_adjust.minute_basis_is_raw(repo.store.data_dir) or provider != 'stocksdk':
         projected = frame.with_columns(pl.col('date').cast(pl.Datetime).alias('datetime'))
         projected = minute_adjust.apply_minute_adjustment(projected, repo.store.data_dir, asset_type)
@@ -150,7 +185,7 @@ def resolve(repo, capset, symbol: str, trade_date: date, asset_type: str,
     if not closing.is_empty():
         if not math.isclose(float(closing['close'][-1]), float(session['close'][-1]), rel_tol=1e-8, abs_tol=1e-8):
             return missing
-    elif trade_date != cn_today() or provider != 'stocksdk':
+    elif not current_raw_session:
         return missing
     value = float(before['close'][-1])
     if not math.isfinite(value) or value <= 0:

@@ -6,9 +6,9 @@ import copy
 import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import Future, TimeoutError
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 
-from . import hk_symbol_directory, provider, symbol_directory, symbol_search
+from . import hk_company_industry, hk_symbol_directory, provider, symbol_directory, symbol_search
 from .catalog import MARKETS, MarketDataError, local_catalog, normalize_symbol
 
 _LOCK = threading.RLock()
@@ -17,6 +17,9 @@ _PENDING: dict[tuple, Future] = {}
 _FAILURES: OrderedDict[tuple, tuple[float, str]] = OrderedDict()
 MAX_CACHE = 64
 MAX_PENDING = 4
+_HK_CLASSIFICATION_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hk-industry")
+_HK_CLASSIFICATION_SLOTS = threading.BoundedSemaphore(4)
+HK_CLASSIFICATION_WAIT_SECONDS = 1.0
 
 
 def _cached(key: tuple, ttl: int, fetch, *, stale: bool = False):
@@ -86,14 +89,61 @@ def chart(market: str, symbol: str, interval: str) -> dict:
     symbol = normalize_symbol(market, symbol)
     if interval not in provider.INTERVALS:
         raise ValueError("图表周期无效")
-    return _cached(("chart", market, symbol, interval), 900 if interval == "1d" else 30,
-                   lambda: provider.fetch_chart(market, symbol, interval), stale=True)
+    result = _cached(("chart", market, symbol, interval), 900 if interval == "1d" else 30,
+                     lambda: provider.fetch_chart(market, symbol, interval), stale=True)
+    classification = None
+    if (market == "hk" and interval == "1d" and result.get("market") == "hk"
+            and result.get("symbol") == symbol and result.get("currency") == "HKD"
+            and result.get("kind") == "stock"):
+        cached, value = hk_company_industry.cached(symbol)
+        if not cached:
+            classification_future = _submit_hk_classification(symbol)
+            if classification_future is not None:
+                try:
+                    value = classification_future.result(timeout=HK_CLASSIFICATION_WAIT_SECONDS)
+                except Exception:
+                    value = None
+        if (isinstance(value, dict) and value.get("source") == "eastmoney_hk_f10"
+                and value.get("system") == "eastmoney_belong_industry"
+                and isinstance(value.get("industry"), str) and value["industry"].strip()
+                and isinstance(value.get("fetched_at_ms"), int)
+                and not isinstance(value["fetched_at_ms"], bool)
+                and value["fetched_at_ms"] > 0):
+            classification = {
+                "source": "eastmoney_hk_f10",
+                "system": "eastmoney_belong_industry",
+                "industry": value["industry"],
+                "fetched_at_ms": value["fetched_at_ms"],
+            }
+    # Keep F10 outside the cached quote/chart object. It can only run after the
+    # primary response verifies a HKD stock, and cannot invalidate valid prices.
+    result["classification"] = classification
+    return result
+
+
+def _submit_hk_classification(symbol: str) -> Future | None:
+    """Queue one bounded optional lookup after the chart verifies a HKD share."""
+    if not _HK_CLASSIFICATION_SLOTS.acquire(blocking=False):
+        return None
+    try:
+        future = _HK_CLASSIFICATION_EXECUTOR.submit(hk_company_industry.get, symbol)
+    except RuntimeError:
+        _HK_CLASSIFICATION_SLOTS.release()
+        return None
+    future.add_done_callback(lambda _: _HK_CLASSIFICATION_SLOTS.release())
+    return future
 
 
 def quote(market: str, symbol: str) -> dict:
     symbol = normalize_symbol(market, symbol)
     return _cached(('quote', market, symbol), 60,
                    lambda: provider.fetch_quote(market, symbol), stale=True)
+
+
+def hk_directory() -> list[dict]:
+    """Share one validated HKD security directory between search and snapshots."""
+    return _cached(("hk-symbol-directory",), hk_symbol_directory.CACHE_SECONDS,
+                   hk_symbol_directory.load_rows)
 
 
 def catalog(market: str, query: str = "") -> dict:
@@ -139,11 +189,7 @@ def catalog(market: str, query: str = "") -> dict:
     hk_directory_used = False
     if not remote and market == "hk":
         try:
-            directory_rows = _cached(
-                ("hk-symbol-directory",),
-                hk_symbol_directory.CACHE_SECONDS,
-                hk_symbol_directory.load_rows,
-            )
+            directory_rows = hk_directory()
             remote = hk_symbol_directory.search(query, rows=directory_rows)
             hk_directory_used = bool(remote)
         except MarketDataError:

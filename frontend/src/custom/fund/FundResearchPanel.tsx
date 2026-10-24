@@ -70,7 +70,7 @@ function valuePct(value: number | null): string {
   return value === null || !Number.isFinite(value) ? '—' : `${value.toFixed(2)}%`
 }
 
-function sourceLink(url: string, label = '查看来源') {
+function reportLink(url: string, label: string) {
   if (!/^https?:\/\//i.test(url)) return null
   return <a href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[11px] text-accent hover:underline">{label}<ExternalLink className="h-3 w-3" /></a>
 }
@@ -123,7 +123,7 @@ function fieldLabel(field: string): string {
 function FundResearchContent({ research, purchaseFeeText, analysisSnapshot }: { research: FundResearch; purchaseFeeText?: string | null; analysisSnapshot: boolean }) {
   const { fees, risk, holdings } = research
   const riskBasis = risk.basis === 'source_return_series'
-    ? '来源累计收益序列（图表抽样）'
+    ? '累计收益序列（图表抽样）'
     : risk.basis === 'unit_nav'
       ? '单位净值（未复权）'
       : '口径未知'
@@ -131,9 +131,9 @@ function FundResearchContent({ research, purchaseFeeText, analysisSnapshot }: { 
   return <div className="space-y-3">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <div className="text-sm font-semibold text-foreground">基金基础研究</div>
-      <div className="text-[10px] text-muted">东方财富 · 区间 {research.horizon} · 更新于 {new Date(research.retrieved_at_ms).toLocaleString()}</div>
+      <div className="text-[10px] text-muted">区间 {research.horizon} · 更新于 {new Date(research.retrieved_at_ms).toLocaleString()}</div>
     </div>
-    {analysisSnapshot && <p className="text-[10px] leading-4 text-muted">本次分析资料快照与当前 AI 说明对应，不会自动替换；来源暂不可用时，可重新生成研究候选再次获取。</p>}
+    {analysisSnapshot && <p className="text-[10px] leading-4 text-muted">本次分析资料快照与当前 AI 说明对应，不会自动替换；资料暂不可用时，可重新生成研究候选再次获取。</p>}
 
     <div className="grid grid-cols-3 gap-1.5 text-center">
       <div className="rounded-md border border-border/70 bg-base/40 p-1.5"><div className="text-[10px] text-muted">费率</div><StatusPill status={fees.status} /></div>
@@ -146,7 +146,7 @@ function FundResearchContent({ research, purchaseFeeText, analysisSnapshot }: { 
     </div>}
 
     <section className="rounded-lg border border-border/70 p-3">
-      <div className="mb-2 flex items-center justify-between gap-2"><h3 className="text-xs font-semibold text-foreground">费率</h3>{sourceLink(fees.source_url)}</div>
+      <div className="mb-2 flex items-center justify-between gap-2"><h3 className="text-xs font-semibold text-foreground">费率</h3></div>
       <div className="mb-3 grid grid-cols-3 gap-2">
         <div><div className="text-[10px] text-muted">管理费 / 年</div><div className="font-mono text-xs text-foreground">{valuePct(fees.management_pct)}</div></div>
         <div><div className="text-[10px] text-muted">托管费 / 年</div><div className="font-mono text-xs text-foreground">{valuePct(fees.custody_pct)}</div></div>
@@ -164,20 +164,20 @@ function FundResearchContent({ research, purchaseFeeText, analysisSnapshot }: { 
     </section>
 
     <section className="rounded-lg border border-border/70 p-3">
-      <div className="mb-2 flex items-center justify-between gap-2"><h3 className="text-xs font-semibold text-foreground">区间观测最大回撤</h3>{sourceLink(risk.source_url)}</div>
+      <div className="mb-2 flex items-center justify-between gap-2"><h3 className="text-xs font-semibold text-foreground">区间观测最大回撤</h3></div>
       <div className="grid grid-cols-2 gap-2 text-[11px]">
         <div><div className="text-muted">回撤幅度</div><div className="font-mono text-sm text-foreground">{valuePct(risk.max_drawdown_pct)}</div></div>
         <div><div className="text-muted">计算口径</div><div className="text-foreground">{riskBasis}</div></div>
         <div><div className="text-muted">统计窗口</div><div className="text-foreground">{risk.start_date ?? '—'} 至 {risk.end_date ?? '—'}</div></div>
         <div><div className="text-muted">观测点</div><div className="font-mono text-foreground">{Number.isFinite(risk.observations) ? risk.observations : '—'}</div></div>
       </div>
-      {risk.basis === 'source_return_series' && <p className="mt-2 text-[10px] leading-4 text-warning">来源累计收益图表按采样点估算，并非逐日精确最大回撤。</p>}
+      {risk.basis === 'source_return_series' && <p className="mt-2 text-[10px] leading-4 text-warning">累计收益图表按采样点估算，并非逐日精确最大回撤。</p>}
       {risk.basis === 'unit_nav' && <p className="mt-2 text-[10px] leading-4 text-warning">使用未复权单位净值；分红会影响该回撤结果。</p>}
       {risk.note && <p className="mt-1 text-[10px] leading-4 text-muted">{risk.note}</p>}
     </section>
 
     <section className="rounded-lg border border-border/70 p-3">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h3 className="text-xs font-semibold text-foreground">定期报告持仓</h3>{sourceLink(holdings.source_url)}</div>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h3 className="text-xs font-semibold text-foreground">定期报告持仓</h3></div>
       <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
         <span><span className="text-muted">报告期：</span><span className="text-foreground">{holdings.report_date ?? '—'}</span></span>
         <span><span className="text-muted">已披露股票权重：</span><span className="font-mono text-foreground">{valuePct(holdings.coverage_weight_pct)}</span></span>
@@ -206,7 +206,7 @@ function FundResearchContent({ research, purchaseFeeText, analysisSnapshot }: { 
         <p className="mb-1 text-[10px] leading-4 text-muted">下列日期是相关报告公告日期，不代表已核验持仓的精确披露日。</p>
         <ul className="space-y-1.5">
           {holdings.related_reports.map((report, index) => <li key={`${report.title}-${report.publication_date}-${index}`} className="text-[11px] leading-4">
-            {sourceLink(report.source_url, report.title || '查看公告') ?? <span className="text-foreground">{report.title || '相关报告'}</span>}
+            {reportLink(report.source_url, report.title || '查看公告') ?? <span className="text-foreground">{report.title || '相关报告'}</span>}
             <span className="ml-2 text-muted">公告 {report.publication_date} · 报告期 {report.report_date}</span>
           </li>)}
         </ul>

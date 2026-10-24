@@ -304,7 +304,7 @@ def _fetch_daily_chunk_resilient(
     return pl.DataFrame(), list(symbols)
 
 
-def sync_daily_batch(symbols: list[str],
+def _sync_tickflow_daily_batch(symbols: list[str],
                      count: int | None = None,
                      batch_size: int | None = None,
                      rpm: int | None = None,
@@ -357,6 +357,37 @@ def sync_daily_batch(symbols: list[str],
     if not out:
         return pl.DataFrame()
     return pl.concat(out, how="diagonal_relaxed")
+
+
+def sync_daily_batch(symbols: list[str],
+                     count: int | None = None,
+                     batch_size: int | None = None,
+                     rpm: int | None = None,
+                     start_time: datetime | None = None,
+                     end_time: datetime | None = None,
+                     on_chunk_done: Callable[[int, int], None] | None = None,
+                     failed_out: list[str] | None = None) -> pl.DataFrame:
+    """Shared raw daily read; asset-specific callers retain their own storage."""
+    from app.data_providers import custom as custom_sources
+    from app.data_providers.source_routing import enabled
+
+    if enabled() and preferences.get_daily_data_provider() == 'stocksdk':
+        if not symbols:
+            return pl.DataFrame()
+        if custom_sources.provider_has_dataset('stocksdk', 'daily'):
+            end = end_time or datetime.now()
+            start = start_time or end - timedelta(days=max(365, (count or 250) * 2))
+            frame = custom_sources.get_provider('stocksdk').get_daily(
+                symbols, start_time=start, end_time=end, on_chunk_done=on_chunk_done)
+            if count and not start_time and not frame.is_empty():
+                frame = frame.sort(['symbol', 'date']).group_by('symbol', maintain_order=True).tail(count)
+            received = set(frame['symbol'].to_list()) if 'symbol' in frame.columns else set()
+            if failed_out is not None:
+                failed_out.extend(symbol for symbol in symbols if symbol not in received)
+            return frame
+    return _sync_tickflow_daily_batch(symbols, count=count, batch_size=batch_size, rpm=rpm,
+        start_time=start_time, end_time=end_time, on_chunk_done=on_chunk_done, failed_out=failed_out)
+
 
 def sync_and_persist_daily_batch(
     symbols: list[str],

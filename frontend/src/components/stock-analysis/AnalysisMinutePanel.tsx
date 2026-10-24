@@ -56,11 +56,11 @@ function validOhlc(row: MinuteKlineRow): boolean {
     && row.high >= row.low
 }
 
-function sourceLabel(source: string | undefined): string {
+function dataStatusLabel(source: string | undefined): string {
   if (source === 'live') return '在线查询'
-  if (source === 'local') return '本地'
-  if (source === 'none') return '无来源'
-  return source || '未知'
+  if (source === 'local') return '本地缓存'
+  if (source === 'none') return '暂无有效数据'
+  return '状态未知'
 }
 
 function errorPanel(hasData: boolean, onRetry: () => void) {
@@ -82,20 +82,33 @@ export function AnalysisMinutePanel({
 }: Props) {
   const queryClient = useQueryClient()
   const stockOptions = klineMinuteQueryOptions(symbol, date ?? undefined, true)
+  const stockQueryKey = QK.analysisMinute(symbol, date ?? '', 'stock')
+  const stockRefreshInterval = useMemo(
+    () => minuteRefetchInterval(REFRESH_MS, { retryMissingReference: true }),
+    [symbol, date, assetType],
+  )
   const stockQuery = useQuery({
     ...stockOptions,
-    queryKey: QK.analysisMinute(symbol, date ?? '', 'stock'),
-    queryFn: async () => matchesContext(await stockOptions.queryFn(), symbol, date),
+    queryKey: stockQueryKey,
+    queryFn: async ({ signal }) => {
+      const next = matchesContext(await stockOptions.queryFn({ signal }), symbol, date)
+      const previous = queryClient.getQueryData<StockMinuteResponse>(stockQueryKey)
+      if (previous?.symbol === symbol && previous.date != null && previous.date === next.date
+        && previous.rows.length > 0 && next.rows.length === 0) {
+        throw new Error('The minute refresh returned no rows for the cached trading date')
+      }
+      return next
+    },
     enabled: !!symbol && (assetType === 'stock' || assetType === 'etf'),
     retry: false,
     staleTime: REFRESH_MS,
     gcTime: INSTRUMENT_VIEW_GC_MS,
     meta: { instrumentView: 'analysis', symbol, minuteDate: date ?? '' },
-    refetchInterval: minuteRefetchInterval(REFRESH_MS),
+    refetchInterval: stockRefreshInterval,
   })
   const indexQuery = useQuery({
     queryKey: QK.analysisMinute(symbol, date ?? '', 'index'),
-    queryFn: async () => matchesContext(await api.indexMinute(symbol, date ?? undefined), symbol, date),
+    queryFn: async ({ signal }) => matchesContext(await api.indexMinute(symbol, date ?? undefined, signal), symbol, date),
     enabled: !!symbol && assetType === 'index',
     retry: false,
     staleTime: REFRESH_MS,
@@ -119,9 +132,6 @@ export function AnalysisMinutePanel({
     hoverRef.current?.(null)
     return () => hoverRef.current?.(null)
   }, [symbol, date, view, currentResponse?.date])
-  const provider = isIndex && currentResponse && 'provider' in currentResponse
-    ? currentResponse.provider
-    : undefined
   const invalidCandles = !isIndex && rows.length > 0
     && rows.some(row => !validOhlc(row as MinuteKlineRow))
   const candleBars = useMemo<CanvasChartBar[] | null>(() => {
@@ -206,12 +216,13 @@ export function AnalysisMinutePanel({
     {assetType != null && hasData && currentResponse ? <>
       <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted" aria-label="分钟数据状态">
         <span className="text-blue-300">{date == null ? '最新交易日模式' : '历史日期模式'}</span>
-        <span>来源：{sourceLabel(currentResponse.source)}{provider && provider !== currentResponse.source ? ` · ${provider}` : ''}</span>
+        <span>数据状态：{dataStatusLabel(currentResponse.source)}</span>
         <span>实际日期：{currentResponse.date ?? '—'}</span>
         <span>最后分钟：{latestTime}</span>
         {reference?.prev_close != null && <span>昨收基准：{chartPrice(reference.prev_close, symbol)}{reference.prev_close_date ? ` · ${reference.prev_close_date}` : ''}</span>}
         {activeQuery.isFetching && <span className="text-blue-300">刷新中</span>}
       </div>
+      {reference?.minute_warning && <p role="status" className="text-[11px] text-amber-300">{reference.minute_warning}</p>}
       {reference?.prev_close_warning && rows.length > 0 && <p role="status" className="text-[11px] text-amber-300">{reference.prev_close_warning}</p>}
       {rows.length === 0 ? <div role="status" className="flex items-center justify-center rounded-md border border-border/40 bg-base/30 text-sm text-muted" style={{ height }}>暂无分钟数据</div>
         : showCandles && invalidCandles ? <div role="status" className="flex flex-col items-center justify-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-4 text-center text-sm text-amber-200" style={{ height }}>

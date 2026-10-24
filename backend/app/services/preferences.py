@@ -270,9 +270,29 @@ def _allowed_data_providers() -> set[str]:
         return set(_ALLOWED_DATA_PROVIDERS)
 
 
+def _available_read_provider(field: str) -> str:
+    current = load()
+    provider = str(current.get(field, 'tickflow') or 'tickflow').lower()
+    allowed = _allowed_data_providers()
+    if provider in allowed:
+        return provider
+    # An unavailable optional runtime must not route quotes into a native tier
+    # that cannot provide them. Only use installed, declared equivalents.
+    alternatives = {
+        ('realtime_data_provider', 'stocksdk'): ('realtime', 'fuyao'),
+    }
+    fallback = alternatives.get((field, provider))
+    if current.get('data_source_failover_enabled') is True and fallback:
+        from app.data_providers import custom as custom_sources
+
+        dataset, name = fallback
+        if name in allowed and custom_sources.provider_has_dataset(name, dataset):
+            return name
+    return 'tickflow'
+
+
 def get_daily_data_provider() -> str:
-    provider = str(load().get("daily_data_provider", "tickflow") or "tickflow").lower()
-    return provider if provider in _allowed_data_providers() else "tickflow"
+    return _available_read_provider('daily_data_provider')
 
 
 def get_adj_factor_provider() -> str:
@@ -282,8 +302,7 @@ def get_adj_factor_provider() -> str:
 
 
 def get_minute_data_provider() -> str:
-    provider = str(load().get("minute_data_provider", "tickflow") or "tickflow").lower()
-    return provider if provider in _allowed_data_providers() else "tickflow"
+    return _available_read_provider('minute_data_provider')
 
 
 def get_full_minute_data_provider() -> str:
@@ -297,8 +316,7 @@ def get_depth5_data_provider() -> str:
 
 
 def get_realtime_data_provider() -> str:
-    provider = str(load().get("realtime_data_provider", "tickflow") or "tickflow").lower()
-    return provider if provider in _allowed_data_providers() else "tickflow"
+    return _available_read_provider('realtime_data_provider')
 
 
 def get_financial_provider() -> str:

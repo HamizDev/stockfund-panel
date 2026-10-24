@@ -57,6 +57,13 @@ export interface DefaultStrategyBasicFilter {
 }
 
 export const storage = {
+  /** Bounded public HK/US dashboard query snapshots; no credentials or accounts. */
+  dashboardQueries: kv<unknown>('dashboard-public-queries-v1'),
+  /** Lightweight recent selections only; no quotes, K-lines or account data. */
+  recentStocks: (scope: string) => kv<unknown>(`recent_stocks:${scope}`),
+  /** User-selected daily chart preferences, shared across securities. */
+  stockChartIndicators: kv<unknown>('stock-chart-indicators'),
+  stockChartMode: kv<unknown>('stock-chart-mode'),
   chartViewports: kv<unknown>('chart-viewports', 'session'),
   globalIndustryView: kv<unknown>('global-industries-view', 'session'),
   /** 只读页面的选择/筛选；按标签页保存，不包含账户操作表单或实时行情快照。 */

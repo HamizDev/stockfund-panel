@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { formatGlobalMarketChange, formatGlobalMarketPrice, formatGlobalMarketTime } from './marketFormatters'
+import { canonicalFinancialSymbol, formatGlobalMarketChange, formatGlobalMarketPrice, formatGlobalMarketTime } from './marketFormatters'
+
+it('aligns financial response identifiers without removing the requested listing filter', () => {
+  expect(canonicalFinancialSymbol('us', 'AAPL.O')).toBe('AAPL')
+  expect(canonicalFinancialSymbol('us', 'aapl.n')).toBe('AAPL')
+  expect(canonicalFinancialSymbol('us', 'BRK.B')).toBe('BRK-B')
+  expect(canonicalFinancialSymbol('hk', '700')).toBe('00700.HK')
+  expect(canonicalFinancialSymbol('hk', '00700.HK')).toBe('00700.HK')
+})
 
 describe('global market formatters', () => {
   it('keeps local daily dates and formats minute timestamps in each market timezone', () => {

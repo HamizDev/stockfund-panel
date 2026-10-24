@@ -66,7 +66,7 @@ export function mergeLatestKlineRow(
 export function klineMinuteQueryOptions(symbol: string, date?: string, live?: boolean) {
   return {
     queryKey: QK.klineMinute(symbol, date ?? '', live),
-    queryFn: () => api.klineMinute(symbol, date ?? undefined, live),
+    queryFn: ({ signal }: { signal?: AbortSignal } = {}) => api.klineMinute(symbol, date ?? undefined, live, signal),
   }
 }
 
@@ -182,7 +182,10 @@ function rowMinute(r: { datetime?: string } | undefined): string {
  *   与后端"15:30 才允许定版/重建"的边界一致)。
  * - 其余 (当日 15:30 前) → 按间隔继续
  */
-export function minuteRefetchInterval(ms?: number) {
+export function minuteRefetchInterval(ms?: number, opts?: { retryMissingReference?: boolean }) {
+  let recoveryContext = ''
+  let recoveryResponses = 0
+  let recoveryUpdate: string | undefined
   return (query: any): number | false => {
     if (ms == null) return false
     const queryKey = query.queryKey as readonly unknown[] | undefined
@@ -207,6 +210,30 @@ export function minuteRefetchInterval(ms?: number) {
     if (typeof d?.date === 'string' && d.date > today) return false
 
     const pause = cnMarketPauseDelay(clock)
+    // Optional baseline fetches can finish just after 11:30. Give only the
+    // selected analysis chart three recovery polls, then return to the session
+    // timer. Count response updates, not repeated interval callback evaluations.
+    const missingReference = d?.date === today && d?.rows?.length > 0
+      && d.prev_close == null && d.prev_close_source === 'none'
+    if (opts?.retryMissingReference && pause != null && !weekend
+      && nowMinutes >= 9 * 60 + 30 && !afterClose && missingReference) {
+      const context = `${queryKey?.[1]}:${d.date}`
+      if (context !== recoveryContext) {
+        recoveryContext = context
+        recoveryResponses = 0
+        recoveryUpdate = undefined
+      }
+      const update = `${query.state.dataUpdatedAt ?? 0}:${query.state.errorUpdatedAt ?? 0}`
+      if (recoveryUpdate !== update) {
+        recoveryUpdate = update
+        recoveryResponses += 1
+      }
+      if (recoveryResponses <= 3) return Math.min(pause, ms)
+    } else {
+      recoveryContext = ''
+      recoveryResponses = 0
+      recoveryUpdate = undefined
+    }
     if (!d || d.source === 'none') return pause ?? ms
     const closeBarArrived = (d.rows ?? []).some((r: { datetime?: string }) => rowMinute(r) >= CLOSE_MINUTE)
     if (closeBarArrived && cnNowHHMM() >= MARKET_ALL_OVER) {

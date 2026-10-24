@@ -38,7 +38,44 @@ function getContent(task: ActiveTask | HistoryReport | null): string {
 function getMeta(task: ActiveTask | HistoryReport | null) {
   if (!task) return null
   if ('meta' in task) return task.meta
-  return { summary: task.summary, close: task.close, levels: task.levels }
+  return {
+    summary: task.summary,
+    close: task.close,
+    levels: task.levels,
+    as_of: task.as_of,
+    requested_at: task.requested_at,
+    daily_as_of: task.daily_as_of,
+    intraday_as_of: task.intraday_as_of,
+    is_provisional: task.is_provisional,
+    price_basis: task.price_basis,
+  }
+}
+
+function formatSnapshotTime(value?: string | null): string | null {
+  if (!value) return null
+  const match = value.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/)
+  if (match) return `${match[1]} ${match[2]}`
+  return value.slice(0, 10)
+}
+
+function formatReportDataCutoff(
+  meta: ReturnType<typeof getMeta>,
+  isHistory: boolean,
+): string | null {
+  if (!meta) return isHistory ? '数据截至时间未记录' : null
+  const intraday = formatSnapshotTime(meta.intraday_as_of)
+  const latest = formatSnapshotTime(meta.as_of)
+  const daily = formatSnapshotTime(meta.daily_as_of)
+  const cutoff = intraday
+    ? `行情截至 ${intraday}`
+    : latest
+      ? `数据截至 ${latest}`
+      : daily
+        ? `日K截至 ${daily}`
+        : '数据截至时间未记录'
+  const dailyNote = intraday && daily && daily.slice(0, 10) !== intraday.slice(0, 10) ? ` · 日K截至 ${daily}` : ''
+  const requested = formatSnapshotTime(meta.requested_at)
+  return `${requested ? `提问 ${requested} · ` : ''}${cutoff}${dailyNote}${meta.is_provisional ? ' · 含未收盘K' : ''}`
 }
 
 export function StockAnalysisDialog({ task, mode, minimized }: Props) {
@@ -50,6 +87,7 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
   const content = getContent(task)
   const meta = getMeta(task)
   const isHistory = mode === 'history'
+  const dataCutoff = formatReportDataCutoff(meta, isHistory)
   const isWorking = phase === 'loading' || phase === 'streaming'
   const open = !!task && !minimized
 
@@ -131,6 +169,11 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
                     <span className="shrink-0">{fmtRelative(task.created_at)}</span>
                   )}
                 </div>
+                {dataCutoff && (
+                  <div className="mt-1 text-[10px] text-muted/80" data-testid="report-data-cutoff">
+                    {dataCutoff}
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-1 shrink-0">
                 {content && !isWorking && (
@@ -166,7 +209,7 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
                   <Loader2 className="absolute -inset-1 h-12 w-12 text-sky-400/40 animate-spin" style={{ animationDuration: '3s' }} />
                 </div>
                 <div className="text-xs text-secondary">AI 正在分析行情与关键价位…</div>
-                <div className="text-[10px] text-muted">读取日 K / 技术指标 / 压力支撑 / 财务,生成四维分析</div>
+                <div className="text-[10px] text-muted">核对最新日K与分钟行情,分析量价、关键价位和风险</div>
               </div>
             )}
 
@@ -177,7 +220,7 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
                 </div>
                 <div className="text-sm font-medium text-foreground">分析失败</div>
                 <div className="text-xs text-secondary text-center max-w-md px-4">{error}</div>
-                {error.includes('AI') && (
+                {/未配置|API Key|api_key|凭据|鉴权/.test(error) && (
                   <button onClick={() => { window.location.href = '/settings?tab=ai' }}
                     className="mt-1 inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-elevated border border-border text-xs text-secondary hover:text-foreground transition-colors">
                     <Settings2 className="h-3.5 w-3.5" /> 去配置 AI
@@ -213,7 +256,7 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
                 onChange={e => setFocus(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter' && (phase === 'done' || phase === 'error' || isHistory)) handleStartNew() }}
                 disabled={isWorking}
-                placeholder={isHistory ? '修改关注重点,回车重新生成' : (phase === 'done' ? '如:重点看能否突破压力位…回车重新分析' : '可留空,留空则全面分析')}
+                placeholder={isHistory ? '修改关注重点,回车重新分析' : '如:重点分析趋势、量价或关键支撑压力'}
                 className={cn(
                   'flex-1 h-8 px-3 rounded-lg bg-base ring-1 ring-border/30 text-xs text-foreground placeholder:text-muted/40',
                   'focus:outline-none focus:ring-2 focus:ring-sky-400/30 transition-shadow disabled:opacity-50',
@@ -242,7 +285,7 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
             <p className="mt-1.5 text-[10px] text-muted/50 leading-relaxed">
               {isHistory
                 ? '历史报告为静态记录;修改关注重点后将作为新任务重新生成。报告仅供参考,不构成投资建议。'
-                : '报告由项目已配置的 AI 模型基于本地行情与财务数据生成;消息面维度暂依据价量异动推断。报告仅供参考,不构成投资建议。'}
+                : '报告由项目已配置的 AI 模型基于个股分析页共用行情快照与财务数据生成;行情截止时间见上,消息面维度暂依据价量异动推断。报告仅供参考,不构成投资建议。'}
             </p>
           </div>
         </motion.div>

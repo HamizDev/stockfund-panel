@@ -6,7 +6,6 @@ import { ArrowDownRight, ArrowUpRight, BarChart3, BellRing, Database, Flame, Gau
 import { SectionTitle, KpiCell } from '@/components/dashboard/Primitives'
 import { MarketBoardTabs } from '@/components/dashboard/MarketBoardTabs'
 import { GlobalIndustryPanel } from '@/custom/global_markets/GlobalIndustryPanel'
-import { MacroReferencePanel } from '@/custom/global_markets/MacroReferencePanel'
 import { storage } from '@/lib/storage'
 import { DatePicker } from '@/components/DatePicker'
 import { api, type DashboardDataSummary, type DashboardInit, type MarketSnapshotRow, type OverviewDimensionRankItem, type OverviewMarket, type AlertEvent } from '@/lib/api'
@@ -900,8 +899,6 @@ function ChinaDashboard() {
         <KpiCell label="换手 / 量比" value={`${fmtPrice(data.activity.avg_turnover, 1)}% / ${fmtPrice(data.activity.vol_ratio, 2)}`} sub={`高换手 ${data.activity.high_turnover} · 放量占比 ${fmtPrice(data.activity.high_vol_ratio, 1)}%`} tone="accent" />
       </div>
 
-      <GlobalIndustryPanel />
-      <MacroReferencePanel market="cn" />
       <div className="grid grid-cols-1 gap-1.5 xl:grid-cols-[minmax(0,1fr)_20rem]">
         <main className="min-w-0 space-y-1.5">
           <div className="grid grid-cols-1 gap-1.5 lg:grid-cols-3">
@@ -994,6 +991,8 @@ function ChinaDashboard() {
           </section>
         </aside>
       </div>
+
+      <GlobalIndustryPanel />
 
       <StockPreviewDialog
         symbol={previewStock?.symbol ?? null}

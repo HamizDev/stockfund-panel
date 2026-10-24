@@ -6,6 +6,8 @@ import { MemoryRouter, useSearchParams } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { StockAnalysis } from './StockAnalysis'
 
+vi.mock('@/lib/useMediaQuery', () => ({ useMediaQuery: () => false }))
+
 const mocks = vi.hoisted(() => ({
   instrumentSearch: vi.fn(),
   instrumentNames: vi.fn(),
@@ -125,4 +127,22 @@ it('accepts the validated type saved by a selection on a direct link', async () 
   expect(host.querySelector<HTMLElement>('[data-testid="minute-panel"]')?.dataset.asset).toBe('etf')
   expect(mocks.instrumentSearch).not.toHaveBeenCalled()
   expect(mocks.instrumentNames).not.toHaveBeenCalled()
+})
+
+it('returns to a recent ETF by its name and rechecks its exact asset type', async () => {
+  mocks.instrumentSearch.mockImplementation(async (code: string) => ({ results: [{
+    symbol: `${code}.SH`, name: code === '510300' ? '沪深300ETF' : '上证指数',
+    asset_type: code === '510300' ? 'etf' : 'index',
+  }] }))
+  await renderPage()
+  await click('select-etf')
+  await click('select-untyped')
+  const recent = host.querySelector('nav[aria-label="最近查看的标的"]')!
+  const etf = [...recent.querySelectorAll('button')].find(button => button.textContent === '沪深300ETF')!
+  expect(etf).toBeDefined()
+  await act(async () => etf.click())
+  for (let i = 0; i < 5; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+  expect(host.querySelector<HTMLElement>('[data-testid="minute-panel"]')?.dataset.asset).toBe('etf')
+  expect(new URLSearchParams(host.querySelector('[data-testid="params"]')?.textContent ?? '').get('symbol')).toBe('510300.SH')
+  expect(etf.getAttribute('aria-current')).toBe('true')
 })

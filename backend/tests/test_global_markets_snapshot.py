@@ -136,3 +136,26 @@ def test_us_initial_full_source_failure_publishes_explicit_capped_pool_not_full_
     assert state['data']['scope'] == 'us_screener_pool'
     assert state['data']['warnings'] and state['data']['total_reported'] == 1
     assert not state['loading'] and state['error'] is None
+
+
+def test_us_pool_enrichment_keeps_quote_source_date_and_real_volume_rank(monkeypatch):
+    from app.custom.global_markets import us_classification, us_screeners
+    monkeypatch.setattr(ms, 'fetch', lambda _: (_ for _ in ()).throw(MarketDataError('offline')))
+    row = ms.parse_row('us', raw('AAPL', 105, f100=None, f6=None, f8=None), STAMP + 10)
+    row.update(source='yahoo_screener', market_cap=1e12)
+    original = {key: row[key] for key in ('price', 'change_pct', 'volume', 'quote_at_ms', 'source')}
+    monkeypatch.setattr(us_screeners, 'fetch_us_screener_pool', lambda: {'quotes': [row]})
+    def enrich(rows):
+        rows[0].update(industry='Computer Manufacturing', industry_source='nasdaq_screener')
+        return {'source': 'nasdaq_screener', 'source_as_of': None, 'matched': 1, 'error': None}
+    monkeypatch.setattr(us_classification, 'enrich', enrich)
+    state = {'data': None, 'quotes': {}, 'error': None, 'stale': False, 'loading': True}
+    ms._load('us', state)
+    data = state['data']
+    assert data['source'] == 'yahoo_screener' and data['scope'] == 'us_screener_pool'
+    assert data['date'] == '2026-10-16' and data['industry_covered'] == 1
+    assert data['industries'][0]['name'] == 'Computer Manufacturing'
+    assert data['ranks']['volume'][0]['volume'] == 500
+    assert data['ranks']['market_cap'][0]['market_cap'] == 1e12
+    assert not data['ranks']['amount'] and not data['ranks']['turnover']
+    assert {key: state['quotes']['AAPL'][key] for key in original} == original

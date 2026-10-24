@@ -9,6 +9,7 @@ import { EmptyState } from '@/components/EmptyState'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { LastStockChip } from '@/components/LastStockChip'
+import { RecentStockTabs } from '@/components/RecentStockTabs'
 import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/stock-analysis/AnalysisKChart'
 import { AnalysisMinutePanel } from '@/components/stock-analysis/AnalysisMinutePanel'
 import { EtfSharesPanel } from '@/components/stock-analysis/EtfSharesPanel'
@@ -17,7 +18,9 @@ import { TechnicalSummary } from '@/components/research/TechnicalSummary'
 import { api, type AnalysisSnapshot } from '@/lib/api'
 import { useLastStock } from '@/lib/useLastStock'
 import { usePageState } from '@/lib/usePageState'
+import { useMediaQuery } from '@/lib/useMediaQuery'
 import { usePaperInstrumentNames } from '@/lib/usePaperInstrumentNames'
+import { marketSessionRefetchInterval } from '@/lib/kline'
 import { QK } from '@/lib/queryKeys'
 import { useInstrumentViewCache, INSTRUMENT_VIEW_GC_MS } from '@/lib/useInstrumentViewCache'
 import { toast } from '@/components/Toast'
@@ -30,6 +33,19 @@ type InstrumentAssetType = 'stock' | 'etf' | 'index'
 
 function isInstrumentAssetType(value: string | null): value is InstrumentAssetType {
   return value === 'stock' || value === 'etf' || value === 'index'
+}
+
+const MARKET_AS_OF_FORMATTER = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+})
+
+function formatMarketAsOf(value?: string | null): string | null {
+  if (!value) return null
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return null
+  const parts = Object.fromEntries(MARKET_AS_OF_FORMATTER.formatToParts(date).map(part => [part.type, part.value]))
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`
 }
 
 /**
@@ -49,7 +65,7 @@ export function StockAnalysis() {
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
   const [showPriceAlerts, setShowPriceAlerts] = useState(false)
   const [knownAssetType, setKnownAssetType] = useState<{ symbol: string; assetType: InstrumentAssetType } | null>(null)
-  const { last: lastStock, remember: rememberStock } = useLastStock('stock-analysis')
+  const { last: lastStock, recent, remember: rememberStock, clearRecent } = useLastStock('stock-analysis')
 
   // 进入页面立即加载历史报告(供右侧常驻列表)。store 内部有 historyLoaded 去重, 重复调用安全。
   useEffect(() => { loadHistory() }, [])
@@ -60,6 +76,9 @@ export function StockAnalysis() {
   const nameIsKnown = !!name.trim() && name.trim() !== symbol
   const names = usePaperInstrumentNames(symbol && !nameIsKnown ? [symbol] : [])
   const resolvedName = names.data?.names?.[symbol] || name || symbol
+  useEffect(() => {
+    if (symbol && resolvedName !== symbol) rememberStock(symbol, resolvedName)
+  }, [symbol, resolvedName, rememberStock])
 
   // 自动恢复上次选中的股票(切走再回来不丢)。useLastStock 的 last 来自 localStorage, 同步可用。
   useEffect(() => {
@@ -173,6 +192,8 @@ export function StockAnalysis() {
           )}
         </div>
 
+        <RecentStockTabs items={recent} selected={symbol} onSelect={onSelect} onClear={clearRecent} />
+
         {/* 主体:左侧当前个股看板 + 右侧常驻历史报告 */}
         <div className="grid grid-cols-1 min-[1720px]:grid-cols-[minmax(0,1fr)_288px] gap-6 items-start">
           <div className="min-w-0">
@@ -237,6 +258,7 @@ function isAnalysisView(value: unknown): value is AnalysisView {
 
 // 日线和分钟数据独立加载，缺少日线也能查看最新日内行情。
 export function StockAnalysisBoard({ symbol, knownAssetType }: { symbol: string; knownAssetType?: InstrumentAssetType }) {
+  const phone = useMediaQuery('(max-width: 639px)')
   const [view, setView] = usePageState<AnalysisView>('stockAnalysis', () => ({ symbol, date: null, view: 'intraday' }), isAnalysisView)
   const selectedDate = view.symbol === symbol ? view.date : null
   const selectedView = view.symbol === symbol ? view.view : 'intraday'
@@ -272,7 +294,7 @@ export function StockAnalysisBoard({ symbol, knownAssetType }: { symbol: string;
       <button type="button" onClick={() => { void metadata.refetch() }} className="mt-3 rounded-btn border border-border px-3 py-2 text-xs text-accent">重新识别标的</button>
     </section> : <AnalysisMinutePanel
       symbol={symbol} assetType={assetType} date={selectedDate} onDateChange={selectDate}
-      view={assetType === 'index' ? 'intraday' : selectedView} onViewChange={selectView} height={480}
+      view={assetType === 'index' ? 'intraday' : selectedView} onViewChange={selectView} height={phone ? 360 : 480}
       onPriceHover={onPriceHover}
     />}
     {assetType === 'etf' && /^(5\d{5}\.SH|15\d{4}\.SZ)$/.test(symbol) && <EtfSharesPanel symbol={symbol} date={selectedDate} />}
@@ -285,6 +307,7 @@ function DailyAnalysisCard({ symbol, onDateClick, linkedPrice, minuteDate, asset
   symbol: string; onDateClick: (date: string) => void; linkedPrice?: number | null
   minuteDate: string | null; assetType?: 'stock' | 'etf' | 'index'
 }) {
+  const phone = useMediaQuery('(max-width: 639px)')
   const client = useQueryClient()
   const key = QK.stockAnalysisSnapshot(symbol, 250)
   const kline = useQuery({
@@ -303,6 +326,7 @@ function DailyAnalysisCard({ symbol, onDateClick, linkedPrice, minuteDate, asset
     },
     enabled: !!symbol,
     staleTime: 60_000,
+    refetchInterval: marketSessionRefetchInterval(30_000),
     gcTime: INSTRUMENT_VIEW_GC_MS,
     meta: { instrumentView: 'analysis', symbol },
     retry: false,
@@ -341,6 +365,9 @@ function DailyAnalysisCard({ symbol, onDateClick, linkedPrice, minuteDate, asset
   // 涨跌色:最后一根 K 线收 vs 前一根收(无前日则按开收判断)
   const last = rows[rows.length - 1]
   const prev = rows[rows.length - 2]
+  const latestKlineAsOf = kline.data?.as_of ?? last.date
+  const officialDailyAsOf = kline.data?.daily_as_of
+  const intradayAsOf = formatMarketAsOf(kline.data?.intraday_as_of)
   const curClose = levelsQ?.close ?? last.close
   const isUp = prev ? (last.close >= prev.close) : (last.close >= last.open)
 
@@ -367,12 +394,12 @@ function DailyAnalysisCard({ symbol, onDateClick, linkedPrice, minuteDate, asset
   return (
     <div className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
       <div className="px-4 py-3 border-b border-border/40">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
           <div className="flex items-center gap-2 min-w-0">
             <LineChart className="h-4 w-4 text-sky-400 shrink-0" />
             <span className="text-sm font-medium text-foreground">关键价位分析</span>
           </div>
-          <div className="flex items-baseline gap-2 shrink-0">
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
             <span className="text-[10px] text-muted">{rows.length} 个交易日</span>
             <span className="text-[10px] text-muted/60">·</span>
             <span className="text-[10px] text-muted">当前价</span>
@@ -384,7 +411,11 @@ function DailyAnalysisCard({ symbol, onDateClick, linkedPrice, minuteDate, asset
       </div>
       <div className="p-3">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted">
-          <span>日线截至 {kline.data?.as_of ?? last.date} · {kline.data?.source === 'online' ? '在线查询' : '本地快照'} · {kline.data?.price_basis === 'unadjusted' ? '未复权' : '本地指标口径'}</span>
+          <span>
+            {kline.data?.is_provisional
+              ? <>含当日未收盘日K（{latestKlineAsOf}）{officialDailyAsOf ? ` · 正式日线截至 ${officialDailyAsOf}` : ''} · {intradayAsOf ? `行情截至 ${intradayAsOf}（北京时间）` : '实时报价时间待数据源确认'}</>
+              : <>日线截至 {officialDailyAsOf ?? latestKlineAsOf} · {kline.data?.source === 'online' ? '在线查询' : '本地快照'} · {kline.data?.price_basis === 'unadjusted' ? '未复权' : '本地指标口径'}</>}
+          </span>
           <button type="button" disabled={kline.isFetching} onClick={() => { void kline.refetch() }} className="rounded-btn border border-border px-2.5 py-1 text-xs text-accent hover:bg-elevated disabled:opacity-50">
             {kline.isFetching ? '正在更新日线…' : '更新日线'}
           </button>
@@ -397,7 +428,7 @@ function DailyAnalysisCard({ symbol, onDateClick, linkedPrice, minuteDate, asset
           levels={levels}
           series={levelsQ?.series}
           seriesDates={levelsQ?.dates}
-          height={480}
+          height={phone ? 360 : 480}
           onDateClick={onDateClick}
           linkedPrice={samePriceBasis ? linkedPrice : null}
         />

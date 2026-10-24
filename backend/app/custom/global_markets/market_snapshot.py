@@ -12,6 +12,7 @@ import statistics
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -89,7 +90,7 @@ def summarize(market: str, rows: list[dict], total: int, *, skipped: int = 0) ->
                   for name, members in groups.items()]
     industries.sort(key=lambda row: row['change_pct'], reverse=True)
     def ranking(key, reverse):
-        return sorted((row for row in valid if row[key] is not None),
+        return sorted((row for row in valid if row.get(key) is not None),
                       key=lambda row: row[key], reverse=reverse)[:8]
     return {'market': market, **MARKETS[market], 'source': 'eastmoney_public',
             'scope': SPECS[market]['scope'], 'universe_label': SPECS[market]['label'],
@@ -102,7 +103,8 @@ def summarize(market: str, rows: list[dict], total: int, *, skipped: int = 0) ->
                       'mean': statistics.fmean(values) if values else None,
                       'median': statistics.median(values) if values else None, 'bins': bins},
             'ranks': {'gainers': ranking('change_pct', True), 'losers': ranking('change_pct', False),
-                      'amount': ranking('amount', True), 'turnover': ranking('turnover_rate', True)},
+                      'amount': ranking('amount', True), 'turnover': ranking('turnover_rate', True),
+                      'volume': ranking('volume', True), 'market_cap': ranking('market_cap', True)},
             'industries': industries, 'industry_covered': sum(len(members) for members in groups.values())}
 
 
@@ -179,18 +181,75 @@ def fetch(market: str) -> tuple[dict, dict[str, dict]]:
 
 def _load(market: str, state: dict):
     try:
+        from app.data_providers import source_routing
+
+        failover_enabled = source_routing.enabled()
         try:
-            data, quotes = fetch(market)
+            if failover_enabled:
+                primary = source_routing.HEALTH.attempt(
+                    ('global_snapshot', market, 'eastmoney_public'),
+                    lambda: fetch(market),
+                    lambda result: (
+                        isinstance(result, tuple) and len(result) == 2
+                        and isinstance(result[0], dict)
+                        and isinstance(result[1], dict) and bool(result[1])
+                    ),
+                )
+                if not primary.success:
+                    raise MarketDataError('东财主快照不可用；尝试有限覆盖备用池')
+                data, quotes = primary.value
+            else:
+                data, quotes = fetch(market)
         except MarketDataError:
-            if market != 'us' or (state['data'] and state['data']['scope'] == 'us_listed_securities'):
+            if (not failover_enabled and state['data']
+                    and state['data']['scope'] in ('hk_mainboard', 'us_listed_securities')):
                 raise
-            from .us_screeners import fetch_us_screener_pool
-            rows = fetch_us_screener_pool()['quotes']
-            data = summarize(market, rows, len(rows))
-            data.update(source='yahoo_screener', scope='us_screener_pool',
-                        universe_label='美股活跃与涨跌筛选池（非全市场）',
-                        warnings=['完整市场源暂不可用；仅合并公开活跃、涨幅、跌幅预设池，存在选择偏差，不能推断全市场广度'])
+            if market == 'hk':
+                from .hk_sina_snapshot import fetch_pool
+                from .hk_tencent_etf import fetch_etf_pool
+                sina_rows, sina_total = fetch_pool()
+
+                # Publish only a verified optional batch; deduplicate before
+                # breadth/rank calculations as well as the quote lookup.
+                etf_rows, etf_total = [], 0
+                with suppress(MarketDataError):
+                    etf_rows, etf_total = fetch_etf_pool()
+                unique = {row['symbol']: row for row in sina_rows}
+                overlap = len(set(unique) & {row['symbol'] for row in etf_rows})
+                unique.update((row['symbol'], row) for row in etf_rows)
+                rows = list(unique.values())
+                total = sina_total + etf_total - overlap if etf_rows else sina_total
+                data = summarize(market, rows, total, skipped=total - len(rows))
+                data.update(source='sina_hk_public', scope='hk_sina_hkd_pool',
+                            universe_label='港股港币证券覆盖池（新浪×HKEX）',
+                            source_note='价格币种经HKEX交易柜台核验；新浪成交额保留源站原值，未另声明单位，不能与其他来源金额直接比较；未核实单位的成交量、成交额不补零',
+                            warnings=['东财主快照不可用；当前为有限覆盖池，与旧全市场快照不能直接比较；覆盖池经HKEX港币证券目录核验，可能含GEM，不代表港股全市场',
+                                      '免费源时延未知，缺少行业分类与换手率'])
+                if etf_rows:
+                    data.update(source='sina_hk_public+tencent_etf', scope='hk_sina_tencent_hkd_pool',
+                                universe_label=f'港股港币覆盖池（新浪×腾讯ETF×HKEX · ETF {len(etf_rows)}/{etf_total}）',
+                                complete=len(etf_rows) == etf_total,
+                                etf_coverage={'requested': etf_total, 'accepted': len(etf_rows),
+                                              'unavailable': etf_total - len(etf_rows)})
+                    if len(etf_rows) < etf_total:
+                        data['warnings'].append('部分港币ETF没有有效报价，统计仅包含已取得的记录')
+                else:
+                    data['warnings'].append('腾讯ETF补充暂不可用，当前仅显示新浪覆盖池')
+            else:
+                from .us_screeners import fetch_us_screener_pool
+                rows = fetch_us_screener_pool()['quotes']
+                data = summarize(market, rows, len(rows))
+                data.update(source='yahoo_screener', scope='us_screener_pool',
+                            universe_label='美股活跃与涨跌筛选池（非全市场）',
+                            warnings=['东财全市场主快照不可用；当前为有限覆盖池，与旧全市场快照不能直接比较；仅合并公开活跃、涨幅、跌幅预设池，存在选择偏差，不能推断全市场广度'])
             quotes = {row['symbol']: row for row in rows}
+        if (market == 'us' and data.get('source') in ('eastmoney_public', 'yahoo_screener')
+                and any(not row.get('industry') for row in quotes.values())):
+            from .us_classification import enrich
+            metadata = enrich(list(quotes.values()))
+            grouped = summarize(market, list(quotes.values()), data['total_reported'])
+            data.update(industries=grouped['industries'], industry_covered=grouped['industry_covered'],
+                        classification=metadata)
         with _LOCK:
             state.update(data=data, quotes=quotes, error=None, stale=False)
     except Exception as error:

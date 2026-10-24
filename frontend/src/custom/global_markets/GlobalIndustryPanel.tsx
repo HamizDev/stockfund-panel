@@ -6,6 +6,8 @@ import { dashboardPanel, SectionTitle } from '@/components/dashboard/Primitives'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
+import { DASHBOARD_QUERY_GC_MS } from '@/lib/dashboardQueryCache'
+import { progressiveLoadingInterval } from '@/lib/progressivePolling'
 import { formatGlobalMarketChange } from './marketFormatters'
 import { changeClass } from './overviewMetrics'
 import type { IndustryMode } from './types'
@@ -21,8 +23,12 @@ export function GlobalIndustryPanel() {
   const [view, setView] = useState(savedView)
   useEffect(() => storage.globalIndustryView.set(view), [view])
   const query = useQuery({ queryKey: QK.globalIndustries(view.mode),
-    queryFn: ({ signal }) => api.globalIndustries(view.mode, signal), staleTime: 15_000,
-    refetchInterval: query => query.state.data?.loading ? 2_000 : 30_000, refetchOnWindowFocus: false })
+    queryFn: ({ signal }) => api.globalIndustries(view.mode, signal), staleTime: 15_000, gcTime: DASHBOARD_QUERY_GC_MS,
+    refetchInterval: query => {
+      const data = query.state.data
+      const progress = `${data?.date ?? ''}|${(data?.themes ?? []).map(theme => `${theme.id}:${theme.covered}/${theme.total}`).join(',')}`
+      return progressiveLoadingInterval(query, data?.loading === true, progress, 30_000)
+    }, refetchOnWindowFocus: false })
   const data = query.data?.mode === view.mode ? query.data : undefined
   const themes = data?.themes ?? []
   const preferred = ['ai_compute', 'cpo', 'pcb', 'semiconductor', 'memory', 'data_center', 'cloud', 'gold', 'petroleum', 'rare_earth']
@@ -54,6 +60,6 @@ export function GlobalIndustryPanel() {
         {data?.market === 'us' && <Link to={`/?market=us&symbol=${encodeURIComponent(member.symbol)}`} className="text-accent">看K线</Link>}
       </div>)}</div>
     </div>}
-    <p className="mt-2 flex items-start gap-1 text-[10px] leading-4 text-muted"><Info className="mt-0.5 h-3 w-3 shrink-0" /><span>自动按香港时间08:00—20:00看A股，其余看美股；可手动覆盖。代表股票篮子非官方产业指数，黄金/油气/金属为相关股票表现，非现货或期货报价。{data?.source_note ?? '免费报价可能延迟，不宣称实时暗盘。'}</span></p>
+    <p className="mt-2 flex items-start gap-1 text-[10px] leading-4 text-muted"><Info className="mt-0.5 h-3 w-3 shrink-0" /><span>自动按香港时间08:00—20:00看A股，其余看美股；可手动覆盖。代表股票篮子非官方产业指数，黄金/油气/金属为相关股票表现，非现货或期货报价。{data?.market === 'us' ? '仅保留报价日期，时区与延迟未确认，不代表实时行情或暗盘。' : '报价可能延迟，请留意各成分的数据日期。'}</span></p>
   </section>
 }

@@ -42,6 +42,7 @@ import { useCapabilities, usePreferences } from '@/lib/useSharedQueries'
 import { AnchorWrap } from '@/lib/useCardFlash'
 import { CAP_LABELS, TIER_RANK, tierRank, tierStyle, TierTag } from '@/lib/capability-labels'
 import { toast } from '@/components/Toast'
+import { ResearchSourceSettings } from '@/custom/global_markets/ResearchSourceSettings'
 import { DataSourceEditor } from './DataSourceEditor'
 import { EltdxMinuteTrial } from './EltdxMinuteTrial'
 import { TickFlowKeySection, TierHelpPopover, useInvalidateTierRelated } from './Keys'
@@ -717,6 +718,10 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
     <div className="space-y-5 max-w-5xl">
       {/* ===== 上区: 能力路由 (能力为主视图, 点标签切换提供方) ===== */}
       <CapabilityRoutingSection />
+
+      <AnchorWrap highlight={highlight} anchor="global-research">
+        <ResearchSourceSettings />
+      </AnchorWrap>
 
       {/* ===== 下区: 数据源 (源为主视图, 配置/接入) ===== */}
       <AnchorWrap highlight={highlight} anchor="data-sources">

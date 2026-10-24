@@ -6,6 +6,7 @@ import { api, type IndexInstrument, type IndexMinuteRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cnToday, marketSessionRefetchInterval, minuteRefetchInterval } from '@/lib/kline'
 import { usePageState } from '@/lib/usePageState'
+import { useMediaQuery } from '@/lib/useMediaQuery'
 import { dailyChartRows } from '@/lib/dailyChartRows'
 import { EChartsCandlestick } from '@/components/EChartsCandlestick'
 import { EChartsIntraday } from '@/components/EChartsIntraday'
@@ -62,6 +63,9 @@ function isIndexView(value: unknown): value is IndexView {
 const INDEX_REFRESH_MS = 30_000
 
 export function Indices() {
+  const wideCharts = useMediaQuery('(min-width: 1536px)')
+  const phone = useMediaQuery('(max-width: 639px)')
+  const chartHeight = wideCharts ? 620 : phone ? 360 : 480
   const qc = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const symbolParam = searchParams.get('symbol') ?? ''
@@ -110,7 +114,6 @@ export function Indices() {
   }))
 
   const selectedSymbol = validSymbolParam || selected
-  useInstrumentViewCache('indices', selectedSymbol)
   const previousSymbol = useRef(selectedSymbol)
 
   useEffect(() => {
@@ -126,7 +129,7 @@ export function Indices() {
 
   const daily = useQuery({
     queryKey: QK.indexDaily(selectedSymbol, range.start, dailyEnd),
-    queryFn: () => api.indexDaily(selectedSymbol, 180, { start: range.start, end: dailyEnd }),
+    queryFn: ({ signal }) => api.indexDaily(selectedSymbol, 180, { start: range.start, end: dailyEnd }, signal),
     meta: { instrumentView: 'indices', symbol: selectedSymbol },
     gcTime: INSTRUMENT_VIEW_GC_MS,
     enabled: !!selectedSymbol,
@@ -140,13 +143,18 @@ export function Indices() {
   // candle came from automatic selection; preserve only dates that were actually historical.
   const followsLatest = view.followLatest ?? (storedSelectedDate == null || !savedDateIsValid || storedSelectedDate === latestDailyDate)
   const selectedDate = followsLatest ? latestDailyDate : storedSelectedDate
+  useInstrumentViewCache('indices', selectedSymbol, selectedDate)
 
   const minute = useQuery({
     queryKey: QK.indexMinute(selectedSymbol, selectedDate ?? ''),
-    queryFn: () => api.indexMinute(selectedSymbol, selectedDate!),
+    queryFn: ({ signal }) => api.indexMinute(selectedSymbol, selectedDate!, signal),
     enabled: !!selectedSymbol && !!selectedDate && daily.data?.symbol === selectedSymbol
       && daily.data.rows.some(row => row.date === selectedDate),
     retry: false,
+    staleTime: INDEX_REFRESH_MS,
+    gcTime: INSTRUMENT_VIEW_GC_MS,
+    // Keep the latest-following minute result while a historical date is selected.
+    meta: { instrumentView: 'indices', symbol: selectedSymbol, minuteDate: followsLatest ? '' : selectedDate ?? '' },
     refetchInterval: minuteRefetchInterval(INDEX_REFRESH_MS),
   })
 
@@ -174,10 +182,10 @@ export function Indices() {
   const selectedIdx = selectedDate ? chartRows.findIndex(r => r.date === selectedDate) : -1
   const prevClose = selectedIdx > 0 ? chartRows[selectedIdx - 1].close : undefined
 
-  const minuteSource = currentMinute?.source === 'live' ? '在线查询'
-    : currentMinute?.source === 'none' ? '暂无有效数据'
-      : currentMinute?.source ?? '--'
-  const minuteProvider = currentMinute?.provider === 'txquote' ? '腾讯免费分时' : currentMinute?.provider
+  const minuteStatus = currentMinute?.source === 'live' ? '在线查询'
+    : currentMinute?.source === 'local' ? '本地缓存'
+      : currentMinute?.source === 'none' ? '暂无有效数据'
+        : currentMinute ? '状态未知' : '--'
 
   useEffect(() => {
     if (previousSymbol.current !== selectedSymbol) {
@@ -256,7 +264,7 @@ export function Indices() {
         <main className="min-w-0 rounded-card border border-border bg-surface p-3">
           <div className="mb-3 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
             <div className="min-w-0">
-              <div className="flex items-center gap-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
                 <Activity className="h-4 w-4 text-accent" />
                 <h2 className="truncate text-sm font-semibold text-foreground">
                   {selectedInfo?.name || selectedSymbol || '未选择指数'}
@@ -272,20 +280,22 @@ export function Indices() {
             <div className="flex flex-wrap items-center gap-2 text-xs">
               <input
                 type="date"
+                aria-label="指数日线开始日期"
                 value={range.start}
                 onChange={e => setRange(r => ({ ...r, start: e.target.value }))}
-                className="rounded-btn border border-border bg-base px-2 py-1 text-secondary outline-none focus:border-accent"
+                className="min-h-9 sm:min-h-7 min-w-0 rounded-btn border border-border bg-base px-2 py-1 text-secondary outline-none focus:border-accent"
               />
               <span className="text-muted">至</span>
               <input
                 type="date"
+                aria-label="指数日线结束日期"
                 value={dailyEnd}
                 onChange={e => setView(previous => ({
                   ...previous,
                   range: { ...previous.range, end: e.target.value },
                   rangeEndFollowsToday: false,
                 }))}
-                className="rounded-btn border border-border bg-base px-2 py-1 text-secondary outline-none focus:border-accent"
+                className="min-h-9 sm:min-h-7 min-w-0 rounded-btn border border-border bg-base px-2 py-1 text-secondary outline-none focus:border-accent"
               />
             </div>
           </div>
@@ -302,7 +312,7 @@ export function Indices() {
               <div className="min-w-0">
                 <EChartsCandlestick
                   data={chartRows}
-                  height={620}
+                  height={chartHeight}
                   showMA={true}
                   showInfoBar={true}
                   showMarkers={false}
@@ -316,7 +326,7 @@ export function Indices() {
                   activeIndicators={['vol', 'macd']}
                 />
               </div>
-              <div className="min-w-0 border-t border-border pt-3 2xl:border-l 2xl:border-t-0 2xl:pl-3 2xl:pt-0" style={{ minHeight: 620 }}>
+              <div className="min-w-0 border-t border-border pt-3 2xl:border-l 2xl:border-t-0 2xl:pl-3 2xl:pt-0" style={{ minHeight: chartHeight }}>
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[10px] text-muted">
                   <span>
                     日期 {currentMinute?.date ?? selectedDate ?? '--'}
@@ -330,16 +340,16 @@ export function Indices() {
                     }))}
                     disabled={followsLatest || !latestDailyDate}
                     aria-pressed={followsLatest}
-                    className="rounded border border-border/60 px-2 py-0.5 text-muted hover:text-foreground disabled:cursor-default disabled:opacity-60"
+                    className="min-h-9 sm:min-h-7 rounded-btn border border-border/60 px-2 py-0.5 text-muted hover:text-foreground disabled:cursor-default disabled:opacity-60"
                   >{followsLatest ? '跟随最新' : '回到最新'}</button>
                   <span>
-                    来源 {minuteSource}{minuteProvider ? ` · ${minuteProvider}` : ''}
+                    状态 {minuteStatus}
                     {' · '}{currentMinute?.history_days != null
-                      ? `近${currentMinute.history_days}个交易日，以来源实际覆盖为准`
+                      ? `近${currentMinute.history_days}个交易日，按实际覆盖`
                       : '历史范围 --'}
                   </span>
                 </div>
-                {minute.isPending && <div className="flex h-[580px] items-center justify-center text-xs text-muted">指数分时加载中…</div>}
+                {minute.isPending && <div className="flex items-center justify-center text-xs text-muted" style={{ height: chartHeight - 40 }}>指数分时加载中…</div>}
                 {minute.isError && (
                   <div role="alert" className="flex min-h-[120px] flex-col items-center justify-center gap-2 text-center">
                     <div className="text-xs text-danger">{selectedDate ?? '所选日期'} 指数分时加载失败</div>
@@ -361,7 +371,7 @@ export function Indices() {
                   <EChartsIntraday
                     key={`${selectedSymbol}:${selectedDate}`}
                     data={minuteRows}
-                    height={620}
+                    height={chartHeight}
                     prevClose={prevClose}
                     date={selectedDate ?? undefined}
                     showLimitLines={false}

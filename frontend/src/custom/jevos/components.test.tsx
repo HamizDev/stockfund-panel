@@ -60,6 +60,27 @@ it('shows local service state and separates model probabilities from win rate', 
   expect(host.textContent).toContain('不代表相关标的一定受益')
 })
 
+it('shows news and strategy queue counts separately and labels completed records as cache', async () => {
+  const item = review()
+  await render(<JevosNewsStatus status={status({ queued: 64, completed: 400,
+    queued_by_kind: { news: 12, strategy: 52 }, news: { [item.id]: item } })} isLoading={false} isError={false} />)
+
+  expect(host.textContent).toContain('快讯结果 1 条')
+  expect(host.textContent).toContain('快讯待处理 12 条')
+  expect(host.textContent).toContain('策略待处理 52 条')
+  expect(host.textContent).toContain('本机缓存 400 条')
+  expect(host.textContent).not.toContain('完成 400')
+  expect(host.textContent).not.toContain('队列 64')
+})
+
+it('falls back to the total queue count when an older API omits per-kind counts', async () => {
+  await render(<JevosNewsStatus status={status({ queued: 64, completed: 400, queued_by_kind: undefined })}
+    isLoading={false} isError={false} />)
+
+  expect(host.textContent).toContain('队列 64')
+  expect(host.textContent).toContain('本机缓存 400 条')
+})
+
 it('shows exact news evidence and weak classification without presenting calibration as accuracy', async () => {
   await render(<JevosNewsReview review={review({ label: 'neutral', method: 'choice-v2', tentative: true,
     confidence: 0.45, reason: '原文未见明确方向变化：召开例行股东大会', evidence: ['召开例行股东大会'],
