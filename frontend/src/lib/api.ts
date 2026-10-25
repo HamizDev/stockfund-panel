@@ -3285,6 +3285,18 @@ export const api = {
   watchlistClear: () =>
     request<{ removed: number }>('/api/watchlist', { method: 'DELETE' }),
   watchlistQuotes: () => request<{ quotes: Quote[] }>('/api/watchlist/quotes'),
+  watchlistSyncDaily: (force: boolean) =>
+    request<{
+      requested: string[]
+      rows_written: number
+      remaining: string[]
+      as_of: string | null
+      job_id?: string
+      warnings?: string[]
+    }>(
+      '/api/watchlist/sync-daily',
+      { method: 'POST', body: JSON.stringify({ force }), timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS, quiet: true },
+    ),
   watchlistEnriched: (extColumns?: string) =>
     request<{ rows: any[]; as_of: string | null; elapsed_ms: number }>(
       extColumns

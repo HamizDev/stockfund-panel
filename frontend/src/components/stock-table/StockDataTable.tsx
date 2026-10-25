@@ -40,6 +40,8 @@ export interface StockDataTableProps {
   renderHeaderContent?: (col: ColumnConfig) => ReactNode | undefined
   /** 外层容器 className */
   className?: string
+  /** 可滚动行情区域的无障碍名称。 */
+  ariaLabel?: string
 }
 
 function alignThClass(align: ColumnConfig['align']): string {
@@ -62,6 +64,7 @@ export function StockDataTable({
   extraHeader,
   renderHeaderContent,
   className = 'rounded-card border border-border overflow-x-auto',
+  ariaLabel = '证券行情表，左右滚动查看更多指标',
 }: StockDataTableProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const visibleColumns = columns.filter(c => c.visible)
@@ -116,7 +119,7 @@ export function StockDataTable({
   )
 
   return (
-    <div ref={containerRef} className={className}>
+    <div ref={containerRef} className={`max-w-full min-w-0 ${className}`} role="region" aria-label={ariaLabel} tabIndex={0}>
       <table className="w-full text-sm" style={{ minWidth: computedMinWidth }}>
         <thead className={theadClass}>
           <tr className="text-left text-secondary">
@@ -129,7 +132,14 @@ export function StockDataTable({
                 <th
                   key={col.id}
                   className={`${alignThClass(col.align)} ${sortable ? 'cursor-pointer select-none group' : ''}`}
+                  aria-sort={sortable ? (dir === 'asc' ? 'ascending' : dir === 'desc' ? 'descending' : 'none') : undefined}
+                  tabIndex={sortable ? 0 : undefined}
                   onClick={sortable ? () => onSortToggle!(col.id) : undefined}
+                  onKeyDown={sortable ? event => {
+                    if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return
+                    event.preventDefault()
+                    onSortToggle!(col.id)
+                  } : undefined}
                 >
                   {contentOverride !== undefined ? contentOverride : col.label}
                   {sortable && (

@@ -13,6 +13,7 @@ import {
   TrendingUp,
 } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
+import { SectorAnalysisTabs } from '@/components/SectorAnalysisTabs'
 import { EmptyState } from '@/components/EmptyState'
 import { AnalysisConfigDialog, DimensionHeatmap, PresetFetchState, type AnalysisFieldConfig } from '@/components/analysis-shared'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -386,7 +387,7 @@ export function IndustryAnalysis() {
   }
 
   if (configsQuery.isLoading) {
-    return <div className="flex h-full items-center justify-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>
+    return <><PageHeader title="板块研究" titleExtra={<SectorAnalysisTabs />} className="pl-14 sm:pl-5" /><div role="status" aria-label="正在读取行业配置" className="flex min-h-48 items-center justify-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div></>
   }
 
   if (!activeConfig) {
@@ -395,7 +396,9 @@ export function IndustryAnalysis() {
       <>
         <div className="flex h-full flex-col">
           <PageHeader
-            title="行业分析"
+            title="板块研究"
+            titleExtra={<SectorAnalysisTabs />}
+            className="pl-14 sm:pl-5"
             right={
               <button onClick={() => setShowConfig(true)} className="p-1.5 text-muted hover:bg-surface hover:text-accent" title="配置数据源">
                 <Settings2 className="h-4 w-4" />
@@ -422,7 +425,9 @@ export function IndustryAnalysis() {
   return (
     <>
       <PageHeader
-        title="行业分析"
+        title="板块研究"
+        titleExtra={<SectorAnalysisTabs />}
+        className="pl-14 sm:pl-5"
         subtitle={`${industryLevelLabel} · ${marketQuery.data?.as_of ?? rowsQuery.data?.date ?? '最新'} · ${stats.length} 个行业 · ${totalSymbols} 只标的`}
         right={
           <div className="flex items-center gap-1">
@@ -451,7 +456,7 @@ export function IndustryAnalysis() {
 
       <div className="min-h-full bg-[radial-gradient(circle_at_12%_0%,rgba(245,158,11,0.12),transparent_28%),radial-gradient(circle_at_85%_8%,rgba(244,63,94,0.08),transparent_28%)] px-6 py-5">
         <div className="mx-auto max-w-[1440px] space-y-5">
-          <SectorRotationCard kind="industry" />
+          <SectorRotationCard kind="industry" referenceDate={marketQuery.data?.as_of ?? rowsQuery.data?.date ?? undefined} />
 
           <HeroPanel leading={leading[0]} falling={falling[0]} activeIndustry={activeIndustry} industryBreadth={industryBreadth} />
 

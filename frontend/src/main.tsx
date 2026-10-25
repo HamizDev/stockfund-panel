@@ -4,6 +4,8 @@ import { RouterProvider } from 'react-router-dom'
 import { QueryClient, QueryClientProvider, QueryCache } from '@tanstack/react-query'
 import { initializeFrontendExtensions } from './extensions/bootstrap'
 import { installDashboardQueryCache } from './lib/dashboardQueryCache'
+import { PageLoadingState, PageStartupError } from './components/PageLoadingState'
+import { MotionConfig } from 'framer-motion'
 import './index.css'
 
 // 全局认证拦截: 任何 query/mutation 收到 401 (未登录/会话过期) → 跳登录页。
@@ -45,18 +47,23 @@ const queryClient = new QueryClient({
 
 installDashboardQueryCache(queryClient)
 
+const appRoot = ReactDOM.createRoot(document.getElementById('root')!)
+appRoot.render(<PageLoadingState title="正在启动看板" />)
+
 async function bootstrap() {
   await initializeFrontendExtensions()
   const { router } = await import('./router')
   // App 成功启动 → 清除 chunk 自动刷新标记, 下次 chunk 加载失败时仍有一次自动刷新机会。
-  sessionStorage.removeItem('tsp-chunk-reloaded')
-  ReactDOM.createRoot(document.getElementById('root')!).render(
+  try { sessionStorage.removeItem('tsp-chunk-reloaded') } catch { /* Storage may be disabled; keep the app usable. */ }
+  appRoot.render(
     <React.StrictMode>
-      <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} />
-      </QueryClientProvider>
+      <MotionConfig reducedMotion="user">
+        <QueryClientProvider client={queryClient}>
+          <RouterProvider router={router} />
+        </QueryClientProvider>
+      </MotionConfig>
     </React.StrictMode>,
   )
 }
 
-void bootstrap()
+void bootstrap().catch(() => appRoot.render(<PageStartupError />))

@@ -62,7 +62,9 @@ import {
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { GroupedNavigation } from './GroupedNavigation'
-import { navigationGroupForPath, type NavigationGroupId } from '@/lib/navigationGroups'
+import { PageLoadingState } from './PageLoadingState'
+import { scheduleRoutePreload } from '@/lib/routePreload'
+import { consolidateNavigationItems, mergedNavigationIdForPath, navigationGroupForPath, type MergedNavigationTargets, type NavigationGroupId } from '@/lib/navigationGroups'
 import { api, type CapabilityMatrix, type IndexQuote } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { useIsDesktop } from '@/lib/useMediaQuery'
@@ -380,7 +382,18 @@ export function Layout() {
   // 自选分组 — 仅当用户开启「显示在侧边栏」时拉取
   const groupsInNav = prefs?.watchlist_groups_in_nav ?? false
   const location = useLocation()
+  const preloadIntent = useRef<{ href: string; cancel: () => void } | null>(null)
+  useEffect(() => () => preloadIntent.current?.cancel(), [])
+  useEffect(() => {
+    preloadIntent.current?.cancel()
+    preloadIntent.current = null
+  }, [location.pathname])
   const [openNavigationGroup, setOpenNavigationGroup] = useState<NavigationGroupId | null>(() => navigationGroupForPath(location.pathname))
+  const mergedNavigationTargets = useRef<MergedNavigationTargets>({})
+  useEffect(() => {
+    const id = mergedNavigationIdForPath(location.pathname)
+    if (id) mergedNavigationTargets.current[id] = location.pathname + location.search
+  }, [location.pathname, location.search])
   useEffect(() => { setOpenNavigationGroup(navigationGroupForPath(location.pathname)) }, [location.pathname])
   const { data: watchlistGroupsData } = useQuery({
     queryKey: QK.watchlistGroups,
@@ -406,6 +419,12 @@ export function Layout() {
   const isDesktop = useIsDesktop()
   // 桌面 hidden 态的左缘悬浮按钮: hover 1s 以 overlay 预览 (不挤压主区), 点击固定展开 (push)
   const [overlayPreview, setOverlayPreview] = useState(false)
+  const sidebarInteractive = isDesktop ? navState !== 'hidden' || overlayPreview : drawerOpen
+  useEffect(() => {
+    if (sidebarInteractive) return
+    preloadIntent.current?.cancel()
+    preloadIntent.current = null
+  }, [sidebarInteractive])
   const overlayTimer = useRef<number | undefined>(undefined)
   const setNavStatePersist = (s: NavState) => {
     setNavState(s)
@@ -589,6 +608,7 @@ export function Layout() {
 
   const hiddenIds = new Set(prefs?.nav_hidden ?? [])
   const visibleNavItems = navItems.filter(n => !hiddenIds.has(n.to) && !hiddenIds.has(n.to.replace(/^\/analysis\//, '')))
+  const compactNavItems = consolidateNavigationItems(visibleNavItems, location.pathname + location.search, mergedNavigationTargets.current)
 
   const doEnableRealtime = async () => {
     await toggleQuote.mutateAsync(true)
@@ -672,6 +692,8 @@ export function Layout() {
         </button>
       )}
       <aside
+        {...(!sidebarInteractive ? { inert: '' } : {})}
+        aria-hidden={!sidebarInteractive || undefined}
         onMouseLeave={() => { if (overlayPreview) setOverlayPreview(false) }}
         className={cn(
           'bg-surface flex flex-col min-h-0 overflow-hidden',
@@ -740,9 +762,29 @@ export function Layout() {
           )}
         </div>
 
-        <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
+        <nav
+          className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5"
+          onPointerOver={event => {
+            if (!sidebarInteractive || event.pointerType !== 'mouse' || !(event.target instanceof Element)) return
+            const link = event.target.closest<HTMLAnchorElement>('a[href]')
+            if (!link || !event.currentTarget.contains(link) || preloadIntent.current?.href === link.href) return
+            preloadIntent.current?.cancel()
+            preloadIntent.current = { href: link.href, cancel: scheduleRoutePreload(link.href) }
+          }}
+          onPointerLeave={() => {
+            preloadIntent.current?.cancel()
+            preloadIntent.current = null
+          }}
+          onFocusCapture={event => {
+            if (!sidebarInteractive || !(event.target instanceof Element)) return
+            const link = event.target.closest<HTMLAnchorElement>('a[href]')
+            if (!link || !event.currentTarget.contains(link)) return
+            preloadIntent.current?.cancel()
+            preloadIntent.current = { href: link.href, cancel: scheduleRoutePreload(link.href, { immediate: true }) }
+          }}
+        >
           <GroupedNavigation
-            items={visibleNavItems}
+            items={compactNavItems}
             pathname={location.pathname}
             openGroup={openNavigationGroup}
             onGroupChange={setOpenNavigationGroup}
@@ -1066,7 +1108,7 @@ export function Layout() {
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-        className="h-full overflow-auto scrollbar-gutter-stable"
+        className="h-full min-w-0 overflow-auto scrollbar-gutter-stable"
       >
         {streamStatus === 'reconnecting' && (
           <div
@@ -1079,11 +1121,7 @@ export function Layout() {
           </div>
         )}
         <Suspense
-          fallback={
-            <div className="flex items-center justify-center py-24">
-              <Loader2 className="h-5 w-5 animate-spin text-muted" />
-            </div>
-          }
+          fallback={<PageLoadingState />}
         >
           <Outlet />
         </Suspense>

@@ -7,6 +7,7 @@ import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Rows3, BarChart3,
 import { api, type KlineRow, type MinuteKlineRow, type WatchlistGroup, type WatchlistGroupColor } from '@/lib/api'
 import { fetchMinuteBatchIncremental } from '@/lib/minuteBatchIncremental'
 import { QK } from '@/lib/queryKeys'
+import { useWatchlistDailyRefresh } from '@/lib/useWatchlistDailyRefresh'
 import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
 import { cn } from '@/lib/cn'
@@ -580,7 +581,7 @@ const StockCard = React.memo(function StockCard({
         {/* 第二行: 大价格 + 涨跌幅胶囊 */}
         <div className="flex items-end justify-between gap-2 mb-2">
           <span className={`text-xl tabular-nums tracking-tighter leading-none ${priceColorClass(pct)}`}>
-            {fmtPrice(price)}
+            {fmtPrice(price, r.asset_type === 'etf' ? 3 : 2)}
           </span>
           {pct != null && (
             <span className={`shrink-0 inline-flex items-center px-1.5 py-[2px] rounded text-[11px] tabular-nums ${pctBg}`}>
@@ -809,6 +810,7 @@ export function Watchlist() {
     queryFn: () => api.watchlistEnriched(extColumnsParam || undefined),
     enabled: (list.data?.symbols.length ?? 0) > 0,
   })
+  const dailyRefresh = useWatchlistDailyRefresh(enriched.data?.rows ?? [], enriched.isSuccess, () => { void enriched.refetch() })
 
   const symbols = enriched.data?.rows?.map((r: any) => r.symbol) ?? []
   const symbolsKey = symbols.join(',')
@@ -1341,7 +1343,7 @@ export function Watchlist() {
   )
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex h-full min-w-0 flex-col">
       <PageHeader
         title="自选股"
         titleExtra={
@@ -1355,14 +1357,18 @@ export function Watchlist() {
             </span>
             {/* 数据未就绪提示: 自选了但 enriched 缓存未覆盖 (新股/冷门/新用户未同步), 指标全为 null */}
             {pendingCount > 0 && (
-              <span
+              <button
+                type="button"
+                onClick={dailyRefresh.refresh}
+                disabled={dailyRefresh.isPending}
                 className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-muted/15 text-muted border border-border/50 whitespace-nowrap"
-                title={`当前有 ${pendingCount} 只指标暂未就绪 (新股/冷门股或数据尚未同步), 等待每日数据更新后自动补全`}
+                title={`当前有 ${pendingCount} 只指标暂未就绪；ETF会按需补拉日线和指标，点击可重试`}
               >
                 <Clock className="h-2.5 w-2.5" />
-                待数据 {pendingCount}
-              </span>
+                {dailyRefresh.isPending ? '补齐中…' : `待数据 ${pendingCount}`}
+              </button>
             )}
+            {dailyRefresh.error && <span role="alert" className="max-w-80 text-[11px] text-warning">{dailyRefresh.error}</span>}
             {/* 过滤提示: 仅在有筛选隐藏时出现, 柔和橙色融入整体 */}
             {hiddenCount > 0 && (
               <span
@@ -1376,7 +1382,7 @@ export function Watchlist() {
           </span>
         }
         right={
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             {/* 筛选 / 重置 / 搜索 */}
             <button
               onClick={() => setFilterOpen(v => !v)}
@@ -1464,12 +1470,12 @@ export function Watchlist() {
               <Settings2 className="h-4 w-4" />
             </button>
             <button
-              onClick={() => enriched.refetch()}
-              disabled={enriched.isFetching}
+              onClick={dailyRefresh.refresh}
+              disabled={enriched.isFetching || dailyRefresh.isPending}
               className="inline-flex items-center justify-center h-8 w-8 rounded-btn bg-elevated hover:bg-elevated/80 text-secondary hover:text-foreground transition-colors duration-150 ease-smooth disabled:opacity-50"
-              title="刷新"
+              title="刷新数据并补拉ETF日线"
             >
-              <RefreshCw className={`h-4 w-4 ${enriched.isFetching ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`h-4 w-4 ${enriched.isFetching || dailyRefresh.isPending ? 'animate-spin' : ''}`} />
             </button>
             {allSymbols.length > 0 && (
               <>
@@ -1613,8 +1619,8 @@ export function Watchlist() {
       )}
 
       {/* 可滚动列表区 — 占满剩余高度，内部独立滚动，表头 sticky 固定 */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        <div className="px-5 py-3">
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+        <div className="min-w-0 px-3 py-3 sm:px-5">
           {/* 列表 */}
           {watchlistContentLoading ? (
             <div className="text-sm text-muted">加载中…</div>
@@ -1730,14 +1736,14 @@ export function Watchlist() {
                 if (key === 'symbol') {
                   const board = boardTag(r.symbol)
                   return (
-                    <td className="px-1.5 py-1.5">
-                      <div className="flex items-center gap-1 w-full">
+                    <td className="px-1.5 py-1.5 max-sm:w-56 max-sm:min-w-56 max-sm:max-w-56">
+                      <div className="flex w-full items-center gap-1">
                         <button
                           type="button"
                           onClick={() => { setPreviewSymbol(r.symbol); setPreviewName(name ?? '') }}
-                          className="flex items-center gap-1 text-left min-w-0"
+                          className="flex min-w-0 flex-1 items-center gap-x-1 text-left max-sm:flex-wrap"
                         >
-                          <span className="text-xs font-medium text-foreground truncate group-hover:text-accent transition-colors duration-150">{name || '名称暂缺'}</span>
+                          <span className="text-xs font-medium text-foreground truncate group-hover:text-accent transition-colors duration-150 max-sm:basis-full">{name || '名称暂缺'}</span>
                           <span className="font-mono text-muted text-[10px]">{r.symbol}</span>
                           {board ? (
                             <span className={`shrink-0 inline-flex items-center justify-center w-[18px] h-[18px] rounded text-[9px] font-bold leading-none border ${board.color}`}>
@@ -1810,7 +1816,7 @@ export function Watchlist() {
                 // 实时行情列：price/pct/amount 使用 rt_ 回退（自选页有实时推送）
                 const numCls = 'px-2 py-1.5 text-right num tabular-nums'
                 if (key === 'price') {
-                  return <td className={`${numCls} ${priceColorClass(pct)}`}>{fmtPrice(price)}</td>
+                  return <td className={`${numCls} ${priceColorClass(pct)}`}>{fmtPrice(price, r.asset_type === 'etf' ? 3 : 2)}</td>
                 }
                 if (key === 'pct') {
                   return <td className={`${numCls} ${priceColorClass(pct)}`}>{fmtPct(pct)}</td>

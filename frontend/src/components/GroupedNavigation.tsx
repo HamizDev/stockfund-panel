@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react'
-import { ChevronDown, ChevronRight, Database, Gauge, LayoutDashboard, RadioTower, ScanSearch, Sparkles, Wallet } from 'lucide-react'
+import { ChevronDown, ChevronRight, Database, Gauge, LayoutDashboard, RadioTower, ScanSearch, Wallet } from 'lucide-react'
 import { cn } from '@/lib/cn'
 import { groupNavigationItems, navigationGroupForPath, type NavigationGroupId } from '@/lib/navigationGroups'
 
-const icons = { overview: LayoutDashboard, market: Gauge, ai: Sparkles, holdings: Wallet, strategy: ScanSearch, news: RadioTower, tools: Database }
+const icons = { overview: LayoutDashboard, market: Gauge, holdings: Wallet, strategy: ScanSearch, news: RadioTower, tools: Database }
 
 export function GroupedNavigation<T extends { to: string }>({
   items, pathname, openGroup, onGroupChange, railMode, onExpandRail, renderItem,
@@ -18,8 +18,7 @@ export function GroupedNavigation<T extends { to: string }>({
 }) {
   return groupNavigationItems(items).map(group => {
     const Icon = icons[group.id]
-    const active = group.items.some(item => item.to === pathname) ||
-      (pathname.startsWith('/analysis/') && navigationGroupForPath(pathname) === group.id)
+    const active = navigationGroupForPath(pathname) === group.id
     const expanded = !railMode && openGroup === group.id
     return (
       <div key={group.id}>

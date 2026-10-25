@@ -1065,7 +1065,11 @@ class KlineRepository:
 
         return df_hist, agg_a
 
-    def _refresh_etf_enriched(self) -> None:
+    def refresh_etf_enriched(self) -> None:
+        """Publish refreshed ETF indicators without clearing the stock snapshot."""
+        self._refresh_etf_enriched(strict=True)
+
+    def _refresh_etf_enriched(self, *, strict: bool = False) -> None:
         """从 ETF enriched parquet 加载最新日到内存缓存。"""
         try:
             enriched_dir = self.store.data_dir / "kline_etf_enriched"
@@ -1074,6 +1078,8 @@ class KlineRepository:
                 if p.is_dir() and p.name.startswith("date=")
             ) if enriched_dir.exists() else []
             if not dates:
+                if strict:
+                    raise RuntimeError('ETF enriched partitions unavailable')
                 self._etf_enriched_cache = None
                 self._etf_enriched_cache_date = None
                 return
@@ -1081,6 +1087,8 @@ class KlineRepository:
             target_parquet = enriched_dir / f"date={dates[-1]}" / "part.parquet"
             df_latest = pl.read_parquet(target_parquet)
             if df_latest.is_empty():
+                if strict:
+                    raise RuntimeError('ETF enriched latest partition is empty')
                 return
 
             from datetime import timedelta
@@ -1098,12 +1106,17 @@ class KlineRepository:
                 priority="background",
             )
             if df_hist.is_empty():
-                self._etf_enriched_cache = df_latest.sort(["symbol"])
+                refreshed = df_latest.sort(["symbol"])
             else:
                 df_full = compute_signals(compute_indicators(df_hist))
-                self._etf_enriched_cache = df_full.filter(pl.col("date") == latest).sort(["symbol"])
+                refreshed = df_full.filter(pl.col("date") == latest).sort(["symbol"])
+            if strict and refreshed.is_empty():
+                raise RuntimeError('ETF enriched refresh produced an empty snapshot')
+            self._etf_enriched_cache = refreshed
             self._etf_enriched_cache_date = latest
         except Exception as e:  # noqa: BLE001
+            if strict:
+                raise
             logger.debug("ETF enriched 缓存刷新跳过: %s", e)
 
     def _refresh_index_enriched(self) -> None:

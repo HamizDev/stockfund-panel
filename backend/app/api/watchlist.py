@@ -685,6 +685,38 @@ def watchlist_enriched(
     return {"rows": rows, "as_of": str(as_of) if as_of else None, "elapsed_ms": elapsed}
 
 
+class SyncDailyRequest(BaseModel):
+    force: bool = False
+
+
+@router.post('/sync-daily')
+def sync_watchlist_daily(body: SyncDailyRequest, request: Request):
+    """Repair only the current watchlist's ETF history, outside the GET hot path."""
+    from app.api.data import invalidate_storage_cache
+    from app.services.watchlist_refresh import (
+        WatchlistRefreshBusyError,
+        WatchlistRefreshLimitError,
+        sync_etfs,
+    )
+
+    try:
+        result = sync_etfs(
+            request.app.state.repo,
+            request.app.state.capabilities,
+            getattr(request.app.state, 'quote_service', None),
+            force=body.force,
+        )
+    except WatchlistRefreshBusyError as error:
+        raise HTTPException(409, str(error)) from None
+    except WatchlistRefreshLimitError as error:
+        raise HTTPException(422, str(error)) from None
+    except Exception:
+        raise HTTPException(502, '自选ETF日线补拉未完成。原有数据保留。请稍后重试') from None
+
+    invalidate_storage_cache()
+    return result
+
+
 def _parse_ext_columns(ext_columns: str) -> list[tuple[str, str]]:
     """解析 'config_id1.field1,config_id2.field2' 为 [(config_id, field_name), ...]"""
     result = []

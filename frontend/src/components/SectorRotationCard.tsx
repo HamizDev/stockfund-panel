@@ -173,7 +173,22 @@ const NO_DATA_HINTS: Record<string, string> = {
   no_member_bars: '当日分钟数据中没有板块成分股的行情',
 }
 
-export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
+function minuteDataBehind(date?: string, referenceDate?: string): boolean {
+  const isoDate = /^\d{4}-\d{2}-\d{2}$/
+  return !!date && !!referenceDate && isoDate.test(date) && isoDate.test(referenceDate) && date < referenceDate
+}
+
+export function SectorRotationFreshness({ date, asOf, referenceDate }: { date?: string; asOf?: string; referenceDate?: string }) {
+  if (!minuteDataBehind(date, referenceDate)) return null
+  return (
+    <div role="status" aria-label="分钟数据时效" className="mb-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-300">
+      分钟数据滞后：截至 {date}{asOf ? ` ${asOf}` : ''}；本页市场数据已到 {referenceDate}。
+      当前展示历史回放，重新读取不会补齐缺失分钟，请检查全量分钟采集。
+    </div>
+  )
+}
+
+export function SectorRotationCard({ kind, referenceDate }: { kind: 'concept' | 'industry'; referenceDate?: string }) {
   const dimLabel = kind === 'industry' ? '行业' : '概念'
   const [flow, setFlow] = useState<string>(() => localStorage.getItem(`${FLOW_LS_PREFIX}${kind}`) ?? '')
   const [bucket, setBucket] = useState(5)
@@ -252,6 +267,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
     staleTime: 25_000,
   })
   const data = rotationQuery.data
+  const delayed = data?.status === 'ok' && minuteDataBehind(data.date, referenceDate)
   // 编辑器展示名单: 未自定义时用后端内置名单预填 (响应缺省时为空)
   const effectiveExclude = excludeNames ?? (data?.default_exclude_sectors ?? [])
   const displayNames = data?.series?.sectors ?? []
@@ -704,7 +720,9 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />盘中
             </span>
           ) : (
-            <span className="rounded bg-elevated px-1.5 py-0.5 text-[9px] text-muted">回放 · {data.date}</span>
+            <span className={cn('rounded px-1.5 py-0.5 text-[9px]', delayed ? 'bg-amber-400/15 text-amber-300' : 'bg-elevated text-muted')}>
+              {delayed ? '数据滞后' : '回放'} · {data.date}
+            </span>
           )
         )}
         <span className="text-[10px] text-muted">
@@ -789,9 +807,15 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
           >
             {[1, 5, 15].map(value => <option key={value} value={value}>{value}分钟</option>)}
           </select>
-          <RefreshCw className={`h-3 w-3 text-muted ${rotationQuery.isFetching ? 'animate-spin text-accent' : ''}`} />
+          <button type="button" aria-label="刷新轮动数据" title="重新读取已采集的轮动数据"
+            disabled={rotationQuery.isFetching} onClick={() => { void rotationQuery.refetch() }}
+            className="rounded border border-border p-1 text-muted hover:text-accent disabled:opacity-50">
+            <RefreshCw className={`h-3 w-3 ${rotationQuery.isFetching ? 'animate-spin text-accent' : ''}`} />
+          </button>
         </div>
       </div>
+
+      {data?.status === 'ok' && <SectorRotationFreshness date={data.date} asOf={data.as_of} referenceDate={referenceDate} />}
 
       {rotationQuery.isLoading ? (
         <div className="flex h-36 items-center justify-center text-xs text-muted">正在聚合全市场分钟数据…</div>

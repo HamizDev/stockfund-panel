@@ -95,3 +95,10 @@ describe('watchlist columns: 自选加入信息列', () => {
     expect(merged.map(c => c.id).slice(-2)).toEqual(['builtin:added_at', 'builtin:pct_since_added'])
   })
 })
+
+describe('watchlist columns: 60D momentum field', () => {
+  it('reads the backend 60-day field rather than the generic momentum alias', () => {
+    const col = BUILTIN_COLUMNS.find(column => column.id === 'builtin:momentum_60d')
+    expect(col?.source).toEqual({ type: 'builtin', key: 'momentum_60d' })
+  })
+})

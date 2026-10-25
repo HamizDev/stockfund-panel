@@ -825,7 +825,7 @@ function ChinaDashboard() {
       </AnimatePresence>
       {/* 无除权因子能力时的同步前置确认 */}
       {adjGate.dialog}
-      <div className="relative mb-1.5 flex flex-wrap items-center justify-between gap-2 overflow-hidden rounded-card border border-border bg-gradient-to-r from-surface/90 to-surface/70 px-3 py-1.5 shadow-[0_1px_3px_hsl(var(--border)/0.4)] backdrop-blur-sm">
+      <div className="relative mb-1.5 flex flex-wrap items-center justify-between gap-2 overflow-hidden rounded-card border border-border bg-gradient-to-r from-surface/90 to-surface/70 px-3 py-1.5 pl-12 md:pl-3 shadow-[0_1px_3px_hsl(var(--border)/0.4)] backdrop-blur-sm">
         <div className="pointer-events-none absolute left-0 top-0 h-full w-1 bg-gradient-to-b from-accent to-accent/20" aria-hidden />
         <div className="flex items-center gap-2">
           <Gauge className="h-4 w-4 text-accent" />
@@ -885,7 +885,7 @@ function ChinaDashboard() {
         {data.indices.map(item => <IndexTicker key={item.symbol} item={item} />)}
       </div>
 
-      <div className="mb-1.5 grid grid-cols-3 gap-1 lg:grid-cols-6">
+      <div className="mb-1.5 grid grid-cols-2 gap-1 sm:grid-cols-3 lg:grid-cols-6">
         <KpiCell label="个股涨 / 平 / 跌" value={<><span className="text-bull">{data.breadth.up}</span><span className="text-muted">/</span><span className="text-muted">{data.breadth.flat}</span><span className="text-muted">/</span><span className="text-bear">{data.breadth.down}</span></>} sub={`上涨率 ${data.breadth.up_pct.toFixed(1)}%`} />
         <KpiCell label="强势 / 弱势" value={<><span className="text-bull">{strongUp}</span><span className="text-muted">/</span><span className="text-bear">{strongDown}</span></>} sub="涨跌 ≥3%" />
         <KpiCell label={<span className="inline-flex items-center gap-1"><span title={data.limit.scope ? `${data.limit.scope.label}；有效覆盖 ${data.limit.scope.covered} 只。与排除ST、北交所或使用封单修正的口径可能不同。` : '价格触及涨跌停口径'}>涨停 / 跌停</span><SealedBadge degraded={isSealedDegrade} hasDepth={hasDepth} isHistorical={false} sealedReady={sealedReady} sealedCountsUp={data.limit.sealed_counts_up} sealedCountsDown={data.limit.sealed_counts_down} rawUp={data.limit.limit_up} rawDown={data.limit.limit_down} invalidateKeys={['dashboard-init', 'overview-market', 'limit-ladder']} /></span>} value={<><span className="text-bull">{data.limit.limit_up}</span><span className="text-muted">/</span><span className="text-bear">{data.limit.limit_down}</span></>} sub={data.limit.scope ? `含ST/北交所 · 非ST ${data.limit.scope.non_st_up}/${data.limit.scope.non_st_down}` : `价格口径 · 封板率 ${(data.limit.seal_rate ?? 0).toFixed(0)}%`} />

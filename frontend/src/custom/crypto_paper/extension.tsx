@@ -1,4 +1,4 @@
-import { Coins } from 'lucide-react'
+import { Coins, Landmark } from 'lucide-react'
 import { lazy } from 'react'
 import type { FrontendExtension } from '@/extensions/types'
 
@@ -14,7 +14,10 @@ const extension: FrontendExtension = {
     { id: 'crypto-paper', path: '/crypto-paper', component: CryptoPaperRoute },
     { id: 'crypto-demo', path: '/crypto-demo', component: OfficialDemoRoute },
   ],
-  navigation: [{ id: 'crypto-paper', routeId: 'crypto-paper', label: '数字资产模拟', icon: Coins, order: 333 }],
+  navigation: [
+    { id: 'crypto-paper', routeId: 'crypto-paper', label: '数字资产模拟', icon: Coins, order: 333 },
+    { id: 'crypto-demo', routeId: 'crypto-demo', label: '交易所模拟', icon: Landmark, order: 334 },
+  ],
 }
 
 export default extension
