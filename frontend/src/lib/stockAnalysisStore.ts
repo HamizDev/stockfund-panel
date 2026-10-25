@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react'
+import type { ReportEvidence } from '@/custom/research_tools/types'
 import { api, friendlyStreamError, type PriceLevel, type LevelType } from './api'
 
 /**
@@ -15,6 +16,7 @@ import { api, friendlyStreamError, type PriceLevel, type LevelType } from './api
 export type Phase = 'loading' | 'streaming' | 'done' | 'error'
 
 export interface ActiveTask {
+  evidence?: ReportEvidence
   id: string
   symbol: string
   name: string
@@ -40,6 +42,7 @@ export interface ActiveTask {
 }
 
 export interface HistoryReport {
+  evidence?: ReportEvidence
   id: string
   symbol: string
   name: string
@@ -248,6 +251,9 @@ async function runStream(id: string, symbol: string, _name: string, focus: strin
         case 'error':
           patchTask(id, { phase: 'error', error: chunk.message ?? '分析失败' })
           return
+        case 'evidence':
+          patchTask(id, { evidence: chunk.evidence })
+          break
         case 'done':
           patchTask(id, { phase: 'done' })
           break
@@ -264,6 +270,7 @@ async function runStream(id: string, symbol: string, _name: string, focus: strin
         const res = await api.stockAnalysisReportSave({
           symbol: final.symbol, name: final.name, focus: final.focus,
           content: final.content, summary: final.meta?.summary ?? '',
+          evidence: final.evidence,
           close: final.meta?.close ?? null, levels: final.meta?.levels,
           as_of: final.meta?.as_of,
           requested_at: final.meta?.requested_at,

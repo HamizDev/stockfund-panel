@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.15' and sys_platform == 'win32'",
@@ -1959,6 +1959,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pypdf"
+version = "6.21.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/06/28/081f1cbcca7042441dafc8de00f48ba60853f89e5bff92c5f26477346d81/pypdf-6.21.2.tar.gz", hash = "sha256:0a3e1c5c886a1be03646c16a04827cc166c2a0575c971b26a4bf89686551c2d4", size = 7144571, upload-time = "2026-10-21T16:44:55.272Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1b/4d/c9d2d67f204eff463237a1a8f5e25a6923b7b1043982b91fcaf104c8ef60/pypdf-6.21.2-py3-none-any.whl", hash = "sha256:1d44d1a3a200f25062adff0085b02040e4646431ac2ccac22e42679e91466084", size = 407766, upload-time = "2026-10-21T16:44:53.626Z" },
+]
+
+[[package]]
 name = "pypinyin"
 version = "0.55.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2483,37 +2492,8 @@ wheels = [
 ]
 
 [[package]]
-name = "threadpoolctl"
-version = "3.6.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/b7/4d/08c89e34946fce2aec4fbb45c9016efd5f4d7f24af8e5d93296e935631d8/threadpoolctl-3.6.0.tar.gz", hash = "sha256:8ab8b4aa3491d812b623328249fab5302a68d2d71745c8a4c719a2fcaba9f44e", size = 21274, upload-time = "2025-03-13T13:49:23.031Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/32/d5/f9a850d79b0851d1d4ef6456097579a9005b31fea68726a4ae5f2d82ddd9/threadpoolctl-3.6.0-py3-none-any.whl", hash = "sha256:43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb", size = 18638, upload-time = "2025-03-13T13:49:21.846Z" },
-]
-
-[[package]]
-name = "tickflow"
-version = "0.1.25"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/d1/c9/facd0cd7568ea3c7dcfb0d52ded7d0b52ad871ca45fa97d7df0925b26091/tickflow-0.1.25.tar.gz", hash = "sha256:a86929bc99167014567c3d8b99af1c2f498922ad476bb4507edb57164c576d04", size = 37357, upload-time = "2026-08-29T04:43:27.255Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ea/37/f80b8f6e435f1825ea8384b1605a01c323998f00b1c112c59e72a9d7dd9a/tickflow-0.1.25-py3-none-any.whl", hash = "sha256:69687235e85b44eae077262325ddef15e82d5adafda075945612f8cf0815a44c", size = 43510, upload-time = "2026-08-29T04:43:25.785Z" },
-]
-
-[package.optional-dependencies]
-all = [
-    { name = "pandas" },
-    { name = "tqdm" },
-    { name = "websockets" },
-]
-
-[[package]]
 name = "stockfund-panel-backend"
-version = "0.0.9"
+version = "0.0.10"
 source = { editable = "." }
 dependencies = [
     { name = "apscheduler" },
@@ -2532,6 +2512,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "pypdf" },
     { name = "pypinyin" },
     { name = "pytesseract" },
     { name = "python-dotenv" },
@@ -2580,6 +2561,7 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=16.0" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.4" },
+    { name = "pypdf", specifier = "==6.21.2" },
     { name = "pypinyin", specifier = ">=0.50" },
     { name = "pytesseract", specifier = ">=0.3.10" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
@@ -2596,6 +2578,35 @@ requires-dist = [
     { name = "winotify", marker = "sys_platform == 'win32'", specifier = ">=1.1" },
 ]
 provides-extras = ["legacy-cpu", "backtest", "desktop", "dev"]
+
+[[package]]
+name = "threadpoolctl"
+version = "3.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b7/4d/08c89e34946fce2aec4fbb45c9016efd5f4d7f24af8e5d93296e935631d8/threadpoolctl-3.6.0.tar.gz", hash = "sha256:8ab8b4aa3491d812b623328249fab5302a68d2d71745c8a4c719a2fcaba9f44e", size = 21274, upload-time = "2025-03-13T13:49:23.031Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/d5/f9a850d79b0851d1d4ef6456097579a9005b31fea68726a4ae5f2d82ddd9/threadpoolctl-3.6.0-py3-none-any.whl", hash = "sha256:43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb", size = 18638, upload-time = "2025-03-13T13:49:21.846Z" },
+]
+
+[[package]]
+name = "tickflow"
+version = "0.1.25"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d1/c9/facd0cd7568ea3c7dcfb0d52ded7d0b52ad871ca45fa97d7df0925b26091/tickflow-0.1.25.tar.gz", hash = "sha256:a86929bc99167014567c3d8b99af1c2f498922ad476bb4507edb57164c576d04", size = 37357, upload-time = "2026-08-29T04:43:27.255Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ea/37/f80b8f6e435f1825ea8384b1605a01c323998f00b1c112c59e72a9d7dd9a/tickflow-0.1.25-py3-none-any.whl", hash = "sha256:69687235e85b44eae077262325ddef15e82d5adafda075945612f8cf0815a44c", size = 43510, upload-time = "2026-08-29T04:43:25.785Z" },
+]
+
+[package.optional-dependencies]
+all = [
+    { name = "pandas" },
+    { name = "tqdm" },
+    { name = "websockets" },
+]
 
 [[package]]
 name = "tqdm"

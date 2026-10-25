@@ -6,7 +6,7 @@
  * 多账户: 所有查询按账户隔离 (queryKey 前缀 'paper'), 切换即换一套数据。
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as echarts from 'echarts'
 import { Banknote, CircleDollarSign, GitCompare, PieChart, Plus, Settings, TrendingUp, Wallet, X } from 'lucide-react'
@@ -1278,6 +1278,7 @@ export function Paper() {
         right={
           <div className="flex min-w-0 max-w-full flex-wrap items-center justify-start gap-2 md:justify-end">
             {viewSwitch}
+            <Link to={`/research-tools?tab=portfolio&account=${encodeURIComponent(accId)}`} className="rounded-btn border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs text-accent">持仓体检</Link>
             <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
               <select
                 value={accId}

@@ -11,6 +11,7 @@ import { INSTRUMENT_VIEW_GC_MS, useInstrumentViewCache } from '@/lib/useInstrume
 import { useLastStock } from '@/lib/useLastStock'
 import { MarketRegionTabs } from './MarketRegionTabs'
 import { ResearchSupplementPanel } from './ResearchSupplementPanel'
+import { SnapshotPanel } from '@/custom/research_tools/SnapshotPanel'
 import { CompanyFinancialsPanel } from './CompanyFinancialsPanel'
 import { globalMarketClient } from './client'
 import {
@@ -281,6 +282,7 @@ function MarketResearchPageContent({ market }: { market: GlobalMarket }) {
             </section>
 
             {market === 'us' && <ResearchSupplementPanel symbol={selection.symbol} />}
+            {kind !== 'index' && <details className="rounded-card border border-border bg-surface/80 p-3"><summary className="cursor-pointer text-xs text-muted">事件与补充资料</summary><div className="mt-3 space-y-3"><SnapshotPanel dataset="events" market={market} symbol={selection.symbol} title="财报与派息日历" />{market==='hk' && <><SnapshotPanel dataset="southbound_holding" market="hk" symbol={selection.symbol} title="个股南向持股" /><SnapshotPanel dataset="ah_premium" market="hk" symbol={selection.symbol} title="AH对应与溢价" /></>}</div></details>}
             <CompanyFinancialsPanel key={`${market}:${selection.symbol}`} market={market} symbol={selection.symbol} kind={kind} />
 
             <section className="rounded-card border border-border/60 bg-surface/80 p-2.5 sm:p-3">

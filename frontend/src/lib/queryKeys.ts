@@ -203,6 +203,14 @@ export const QK = {
 // 重算完成后刷新)。若加入 'screener', 会导致每个行情 tick 双重刷新策略页,
 // 且在 monitor "重算" 窗口内读到空结果, 造成策略列表闪烁 (变 0 → 空失效 → 又出现)。
 
+export const RESEARCH_QUERY_KEYS = {
+  instrument: (market: string, query: string) => ['research-tools', 'instrument', market, query] as const,
+  snapshot: (dataset: string, market: string, symbol: string) => ['research-tools', 'snapshot', dataset, market, symbol] as const,
+  portfolio: (account: string) => ['research-tools', 'portfolio', account] as const,
+  library: ['research-tools', 'library'] as const,
+  search: (q: string) => ['research-tools', 'library-search', q] as const,
+}
+
 export const SSE_INVALIDATE_PREFIXES = [
   // 精确前缀: 只命中自选页的实时数据 (quotes/enriched)。不能用宽泛的 'watchlist' ——
   // 会误伤 ['watchlist'] (自选列表) 和 ['watchlist-groups'] (分组配置, 只随手动操作变化)。

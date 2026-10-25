@@ -4,6 +4,7 @@
 // Prod:同源(FastAPI 托管前端 dist)
 
 import { toast } from '@/components/Toast'
+import type { ReportEvidence, ResearchSnapshot, LibraryRecord } from '@/custom/research_tools/types'
 import { canonicalFinancialSymbol } from '@/custom/global_markets/marketFormatters'
 import type { IndicatorCatalog, IndicatorSearch, IndicatorSearchParams, IndicatorSource } from '@/custom/indicator_library/types'
 import type { JevosStatus } from '@/custom/jevos/types'
@@ -358,6 +359,7 @@ export interface StockLevels {
 }
 
 export interface AiStockReport {
+  evidence?: ReportEvidence
   id: string
   symbol: string
   name: string
@@ -3965,6 +3967,20 @@ export const api = {
     }
   },
 
+  // ===== 按需研究工具 =====
+  researchSnapshot: (dataset: string, market: string, symbol: string, signal?: AbortSignal) =>
+    request<ResearchSnapshot>(`/api/custom/research-tools/snapshot?${new URLSearchParams({ dataset, market, symbol })}`, { signal, quiet: true }),
+  researchRefresh: (dataset: string, market: string, symbol: string) =>
+    request<ResearchSnapshot>(`/api/custom/research-tools/refresh?${new URLSearchParams({ dataset, market, symbol })}`, { method: 'POST', quiet: true }),
+  researchPortfolio: (account: string, signal?: AbortSignal) =>
+    request<Record<string, unknown>>(`/api/custom/research-tools/portfolio?account=${encodeURIComponent(account)}`, { signal, quiet: true }),
+  researchLibrary: (signal?: AbortSignal) =>
+    request<{ items: LibraryRecord[] }>('/api/custom/research-tools/library', { signal, quiet: true }),
+  researchLibrarySearch: (q: string, signal?: AbortSignal) =>
+    request<{ items: LibraryRecord[] }>(`/api/custom/research-tools/library/search?q=${encodeURIComponent(q)}`, { signal, quiet: true }),
+  researchLibraryUpload: (name: string, content: string) =>
+    request<LibraryRecord>('/api/custom/research-tools/library', { method: 'POST', body: JSON.stringify({ name, content }), quiet: true }),
+
   // ===== 个股分析 =====
   stockAnalysisSnapshot: async (symbol: string, days = 250, signal?: AbortSignal) => {
     const controller = new AbortController()
@@ -3988,6 +4004,7 @@ export const api = {
 
   stockAnalysisReportSave: (r: {
     symbol: string; name?: string; focus?: string; content: string
+    evidence?: ReportEvidence
     summary?: string; close?: number | null
     levels?: Record<LevelType, PriceLevel[]>
     as_of?: string | null
@@ -4009,7 +4026,8 @@ export const api = {
    * meta 里额外带 levels(关键价位)供图表回放。
    */
   async *stockAnalyzeStream(symbol: string, focus?: string): AsyncGenerator<{
-    type: 'meta' | 'delta' | 'error' | 'done' | 'ping'
+    type: 'meta' | 'delta' | 'error' | 'done' | 'ping' | 'evidence'
+    evidence?: ReportEvidence
     symbol?: string
     summary?: string
     levels?: Record<LevelType, PriceLevel[]>

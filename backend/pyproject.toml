@@ -1,6 +1,6 @@
 [project]
 name = "stockfund-panel-backend"
-version = "0.0.9"
+version = "0.0.10"
 description = "股票与基金数据看板、选股选基和回测分析"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -40,6 +40,7 @@ dependencies = [
     # Watchlist screenshot OCR (Tesseract)
     "pytesseract>=0.3.10",
     "Pillow>=10.0",
+    "pypdf==6.21.2",              # 本机资料库文本型 PDF 提取
 ]
 
 [project.optional-dependencies]

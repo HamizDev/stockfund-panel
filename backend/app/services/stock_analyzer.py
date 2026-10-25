@@ -435,6 +435,7 @@ async def analyze_stock_stream(
 
     # 5+6. 构建提示词 + 流式调用 LLM(整体 try-except,任何异常都 yield error,避免前端卡死)
     try:
+        from app.services import research_evidence as report_evidence
         from app.services.ai_provider import stream_ai_text
 
         # 虚拟持仓上下文 (V3): 逐账户 (V2 多账户) 收集持有该标的的持仓注入
@@ -460,7 +461,10 @@ async def analyze_stock_stream(
                                          raw_close=raw_close, snapshot_meta=snapshot_meta)
         user_prompt += '\n\n' + analysis_quality.evidence_instruction(
             quality, snapshot_meta, financials_available=any(fins.values()), asset_type=asset_type)
+        ledger = report_evidence.build(symbol,kline_tail,levels,fins,snapshot_meta)
+        user_prompt += report_evidence.instruction(ledger)
         got_content = False
+        report_parts = []
         async for delta in stream_ai_text(
             [
                 {"role": "system", "content": _RESEARCH_PLAN_PROMPT if research_plan else (
@@ -474,6 +478,7 @@ async def analyze_stock_stream(
             prefer_final_answer=True,
         ):
             got_content = True
+            report_parts.append(delta)
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
 
     except Exception as e:
@@ -486,4 +491,5 @@ async def analyze_stock_stream(
         logger.warning("AI stock analysis ended with empty content for %s", symbol)
         yield json.dumps({"type": "error", "message": "AI 未返回正文(输出被截断), 请重试"}, ensure_ascii=False)
         return
+    yield json.dumps({'type':'evidence','evidence':{'ledger':ledger,'verification':report_evidence.verify(''.join(report_parts),ledger)}},ensure_ascii=False)
     yield json.dumps({"type": "done"}, ensure_ascii=False)

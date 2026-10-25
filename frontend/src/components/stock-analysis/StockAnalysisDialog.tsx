@@ -1,3 +1,4 @@
+import { EvidenceSummary } from '@/custom/research_tools/EvidenceSummary'
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -198,6 +199,7 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
             </div>
           </div>
 
+          {content && <div className="shrink-0 px-5 pt-3"><EvidenceSummary evidence={task?.evidence} /></div>}
           {/* 内容区 */}
           <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-4 min-h-[280px]">
             {phase === 'loading' && !content && (

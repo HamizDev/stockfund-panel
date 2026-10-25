@@ -210,6 +210,7 @@ class SaveReportRequest(BaseModel):
     is_provisional: bool = False
     price_basis: str | None = None
     requested_at: str | None = None
+    evidence: dict | None = None
 
 
 @router.get("/reports")
@@ -235,6 +236,7 @@ def save_report(request: Request, req: SaveReportRequest):
         "is_provisional": req.is_provisional,
         "price_basis": req.price_basis,
         "requested_at": req.requested_at,
+        "evidence": req.evidence,
     })
     return {"ok": True, "report": report}
 

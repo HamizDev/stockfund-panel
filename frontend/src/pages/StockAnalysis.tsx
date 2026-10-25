@@ -1,4 +1,5 @@
 import { chartPrice } from '@/lib/chartPrice'
+import { SnapshotPanel, useResearchSnapshot } from '@/custom/research_tools/SnapshotPanel'
 import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -298,6 +299,7 @@ export function StockAnalysisBoard({ symbol, knownAssetType }: { symbol: string;
       onPriceHover={onPriceHover}
     />}
     {assetType === 'etf' && /^(5\d{5}\.SH|15\d{4}\.SZ)$/.test(symbol) && <EtfSharesPanel symbol={symbol} date={selectedDate} />}
+    <details className="rounded-card border border-border bg-surface/80 p-3"><summary className="cursor-pointer text-xs text-muted">财报／分红事件资料</summary><div className="mt-3"><SnapshotPanel dataset="events" market="cn" symbol={symbol} title="事件日历与K线标记" /></div></details>
     </div>
   </section>
 }
@@ -309,6 +311,7 @@ function DailyAnalysisCard({ symbol, onDateClick, linkedPrice, minuteDate, asset
 }) {
   const phone = useMediaQuery('(max-width: 639px)')
   const client = useQueryClient()
+  const events = useResearchSnapshot('events','cn',symbol)
   const key = QK.stockAnalysisSnapshot(symbol, 250)
   const kline = useQuery({
     queryKey: key,
@@ -425,6 +428,7 @@ function DailyAnalysisCard({ symbol, onDateClick, linkedPrice, minuteDate, asset
           key={symbol}
           persistenceKey={symbol}
           rows={rows}
+          markers={(events.data?.snapshot?.items ?? []).filter(item => typeof item.date === 'string').map(item => ({date:String(item.date),label:`${item.estimated ? '预计·' : ''}${String(item.kind ?? '事件')}`,color:'#8B5CF6'}))}
           levels={levels}
           series={levelsQ?.series}
           seriesDates={levelsQ?.dates}

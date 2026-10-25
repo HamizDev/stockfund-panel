@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { IndustrySignalsPanel } from '@/custom/research_tools/SnapshotPanel'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronUp, Globe2, Info } from 'lucide-react'
@@ -61,5 +62,6 @@ export function GlobalIndustryPanel() {
       </div>)}</div>
     </div>}
     <p className="mt-2 flex items-start gap-1 text-[10px] leading-4 text-muted"><Info className="mt-0.5 h-3 w-3 shrink-0" /><span>自动按香港时间08:00—20:00看A股，其余看美股；可手动覆盖。代表股票篮子非官方产业指数，黄金/油气/金属为相关股票表现，非现货或期货报价。{data?.market === 'us' ? '仅保留报价日期，时区与延迟未确认，不代表实时行情或暗盘。' : '报价可能延迟，请留意各成分的数据日期。'}</span></p>
+    <div className="mt-3"><IndustrySignalsPanel /></div>
   </section>
 }
