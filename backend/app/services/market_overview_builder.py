@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Iterable
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -174,20 +176,187 @@ def _ext_files(data_dir, config: ExtConfig) -> list[str]:
     return [str(p) for p in sorted(base.glob("*.parquet")) if p.is_file()]
 
 
-def _read_ext_rows(data_dir, config: ExtConfig, dimension_field: str) -> list[dict]:
-    files = _ext_files(data_dir, config)
-    if not files:
-        return []
+def _canonical_timeseries_partition_files(data_dir, config: ExtConfig) -> list[str] | None:
+    """Return canonical daily partition files, or None when the layout is ambiguous.
+
+    The extension writer stores one `part.parquet` under `date=YYYY-MM-DD`, and
+    the legacy reader enables Polars Hive partitioning for time-series files.
+    Only that exact shape makes the directory date a safe substitute for
+    scanning every row to find the latest date. Any mixed, nested, symlinked,
+    or malformed layout keeps the legacy recursive-read path.
+    """
+    root = data_dir / "ext_data" / config.id / "timeseries"
+    if root.is_symlink():
+        return None
     try:
-        df = pl.read_parquet(files, hive_partitioning=True)
+        entries = list(root.iterdir())
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return None
+    if not entries:
+        return []
+
+    partitions: list[tuple[date, Path]] = []
+    for entry in entries:
+        if entry.is_symlink() or not entry.is_dir() or not entry.name.startswith("date="):
+            return None
+        raw_date = entry.name[5:]
+        try:
+            parsed_date = date.fromisoformat(raw_date)
+        except ValueError:
+            return None
+        if parsed_date.isoformat() != raw_date:
+            return None
+        try:
+            children = list(entry.iterdir())
+        except OSError:
+            return None
+        if len(children) != 1:
+            return None
+        part = children[0]
+        if part.name != "part.parquet" or part.is_symlink() or not part.is_file():
+            return None
+        partitions.append((parsed_date, part))
+
+    return [str(path) for _, path in sorted(partitions, key=lambda item: item[0])]
+
+
+def _ext_schema_names(files: list[str]) -> list[str] | None:
+    """Inspect a file set without reading its row data; None means use legacy read."""
+    try:
+        return pl.scan_parquet(files, hive_partitioning=True).collect_schema().names()
     except TypeError:
         try:
-            df = pl.read_parquet(files)
+            return pl.scan_parquet(files).collect_schema().names()
         except Exception:  # noqa: BLE001
-            return []
+            return None
     except Exception:  # noqa: BLE001
+        return None
+
+
+def _matching_ext_schema_names(files: list[str]) -> list[str] | None:
+    """Return names only when every file has the same Hive-aware schema."""
+    expected = None
+    for file in files:
+        try:
+            schema = pl.scan_parquet([file], hive_partitioning=True).collect_schema()
+        except TypeError:
+            try:
+                schema = pl.scan_parquet([file]).collect_schema()
+            except Exception:
+                return None
+        except Exception:
+            return None
+        signature = tuple(schema.items())
+        if expected is None:
+            expected = signature
+        elif signature != expected:
+            return None
+    return [name for name, _ in expected] if expected is not None else None
+
+
+def _read_ext_parquet(files: list[str], columns: list[str] | None) -> pl.DataFrame | None:
+    """Read projected extension columns, preserving the legacy compatibility fallback."""
+    if columns is not None:
+        try:
+            return pl.read_parquet(files, columns=columns, hive_partitioning=True)
+        except TypeError:
+            try:
+                return pl.read_parquet(files, columns=columns)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    try:
+        return pl.read_parquet(files, hive_partitioning=True)
+    except TypeError:
+        try:
+            return pl.read_parquet(files)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _read_ext_rows(
+    data_dir,
+    config: ExtConfig,
+    dimension_fields: str | Iterable[str],
+) -> list[dict]:
+    fields = [dimension_fields] if isinstance(dimension_fields, str) else list(dimension_fields)
+    fields = list(dict.fromkeys(fields))
+
+    all_files: list[str]
+    can_prune_latest = False
+    if config.mode == "timeseries":
+        canonical_files = _canonical_timeseries_partition_files(data_dir, config)
+        if canonical_files is None:
+            all_files = _ext_files(data_dir, config)
+        else:
+            all_files = canonical_files
+            can_prune_latest = bool(canonical_files)
+    else:
+        all_files = _ext_files(data_dir, config)
+    if not all_files:
         return []
-    if df.is_empty() or dimension_field not in df.columns:
+
+    files = [all_files[-1]] if can_prune_latest else all_files
+    schema_names = (
+        _matching_ext_schema_names(all_files)
+        if len(all_files) > 1
+        else _ext_schema_names(files)
+    )
+    if can_prune_latest and schema_names is None:
+        # The legacy multi-file read rejects incompatible partition schemas.
+        # Preserve that behavior instead of pruning to a compatible latest file.
+        files = all_files
+        can_prune_latest = False
+
+    symbol_cols = ["symbol", "code", "股票代码", "代码"]
+    for mapping in (config.symbol_map, config.code_map):
+        if isinstance(mapping, dict) and mapping.get("type") == "mapped" and mapping.get("col"):
+            symbol_cols.append(str(mapping["col"]))
+
+    wanted_cols = list(dict.fromkeys([*fields, *symbol_cols]))
+    read_columns: list[str] | None = None
+    if schema_names is not None:
+        # A missing dimension column in the selected latest file may still be
+        # supplied by an older schema. Keep the full file set for that case.
+        if can_prune_latest and any(field not in schema_names for field in fields):
+            files = all_files
+            can_prune_latest = False
+            schema_names = _ext_schema_names(files)
+        if schema_names is not None:
+            read_columns = [column for column in wanted_cols if column in schema_names]
+            if config.mode == "timeseries" and "date" in schema_names:
+                read_columns.append("date")
+
+    df = _read_ext_parquet(files, read_columns)
+    if df is None and can_prune_latest:
+        files = all_files
+        can_prune_latest = False
+        schema_names = _ext_schema_names(files)
+        read_columns = None
+        if schema_names is not None:
+            read_columns = [column for column in wanted_cols if column in schema_names]
+            if config.mode == "timeseries" and "date" in schema_names:
+                read_columns.append("date")
+        df = _read_ext_parquet(files, read_columns)
+    # An empty latest partition is ignored by the legacy max(date) query; then
+    # it uses the latest partition that contains rows.
+    if df is not None and df.is_empty() and can_prune_latest and len(all_files) > 1:
+        files = all_files
+        can_prune_latest = False
+        schema_names = _ext_schema_names(files)
+        read_columns = None
+        if schema_names is not None:
+            read_columns = [column for column in wanted_cols if column in schema_names]
+            if config.mode == "timeseries" and "date" in schema_names:
+                read_columns.append("date")
+        df = _read_ext_parquet(files, read_columns)
+    if df is None or df.is_empty() or not any(field in df.columns for field in fields):
         return []
 
     if config.mode == "timeseries" and "date" in df.columns:
@@ -195,12 +364,8 @@ def _read_ext_rows(data_dir, config: ExtConfig, dimension_field: str) -> list[di
         if latest is not None:
             df = df.filter(pl.col("date") == latest)
 
-    symbol_cols = ["symbol", "code", "股票代码", "代码"]
-    for mapping in (config.symbol_map, config.code_map):
-        if isinstance(mapping, dict) and mapping.get("type") == "mapped" and mapping.get("col"):
-            symbol_cols.append(str(mapping["col"]))
     cols = []
-    for col in [dimension_field, *symbol_cols]:
+    for col in [*fields, *symbol_cols]:
         if col in df.columns and col not in cols:
             cols.append(col)
     return df.select(cols).to_dicts()
@@ -308,9 +473,15 @@ def _em_industry_rank(limit: int = 5) -> dict:
     return {"leading": items[:limit], "lagging": items[-limit:][::-1]}
 
 
-def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: int | None = None) -> dict:
+def _dimension_ranks(
+    rows: list[dict],
+    repo,
+    dimensions: dict[str, int | None],
+    limit: int = 5,
+) -> dict[str, dict]:
+    empty = {kind: {"leading": [], "lagging": []} for kind in dimensions}
     if not rows:
-        return {"leading": [], "lagging": []}
+        return empty
 
     quote_map: dict[str, dict] = {}
     for row in rows:
@@ -321,14 +492,17 @@ def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: in
         quote_map[symbol.split(".", 1)[0]] = row
 
     store = ExtConfigStore(repo.store.data_dir)
-    groups: dict[str, dict[str, dict]] = {}
-    group_source: dict[str, str] = {}  # 组名 → 首个命中的扩展字段 "configId.field" (看板成分股弹窗用)
+    groups: dict[str, dict[str, dict[str, dict]]] = {kind: {} for kind in dimensions}
+    group_sources: dict[str, dict[str, str]] = {kind: {} for kind in dimensions}
     for config in store.load_all():
-        field = _dimension_field(config, kind)
-        if not field:
+        fields = {
+            kind: field
+            for kind in dimensions
+            if (field := _dimension_field(config, kind)) is not None
+        }
+        if not fields:
             continue
-        source_field = f"{config.id}.{field}"
-        for ext_row in _read_ext_rows(repo.store.data_dir, config, field):
+        for ext_row in _read_ext_rows(repo.store.data_dir, config, fields.values()):
             quote = None
             for key in _symbol_keys(ext_row, config):
                 quote = quote_map.get(key)
@@ -337,40 +511,50 @@ def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: in
             if not quote:
                 continue
             symbol = str(quote.get("symbol") or "")
-            for value in _dimension_values(ext_row.get(field)):
-                # 行业按 "-" 拆分级: "银行-银行-股份制银行" → level=2 取"银行"(二级)
-                if level is not None and "-" in value:
-                    parts = value.split("-")
-                    value = parts[level - 1] if level <= len(parts) else parts[-1]
-                groups.setdefault(value, {})[symbol] = quote
-                group_source.setdefault(value, source_field)
+            for kind, field in fields.items():
+                level = dimensions[kind]
+                for value in _dimension_values(ext_row.get(field)):
+                    # 行业按 "-" 拆分级: "银行-银行-股份制银行" → level=2 取"银行"(二级)
+                    if level is not None and "-" in value:
+                        parts = value.split("-")
+                        value = parts[level - 1] if level <= len(parts) else parts[-1]
+                    groups[kind].setdefault(value, {})[symbol] = quote
+                    group_sources[kind].setdefault(value, f"{config.id}.{field}")
 
-    items = []
-    for name, by_symbol in groups.items():
-        stocks = list(by_symbol.values())
-        changes = [_finite(s.get("change_pct")) for s in stocks]
-        changes = [v for v in changes if v is not None]
-        if not changes:
-            continue
-        leader = max(stocks, key=_leader_sort_key)
-        items.append({
-            "name": name,
-            "count": len(stocks),
-            "avg_pct": sum(changes) / len(changes),
-            "up_count": sum(1 for v in changes if v > 0),
-            "down_count": sum(1 for v in changes if v < 0),
-            "amount": sum(_finite(s.get("amount")) or 0 for s in stocks),
-            "source_field": group_source.get(name),
-            "leader": {
-                "symbol": leader.get("symbol"),
-                "name": leader.get("name"),
-                "change_pct": _finite(leader.get("change_pct")),
-            },
-        })
+    results: dict[str, dict] = {}
+    for kind, by_name in groups.items():
+        items = []
+        for name, by_symbol in by_name.items():
+            stocks = list(by_symbol.values())
+            changes = [_finite(stock.get("change_pct")) for stock in stocks]
+            changes = [value for value in changes if value is not None]
+            if not changes:
+                continue
+            leader = max(stocks, key=_leader_sort_key)
+            items.append({
+                "name": name,
+                "count": len(stocks),
+                "avg_pct": sum(changes) / len(changes),
+                "up_count": sum(1 for value in changes if value > 0),
+                "down_count": sum(1 for value in changes if value < 0),
+                "amount": sum(_finite(stock.get("amount")) or 0 for stock in stocks),
+                "source_field": group_sources[kind].get(name),
+                "leader": {
+                    "symbol": leader.get("symbol"),
+                    "name": leader.get("name"),
+                    "change_pct": _finite(leader.get("change_pct")),
+                },
+            })
 
-    leading = sorted(items, key=lambda x: x["avg_pct"], reverse=True)[:limit]
-    lagging = sorted(items, key=lambda x: x["avg_pct"])[:limit]
-    return {"leading": leading, "lagging": lagging}
+        results[kind] = {
+            "leading": sorted(items, key=lambda item: item["avg_pct"], reverse=True)[:limit],
+            "lagging": sorted(items, key=lambda item: item["avg_pct"])[:limit],
+        }
+    return results
+
+
+def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: int | None = None) -> dict:
+    return _dimension_ranks(rows, repo, {kind: level}, limit)[kind]
 
 
 # ================================================================
@@ -586,8 +770,9 @@ def build_market_overview(
     avg_vol_ratio = sum(vol_ratios) / len(vol_ratios) if vol_ratios else 1
     high_vol_ratio = sum(1 for v in vol_ratios if v >= 1.5)
 
-    concept_rank = _dimension_rank(rows, repo, "concept")
-    industry_rank = _dimension_rank(rows, repo, "industry", level=2)
+    dimension_ranks = _dimension_ranks(rows, repo, {"concept": None, "industry": 2})
+    concept_rank = dimension_ranks["concept"]
+    industry_rank = dimension_ranks["industry"]
     # 行业成分数据缺失时, 用腾讯行业指数作明确标注的降级展示。
     if not industry_rank.get("leading") and not industry_rank.get("lagging"):
         industry_rank = _em_industry_rank()

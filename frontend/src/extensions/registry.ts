@@ -91,16 +91,36 @@ function registerExtension(extension: FrontendExtension) {
 export async function loadFrontendExtensions(
   modules: Record<string, () => Promise<FrontendExtensionModule>>,
 ) {
-  for (const source of Object.keys(modules).sort()) {
+  const sources = Object.keys(modules).sort()
+  const results = await Promise.all(sources.map(async source => {
     let extension: FrontendExtension | undefined
     try {
       extension = (await modules[source]()).default
       if (!extension) throw new Error('模块必须 default export FrontendExtension')
-      registerExtension(extension)
+      return { source, extension, ok: true as const }
+    } catch (error) {
+      // 每个导入分支自行吸收错误，避免一个模块提前失败时其他并发导入
+      // 变成未处理的 rejection；Promise.all 保留 source 排序后的结果顺序。
+      return { source, extension, error, ok: false as const }
+    }
+  }))
+
+  // 并行只用于模块导入；注册仍按 source 排序，保持重复 ID/路径的胜出顺序。
+  for (const result of results) {
+    if (!result.ok) {
+      loadErrors.push({
+        source: result.source,
+        extensionId: result.extension?.id,
+        error: result.error instanceof Error ? result.error.message : String(result.error),
+      })
+      continue
+    }
+    try {
+      registerExtension(result.extension)
     } catch (error) {
       loadErrors.push({
-        source,
-        extensionId: extension?.id,
+        source: result.source,
+        extensionId: result.extension.id,
         error: error instanceof Error ? error.message : String(error),
       })
     }

@@ -2493,7 +2493,7 @@ wheels = [
 
 [[package]]
 name = "stockfund-panel-backend"
-version = "0.0.11"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "apscheduler" },

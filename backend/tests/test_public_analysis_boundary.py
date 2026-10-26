@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from app.custom.assistant.prompt import build_system_prompt
 from app.custom.fund import analyzer
+from app.custom.fund import routes as fund_routes
 from app.services import holdings_review as review
 from app.services import stock_analyzer
 
@@ -79,3 +80,12 @@ def test_research_plan_has_no_execution_stages():
     assert '研究核对表' in prompt
     for heading in ['条件买入计划', '停止加仓与退出条件', '阶段包括观察、首批']:
         assert heading not in prompt
+
+
+def test_fund_candidate_prompt_uses_neutral_research_labels():
+    prompt = fund_routes._AI_PICK_PROMPT
+    for action_label in ['满足条件可申购', '候选观察', '暂不选']:
+        assert action_label not in prompt
+    assert '研究核验标签' in prompt
+    assert '证据支持、证据分歧、风险需复核、资料不足待核实' in prompt
+    assert '不输出申购、赎回、买卖、加减仓或持有等操作结论' in prompt

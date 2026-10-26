@@ -3,6 +3,7 @@ import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { useQuoteStream, useQuoteStreamStatus } from '@/lib/useQuoteStream'
+import { alertsTotalPollingOptions } from '@/lib/alertPolling'
 import { ToastContainer, toast } from '@/components/Toast'
 import { AlertToastContainer } from '@/components/AlertToast'
 import { AiAnalysisHost } from '@/components/financials/AiAnalysisHost'
@@ -555,7 +556,7 @@ export function Layout() {
   const alertsTotalQuery = useQuery({
     queryKey: ['alerts-total'],
     queryFn: () => api.alertsList({ days: 7, limit: 1 }),
-    refetchInterval: 15000,
+    ...alertsTotalPollingOptions(streamStatus),
     select: (data) => data.total,
   })
   // 只在拿到真实总数时同步徽标 (避免 data=undefined 时传 0 重置 lastSeen)

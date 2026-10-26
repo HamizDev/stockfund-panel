@@ -5,6 +5,7 @@ import math
 import re
 import threading
 import time
+from concurrent.futures import Future
 from datetime import date
 from typing import Any
 
@@ -21,6 +22,9 @@ _CACHE_TTL = 5.0
 _cache: dict[str, Any] | None = None
 _cache_key: str | None = None
 _cache_ts: float = 0.0
+_cache_context: tuple[Any, Any, Any] | None = None
+_cache_generation = 0
+_inflight: dict[tuple, Future] = {}
 # 缓存跨线程读写锁: market_overview 在 FastAPI 线程池读, invalidate 在数据刷新线程清,
 # 无锁会读到撕裂/过期状态。用模块级 Lock 守护 check-then-set 与 clear。
 _cache_lock = threading.Lock()
@@ -31,11 +35,13 @@ def invalidate_overview_cache() -> None:
 
     清除数据后调用, 避免看板在 TTL 窗口内继续返回旧的聚合结果。
     """
-    global _cache, _cache_key, _cache_ts
+    global _cache, _cache_key, _cache_ts, _cache_context, _cache_generation
     with _cache_lock:
         _cache = None
         _cache_key = None
         _cache_ts = 0.0
+        _cache_context = None
+        _cache_generation += 1
 
 
 _DIMENSION_SEP = re.compile(r"[、,，;；|/\s]+")
@@ -358,17 +364,39 @@ def _build_overview(request: Request, as_of: date | None = None) -> dict:
 @router.get("/market")
 def market_overview(request: Request, as_of: date | None = None):
     """总览页单次请求聚合数据，避免前端拉全市场明细后再计算。"""
-    global _cache, _cache_key, _cache_ts
-    now = time.time()
+    global _cache, _cache_key, _cache_ts, _cache_context
+    now = time.monotonic()
     cache_key = as_of.isoformat() if as_of else "latest"
+    state = request.app.state
+    context = (state.repo, getattr(state, "quote_service", None), getattr(state, "depth_service", None))
     # 读缓存持锁, 避免与 invalidate 的 clear 竞态读到撕裂状态
     with _cache_lock:
-        if _cache is not None and _cache_key == cache_key and (now - _cache_ts) < _CACHE_TTL:
+        same_context = _cache_context is not None and all(a is b for a, b in zip(context, _cache_context, strict=True))
+        if _cache is not None and same_context and _cache_key == cache_key and (now - _cache_ts) < _CACHE_TTL:
             return _cache
-    # 装配在锁外进行 (耗时), 允许并发未命中时各自构建, 不长时间持锁串行化请求
-    data = _build_overview(request, as_of)
+        generation = _cache_generation
+        flight_key = (*map(id, context), cache_key, generation)
+        future = _inflight.get(flight_key)
+        owner = future is None
+        if owner:
+            future = _inflight[flight_key] = Future()
+    # 同一数据上下文共享构建, 等待和计算均不占用缓存锁。
+    if not owner:
+        return future.result()
+    try:
+        data = _build_overview(request, as_of)
+    except BaseException as error:
+        with _cache_lock:
+            _inflight.pop(flight_key, None)
+        future.set_exception(error)
+        raise
     with _cache_lock:
-        _cache = data
-        _cache_key = cache_key
-        _cache_ts = now
+        # 刷新期间开始的新一代请求不能被旧构建结果覆盖。
+        if generation == _cache_generation:
+            _cache = data
+            _cache_key = cache_key
+            _cache_context = context
+            _cache_ts = time.monotonic()
+        _inflight.pop(flight_key, None)
+    future.set_result(data)
     return data

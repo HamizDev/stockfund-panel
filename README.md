@@ -16,7 +16,7 @@
 
 由 **HamizDev 独立维护**，把行情观察、候选筛选、策略验证和模拟跟踪放在同一个界面里。支持股票、场内 ETF、场外基金研究，以及独立的数字资产模拟模块；数据源和 AI 服务按需配置，个人数据与密钥保存在使用者自己的运行环境。
 
-当前版本 **0.0.11**：[版本说明](docs/release-0.0.11.md) · [研究工具](docs/research-tools.md) · [港美股数据范围与口径](docs/global-markets.md) · [更新历史](CHANGELOG.md) · [本地 Jevos 辅助判断](docs/local-jevos.md)。
+当前版本 **1.0.0**：[版本说明](docs/release-1.0.0.md) · [研究工具](docs/research-tools.md) · [港美股数据范围与口径](docs/global-markets.md) · [更新历史](CHANGELOG.md) · [本地 Jevos 辅助判断](docs/local-jevos.md)。
 
 ## 功能亮点
 
