@@ -2,9 +2,11 @@
 """Deterministic input checks for research; never a model accuracy score."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import polars as pl
+
+_BEIJING = timezone(timedelta(hours=8), name='Asia/Shanghai')
 
 
 def inspect_frame(frame: pl.DataFrame, symbol: str, cutoff: date, *, strict: bool = False) -> dict:
@@ -49,18 +51,81 @@ def inspect_frame(frame: pl.DataFrame, symbol: str, cutoff: date, *, strict: boo
     return {'as_of': as_of, 'bars': frame.height, 'errors': errors, 'warnings': warnings}
 
 
-def published_rows(frame: pl.DataFrame, cutoff: date) -> pl.DataFrame:
+def _announcement_is_known(value: object, cutoff_at: datetime) -> bool:
+    """Compare one announcement value against a Beijing-local cutoff."""
+    if value is None:
+        return False
+    if isinstance(value, datetime):
+        announced_at = value
+        if announced_at.tzinfo is None or announced_at.utcoffset() is None:
+            announced_at = announced_at.replace(tzinfo=_BEIJING)
+        else:
+            announced_at = announced_at.astimezone(_BEIJING)
+        return announced_at <= cutoff_at
+    if isinstance(value, date):
+        return value < cutoff_at.date()
+
+    text = str(value).strip()
+    if not text:
+        return False
+    if len(text) == 10:
+        try:
+            return date.fromisoformat(text) < cutoff_at.date()
+        except ValueError:
+            return False
+    try:
+        announced_at = datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except ValueError:
+        return False
+    if announced_at.tzinfo is None or announced_at.utcoffset() is None:
+        announced_at = announced_at.replace(tzinfo=_BEIJING)
+    else:
+        announced_at = announced_at.astimezone(_BEIJING)
+    return announced_at <= cutoff_at
+
+
+def published_rows(
+    frame: pl.DataFrame,
+    cutoff: date,
+    *,
+    cutoff_at: datetime | None = None,
+) -> pl.DataFrame:
     """A period end never substitutes for the date information became public."""
+    beijing_cutoff = None
+    if cutoff_at is not None:
+        if cutoff_at.tzinfo is None or cutoff_at.utcoffset() is None:
+            raise ValueError('cutoff_at must be timezone-aware.')
+        beijing_cutoff = cutoff_at.astimezone(_BEIJING)
+        if beijing_cutoff.date() != cutoff:
+            raise ValueError('cutoff_at Beijing date must match cutoff.')
+
     if frame.is_empty() or 'period_end' not in frame.columns:
         return frame.clear()
     published = next((name for name in ('announce_date', 'announcement_date', 'published_at')
                       if name in frame.columns), None)
     if published is None:
         return frame.clear()
-    return frame.filter(
-        pl.col('period_end').cast(pl.String).str.slice(0, 10).str.to_date(format='%Y-%m-%d', strict=False) <= cutoff,
-        pl.col(published).cast(pl.String).str.slice(0, 10).str.to_date(format='%Y-%m-%d', strict=False) <= cutoff,
+    period_known = pl.col('period_end').cast(pl.String).str.slice(0, 10).str.to_date(
+        format='%Y-%m-%d', strict=False
+    ) <= cutoff
+    if cutoff_at is None:
+        return frame.filter(
+            period_known,
+            pl.col(published).cast(pl.String).str.slice(0, 10).str.to_date(
+                format='%Y-%m-%d', strict=False
+            ) <= cutoff,
+        )
+
+    # Financial rows are bounded to one security. Keep period filtering vectorized,
+    # then parse only its small publication column (timestamps may mix offsets).
+    eligible = frame.filter(period_known)
+    assert beijing_cutoff is not None
+    known = pl.Series(
+        name='_publication_known',
+        values=[_announcement_is_known(value, beijing_cutoff) for value in eligible[published]],
+        dtype=pl.Boolean,
     )
+    return eligible.filter(known)
 
 
 def evidence_instruction(quality: dict, snapshot: dict, *, financials_available: bool, asset_type: str) -> str:

@@ -14,8 +14,12 @@ import { api, friendlyStreamError, type PriceLevel, type LevelType } from './api
  */
 
 export type Phase = 'loading' | 'streaming' | 'done' | 'error'
+export interface StockResearchOptions { review?: boolean; horizon_sessions?: 1 | 3 | 5 }
 
 export interface ActiveTask {
+  options?: StockResearchOptions
+  stageMessage?: string
+  research_id?: string | null
   evidence?: ReportEvidence
   id: string
   symbol: string
@@ -25,6 +29,7 @@ export interface ActiveTask {
   content: string
   error: string
   meta: {
+    asset_type?: 'stock' | 'etf' | 'index'
     summary?: string
     levels?: Record<LevelType, PriceLevel[]>
     close?: number | null
@@ -42,6 +47,8 @@ export interface ActiveTask {
 }
 
 export interface HistoryReport {
+  asset_type?: 'stock' | 'etf' | 'index'
+  research_id?: string | null
   evidence?: ReportEvidence
   id: string
   symbol: string
@@ -194,7 +201,7 @@ export async function findTodayReport(symbol: string): Promise<HistoryReport | n
   return history.find(r => r.symbol === symbol && (r.created_at ?? '').slice(0, 10) === today) ?? null
 }
 
-export async function startAnalysis(symbol: string, name: string, focus = ''): Promise<{ id?: string; error?: string }> {
+export async function startAnalysis(symbol: string, name: string, focus = '', options: StockResearchOptions = {}): Promise<{ id?: string; error?: string }> {
   const existing = activeTasks.find(t => t.symbol === symbol && (t.phase === 'loading' || t.phase === 'streaming'))
   if (existing) {
     activeDialogTaskId = existing.id
@@ -212,7 +219,7 @@ export async function startAnalysis(symbol: string, name: string, focus = ''): P
   const task: ActiveTask = {
     id, symbol, name, focus,
     phase: 'loading', content: '', error: '',
-    meta: null, createdAt: Date.now(),
+    meta: null, createdAt: Date.now(), options,
   }
   activeTasks = [...activeTasks, task]
   activeDialogTaskId = id
@@ -220,19 +227,20 @@ export async function startAnalysis(symbol: string, name: string, focus = ''): P
   rebuildSnap()
   emit()
 
-  runStream(id, symbol, name, focus)
+  runStream(id, symbol, name, focus, options)
   return { id }
 }
 
-async function runStream(id: string, symbol: string, _name: string, focus: string) {
+async function runStream(id: string, symbol: string, name: string, focus: string, options: StockResearchOptions) {
   try {
     let firstDelta = true
-    for await (const chunk of api.stockAnalyzeStream(symbol, focus)) {
+    for await (const chunk of api.stockAnalyzeStream(symbol, focus, { ...options, name })) {
       const cur = activeTasks.find(t => t.id === id)
       if (!cur) return
       switch (chunk.type) {
         case 'meta':
           patchTask(id, { meta: {
+            asset_type: chunk.asset_type,
             summary: chunk.summary,
             levels: chunk.levels,
             close: chunk.close,
@@ -254,6 +262,12 @@ async function runStream(id: string, symbol: string, _name: string, focus: strin
         case 'evidence':
           patchTask(id, { evidence: chunk.evidence })
           break
+        case 'stage':
+          patchTask(id, { stageMessage: chunk.message })
+          break
+        case 'research':
+          patchTask(id, { research_id: chunk.research?.id, stageMessage: '' })
+          break
         case 'done':
           patchTask(id, { phase: 'done' })
           break
@@ -271,6 +285,7 @@ async function runStream(id: string, symbol: string, _name: string, focus: strin
           symbol: final.symbol, name: final.name, focus: final.focus,
           content: final.content, summary: final.meta?.summary ?? '',
           evidence: final.evidence,
+          research_id: final.research_id,
           close: final.meta?.close ?? null, levels: final.meta?.levels,
           as_of: final.meta?.as_of,
           requested_at: final.meta?.requested_at,
@@ -313,8 +328,8 @@ export function restoreDialog(taskId: string) {
   }
   activeDialogTaskId = taskId; dialogMinimized = false; rebuildSnap(); emit()
 }
-export async function retryAnalysis(task: { symbol: string; name: string; focus: string }): Promise<{ error?: string }> {
-  return startAnalysis(task.symbol, task.name, task.focus)
+export async function retryAnalysis(task: { symbol: string; name: string; focus: string; options?: StockResearchOptions }): Promise<{ error?: string }> {
+  return startAnalysis(task.symbol, task.name, task.focus, task.options)
 }
 export async function deleteReport(reportId: string): Promise<void> {
   try {

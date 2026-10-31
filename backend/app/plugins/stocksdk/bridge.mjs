@@ -144,20 +144,97 @@ async function fetchDaily(sdk, sym, { adjust, period = 'daily', start, end }) {
   const opts = { period, adjust: normAdjust(adjust) }
   if (start) opts.startDate = start
   if (end) opts.endDate = end
-  return fetchWithRetry(() => sdk.kline.cn(sym, opts))
+  const rows = await fetchWithRetry(() => sdk.kline.cn(sym, opts))
+  return period === 'daily' ? rows.map(closedDailyBarTimestamp) : rows
+}
+
+function closedDailyBarTimestamp(row) {
+  // SDK history bars use Beijing midnight as a date marker, not a quote clock.
+  // Preserve unfinished bars and actual clocks; never invent a receipt time.
+  if (!row || typeof row.date !== 'string' || !/^20\d{2}-\d{2}-\d{2}$/.test(row.date)) return row
+  const midnight = Date.parse(`${row.date}T00:00:00+08:00`)
+  if (row.timestamp !== midnight) return row
+  const now = new Date(Date.now() + 8 * 3600_000)
+  const today = now.toISOString().slice(0, 10)
+  if (row.date < today || (row.date === today && now.getUTCHours() >= 16)) {
+    return { ...row, timestamp: null }
+  }
+  return row
 }
 
 async function opDaily(sdk, job) {
   const { symbols = [], adjust = 'none', period = 'daily', start, end, concurrency = 6 } = job
   const out = {}
-  const rows = await mapPool(symbols, concurrency, (sym) =>
+  // Python only supplies closed_day after checking the trading calendar. This
+  // path is deliberately limited to raw, most-recent closed stock sessions.
+  const closedDay = job.closed_day
+  const eligible = job.asset_type === 'stock' && period === 'daily'
+    && normAdjust(adjust) === '' && /^20\d{6}$/.test(closedDay || '')
+    && start === closedDay && end === closedDay
+    ? symbols.filter(sym => /^(?:6[08]\d{4}\.SH|(?:00|30)\d{4}\.SZ)$/.test(sym))
+    : []
+  if (eligible.length) {
+    try {
+      const quotes = await sdk.quotes.cn(eligible.map(sym => {
+        const [code, suffix] = sym.split('.')
+        return `${suffix.toLowerCase()}${code}`
+      }))
+      const wanted = new Set(eligible)
+      const seen = new Set()
+      const duplicates = new Set()
+      for (const q of Array.isArray(quotes) ? quotes : []) {
+        const suffix = MARKET_ID_TO_SUFFIX[String(q?.marketId)]
+        const sym = suffix && q?.code ? `${q.code}.${suffix}` : null
+        if (!wanted.has(sym)) continue
+        if (seen.has(sym)) duplicates.add(sym)
+        seen.add(sym)
+        const row = closedQuoteDaily(q, sym, closedDay)
+        if (row) out[sym] = [row]
+      }
+      for (const sym of duplicates) delete out[sym]
+    } catch {
+      // A failed batch must not suppress the established daily/failover route.
+    }
+  }
+  const missing = symbols.filter(sym => !out[sym])
+  const rows = await mapPool(missing, concurrency, (sym) =>
     fetchDaily(sdk, sym, { adjust, period, start, end })
   )
-  symbols.forEach((sym, i) => {
+  missing.forEach((sym, i) => {
     const r = rows[i]
     out[sym] = Array.isArray(r) ? r : []
   })
   return out
+}
+
+function closedQuoteDaily(q, symbol, day, now = Date.now()) {
+  if (q?.source !== 'tencent' || typeof q.time !== 'string' || !/^20\d{12}$/.test(q.time)) return null
+  const native = q.time
+  if (native.slice(0, 8) !== day || native.slice(8) < '150000') return null
+  const parts = [native.slice(0, 4), native.slice(4, 6), native.slice(6, 8),
+    native.slice(8, 10), native.slice(10, 12), native.slice(12, 14)].map(Number)
+  const [year, month, date, hour, minute, second] = parts
+  const utc = Date.UTC(year, month - 1, date, hour, minute, second)
+  const roundTrip = new Date(utc).toISOString().replace(/[-:TZ.]/g, '').slice(0, 14)
+  if (roundTrip !== native) return null
+  const timestamp = utc - 8 * 3600_000
+  if (q.timestamp !== timestamp || timestamp > now
+    || now < Date.UTC(year, month - 1, date, 8)) return null
+  const { open, high, low, price: close } = q
+  if (![open, high, low, close, q.volume, q.amount].every(v => Number.isFinite(v) && v > 0)
+    || high < Math.max(open, close, low) || low > Math.min(open, close)) return null
+  const volume = realtimeRecord(q, symbol).volume
+  const amount = q.amount * 10_000
+  if (!Number.isFinite(volume) || !Number.isFinite(amount)) return null
+  // Tencent amount is rounded in 10,000-yuan units. Check the implied VWAP
+  // with that precision and a one-cent price allowance; never infer a scale.
+  const shares = volume * 100
+  const tolerance = 5000 + shares * 0.01
+  if (amount < low * shares - tolerance || amount > high * shares + tolerance) return null
+  return {
+    date: `${day.slice(0, 4)}-${day.slice(4, 6)}-${day.slice(6, 8)}`,
+    open, high, low, close, volume, amount, timestamp,
+  }
 }
 
 async function opAdj(sdk, job) {
@@ -307,7 +384,12 @@ async function main() {
       process.stdout.write(JSON.stringify({ ok: true, op: 'ping', version: StockSDK.version || 'ok' }))
       return
     }
-    const sdk = new StockSDK({ retry: { maxRetries: 3, baseDelay: 400 } })
+    const sdk = new StockSDK({
+      retry: { maxRetries: 3, baseDelay: 400 },
+      ...(op === 'daily' && job.closed_day ? {
+        providerPolicies: { tencent: { timeout: 5000, retry: { maxRetries: 0 } } },
+      } : {}),
+    })
     let rows
     switch (op) {
       case 'daily':

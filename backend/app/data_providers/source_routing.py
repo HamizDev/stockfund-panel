@@ -10,7 +10,7 @@ import math
 import re
 import threading
 from collections import OrderedDict
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import polars as pl
 
@@ -22,6 +22,19 @@ _LOCK = threading.Lock()
 _PROXIES: OrderedDict = OrderedDict()
 _LAST: OrderedDict = OrderedDict()
 _SYMBOL = re.compile(r"\d{6}\.(SH|SZ|BJ)")
+_DAILY_BATCH = 40
+
+
+def _market_date(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo:
+            from app.market_time import CN_TZ
+
+            return value.astimezone(CN_TZ).date()
+        return value.date()
+    return value
 
 
 def enabled() -> bool:
@@ -131,9 +144,9 @@ def _daily(frame, symbols, start, end):
         & (pl.col('low') <= pl.min_horizontal('open', 'close'))
         & pl.col('volume').is_finite() & (pl.col('volume') >= 0))
     if start is not None:
-        frame = frame.filter(pl.col('date') >= start.date())
+        frame = frame.filter(pl.col('date') >= _market_date(start))
     if end is not None:
-        frame = frame.filter(pl.col('date') <= end.date())
+        frame = frame.filter(pl.col('date') <= _market_date(end))
     return frame.unique(['symbol', 'date'], keep='last').sort(['symbol', 'date'])
 
 
@@ -160,6 +173,67 @@ class _Provider:
 
     def __getattr__(self, name):
         return getattr(self._primary, name)
+
+    def iter_daily(
+        self,
+        symbols,
+        start_time=None,
+        end_time=None,
+        asset_type='stock',
+        on_chunk_done=None,
+    ):
+        """Yield short daily ranges through this wrapper so fallback stays active."""
+        if not symbols:
+            return
+        if self.name != 'stocksdk':
+            native_iter = getattr(self._primary, 'iter_daily', None)
+            if callable(native_iter):
+                yield from native_iter(
+                    symbols,
+                    start_time=start_time,
+                    end_time=end_time,
+                    asset_type=asset_type,
+                    on_chunk_done=on_chunk_done,
+                )
+            else:
+                yield self.get_daily(
+                    symbols,
+                    start_time=start_time,
+                    end_time=end_time,
+                    asset_type=asset_type,
+                    on_chunk_done=on_chunk_done,
+                )
+            return
+        start_date = _market_date(start_time)
+        end_date = _market_date(end_time)
+        short_range = (
+            start_date is not None
+            and end_date is not None
+            and end_date >= start_date
+            and end_date - start_date <= timedelta(days=7)
+        )
+        if not short_range:
+            yield self.get_daily(
+                symbols,
+                start_time=start_time,
+                end_time=end_time,
+                asset_type=asset_type,
+                on_chunk_done=on_chunk_done,
+            )
+            return
+
+        total = (len(symbols) + _DAILY_BATCH - 1) // _DAILY_BATCH
+        for index, offset in enumerate(range(0, len(symbols), _DAILY_BATCH), start=1):
+            frame = self.get_daily(
+                symbols[offset : offset + _DAILY_BATCH],
+                start_time=start_time,
+                end_time=end_time,
+                asset_type=asset_type,
+                on_chunk_done=None,
+            )
+            yield frame
+            if on_chunk_done:
+                on_chunk_done(index, total)
 
     def get_daily(self, symbols, start_time=None, end_time=None, asset_type='stock', on_chunk_done=None):
         if self.name != 'stocksdk' or not enabled():

@@ -8,6 +8,7 @@ import {
 import { cn } from '@/lib/cn'
 import { copyText } from '@/lib/clipboard'
 import { toast } from '@/components/Toast'
+import { ResearchReviewPanel } from '@/components/stock-analysis/ResearchReviewPanel'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import {
   type ActiveTask, type HistoryReport,
@@ -105,7 +106,7 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
   const handleStartNew = useCallback(async () => {
     if (!task) return
     const name = 'name' in task ? task.name : ''
-    await startAnalysis(task.symbol, name, focus.trim())
+    await startAnalysis(task.symbol, name, focus.trim(), task && 'options' in task ? task.options : undefined)
   }, [task, focus])
 
   const handleCopy = async () => {
@@ -202,6 +203,7 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
           {content && <div className="shrink-0 px-5 pt-3"><EvidenceSummary evidence={task?.evidence} /></div>}
           {/* 内容区 */}
           <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-4 min-h-[280px]">
+            {task && 'stageMessage' in task && task.stageMessage && <p role="status" className="mb-3 text-xs text-accent">{task.stageMessage}</p>}
             {phase === 'loading' && !content && (
               <div className="flex flex-col items-center justify-center py-16 gap-3">
                 <div className="relative">
@@ -238,6 +240,7 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
             {(content || phase === 'streaming') && (
               <div className="relative">
                 <MarkdownRenderer content={content} />
+                {!isWorking && <ResearchReviewPanel compact recordId={task?.research_id} />}
                 {phase === 'streaming' && (
                   <span className="inline-block w-1.5 h-3.5 bg-sky-400 ml-0.5 align-middle animate-pulse rounded-sm" />
                 )}

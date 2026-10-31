@@ -10,6 +10,15 @@ import type { GlobalMarket, GlobalMarketChartInterval } from '@/custom/global_ma
 // ===== Query Key 工厂 =====
 
 export const QK = {
+  kronosStatus: ['kronos-status'] as const,
+  kronosJob: (id: string) => ['kronos-job', id] as const,
+  kronosEvaluation: (id: string) => ['kronos-evaluation', id] as const,
+  kronosComparisons: (symbol: string, period: 'daily' | '1m') => ['kronos-comparisons', symbol, period] as const,
+  kronosComparison: (id: string) => ['kronos-comparison', id] as const,
+  kronosSummary: (symbol: string, period: 'daily' | '1m') => ['kronos-comparison-summary', symbol, period] as const,
+  kronosCandidates: ['kronos-candidates'] as const,
+  researchDecisions: ['analysis-research', 'decisions'] as const,
+  researchDecision: (id: string) => ['analysis-research', 'decision', id] as const,
   indicatorCatalog: ['indicator-library', 'catalog'] as const,
   indicatorSearch: (q: string, author: string, kind: string, page: number, offline: boolean) =>
     ['indicator-library', 'search', q, author, kind, page, offline] as const,

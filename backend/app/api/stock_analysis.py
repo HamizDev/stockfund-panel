@@ -14,11 +14,13 @@ from __future__ import annotations
 import logging
 import math
 from datetime import timedelta
+from typing import Literal
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+from starlette.concurrency import run_in_threadpool
 
 from app.indicators.levels import compute_levels, summarize_levels
 from app.market_time import cn_now, cn_today
@@ -161,6 +163,16 @@ class AnalyzeRequest(BaseModel):
     symbol: str
     focus: str = ""  # 可选:用户追加的分析关注点
     research_plan: bool = False  # 选股页的条件研究计划; 不执行任何交易
+    name: str = Field('', max_length=100)
+    review: bool = False
+    horizon_sessions: Literal[1, 3, 5] = 1
+
+    @field_validator('horizon_sessions', mode='before')
+    @classmethod
+    def strict_horizon(cls, value):
+        if type(value) is not int:
+            raise ValueError('观察期限必须为实际交易日数')
+        return value
 
 
 @router.post("/analyze")
@@ -180,7 +192,8 @@ async def analyze_stock(request: Request, req: AnalyzeRequest):
     async def stream_gen():
         stream = analyze_stock_stream(
             repo, data_dir, req.symbol, req.focus, research_plan=req.research_plan,
-            refresh=True, capset=getattr(request.app.state, "capabilities", None), request_time=request_time)
+            refresh=True, capset=getattr(request.app.state, "capabilities", None), request_time=request_time,
+            review=req.review, horizon_sessions=req.horizon_sessions, archive=True, name=req.name)
         async for chunk in with_heartbeat(stream):
             yield chunk + "\n"
 
@@ -211,6 +224,7 @@ class SaveReportRequest(BaseModel):
     price_basis: str | None = None
     requested_at: str | None = None
     evidence: dict | None = None
+    research_id: str | None = None
 
 
 @router.get("/reports")
@@ -222,6 +236,17 @@ def list_reports(request: Request):
 @router.post("/reports")
 def save_report(request: Request, req: SaveReportRequest):
     """保存一条报告。"""
+    if req.research_id:
+        import hashlib
+
+        from app.services import research_outcomes
+        try:
+            original = research_outcomes.get_decision(request.app.state.repo.store.data_dir, req.research_id)['record']
+            if (original['symbol'] != req.symbol
+                    or original['content_sha256'] != hashlib.sha256(req.content.encode('utf-8')).hexdigest()):
+                raise ValueError('报告与研究档案不一致')
+        except (LookupError, ValueError, OSError):
+            raise HTTPException(409, '报告与原研究档案不一致，未改原档案') from None  # noqa: RUF001 -- localized Chinese message
     report = stock_reports.save_report({
         "symbol": req.symbol,
         "name": req.name,
@@ -237,8 +262,43 @@ def save_report(request: Request, req: SaveReportRequest):
         "price_basis": req.price_basis,
         "requested_at": req.requested_at,
         "evidence": req.evidence,
+        "research_id": req.research_id,
     })
     return {"ok": True, "report": report}
+
+
+@router.get('/research/records')
+def research_records(request: Request):
+    from app.services.research_outcomes import list_decisions
+    try:
+        return list_decisions(request.app.state.repo.store.data_dir)
+    except (ValueError, OSError):
+        raise HTTPException(409, '研究索引不可核验，原记录保留') from None  # noqa: RUF001 -- localized Chinese message
+
+
+@router.get('/research/records/{identity}')
+def research_record(request: Request, identity: str):
+    from app.services.research_outcomes import get_decision
+    try:
+        return get_decision(request.app.state.repo.store.data_dir, identity)
+    except LookupError:
+        raise HTTPException(404, '研究记录不存在') from None
+    except (ValueError, OSError):
+        raise HTTPException(409, '研究记录不可核验，原记录保留') from None  # noqa: RUF001 -- localized Chinese message
+
+
+@router.post('/research/records/{identity}/refresh')
+async def research_record_refresh(request: Request, identity: str):
+    from app.services.research_outcomes import refresh_outcome
+    repo = request.app.state.repo
+    try:
+        return await run_in_threadpool(refresh_outcome, repo, repo.store.data_dir, identity)
+    except LookupError:
+        raise HTTPException(404, '研究记录不存在') from None
+    except (ValueError, OSError):
+        raise HTTPException(409, '研究记录不可核验，未计分') from None  # noqa: RUF001 -- localized Chinese message
+    except Exception:
+        raise HTTPException(503, '目标行情暂不可用，请稍后核对') from None  # noqa: RUF001 -- localized Chinese message
 
 
 @router.delete("/reports/{report_id}")

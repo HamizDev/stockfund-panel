@@ -8,7 +8,12 @@ from datetime import datetime
 import polars as pl
 
 from app.data_providers.base import AssetType, ProviderCapabilities
-from app.data_providers.normalizer import normalize_adj_factors, normalize_daily, normalize_instruments
+from app.data_providers.normalizer import (
+    normalize_adj_factors,
+    normalize_daily,
+    normalize_instruments,
+)
+from app.market_time import cn_now
 from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
@@ -58,20 +63,39 @@ class TickFlowProvider:
             "show_progress": False,
         }
         if start_time and end_time:
-            from app.services.kline_sync import _compact_klines_to_df, _datetime_to_ms, _timestamp_to_beijing_datetime
+            from app.services.kline_sync import (
+                _compact_klines_to_df,
+                _datetime_to_ms,
+                _timestamp_to_beijing_datetime,
+            )
             kwargs["start_time"] = _datetime_to_ms(start_time)
             kwargs["end_time"] = _datetime_to_ms(end_time)
         else:
-            from app.services.kline_sync import _compact_klines_to_df, _timestamp_to_beijing_datetime
+            from app.services.kline_sync import (
+                _compact_klines_to_df,
+                _timestamp_to_beijing_datetime,
+            )
         raw = tf.klines.batch(symbols, **kwargs)
         # False 直转: 列数组→polars (无 pandas 中转), 加北京墙钟 datetime 列
-        # (normalize_daily 映射为 date); 保留 timestamp 原列 — normalize_daily
-        # 会把它改名为 quote_ts (盘后校验/量比折算用), 不能像 kline_sync 路径那样丢弃。
+        # Historical midnight timestamps identify bar dates, not quote times.
+        # Clear them only for closed bars; retain unfinished and real clocks.
         seg = _compact_klines_to_df(raw)
         if seg.is_empty():
             return pl.DataFrame()
         seg = seg.with_columns(_timestamp_to_beijing_datetime(pl.col("timestamp")).alias("datetime"))
-        return normalize_daily(seg, source=self.name)
+        frame = normalize_daily(seg, source=self.name)
+        if frame.is_empty() or 'quote_ts' not in frame.columns:
+            return frame
+        now = cn_now()
+        closed = pl.col('date') < pl.lit(now.date())
+        if now.hour >= 16:
+            closed = closed | (pl.col('date') == pl.lit(now.date()))
+        midnight = (pl.col('date').cast(pl.Datetime('ms'))
+                    .dt.replace_time_zone('Asia/Shanghai').dt.epoch('ms'))
+        return frame.with_columns(
+            pl.when(closed & (pl.col('quote_ts') == midnight))
+            .then(pl.lit(None, dtype=pl.Int64)).otherwise(pl.col('quote_ts')).alias('quote_ts')
+        )
 
     def get_adj_factors(
         self,

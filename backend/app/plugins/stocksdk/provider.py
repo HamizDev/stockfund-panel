@@ -13,13 +13,14 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from datetime import time as dtime
 
 import polars as pl
 
 from app.data_providers.base import AssetType
 from app.data_providers.normalizer import normalize_daily
+from app.market_time import CN_TZ, cn_now
 from app.plugins.stocksdk import bridge
 from app.tickflow.rate_limits import chunked
 
@@ -45,7 +46,49 @@ class _StockSDKConfig:
 
 
 def _yyyymmdd(dt: datetime | None) -> str | None:
-    return dt.strftime("%Y%m%d") if dt else None
+    if dt is None:
+        return None
+    if dt.tzinfo:
+        dt = dt.astimezone(CN_TZ)
+    return dt.strftime("%Y%m%d")
+
+
+def _market_date(value: datetime) -> date:
+    return value.astimezone(CN_TZ).date() if value.tzinfo else value.date()
+
+
+def _closed_daily_day(start_time: datetime | None, end_time: datetime | None) -> str | None:
+    """Return the requested day only when it is the latest officially closed session."""
+    if start_time is None or end_time is None:
+        return None
+    requested = _market_date(end_time)
+    if _market_date(start_time) != requested:
+        return None
+
+    now = cn_now()
+    if now.date() == requested and now.hour < 16:
+        return None
+    boundary = now.date() if now.hour < 16 else now.date() + timedelta(days=1)
+    try:
+        from app.services import trading_calendar
+
+        latest_closed = trading_calendar.previous_trading_day(boundary, wait_seconds=0)
+    except Exception:  # Calendar uncertainty must not enable the snapshot path.
+        return None
+    if latest_closed != requested:
+        return None
+    return requested.strftime("%Y%m%d")
+
+
+def _daily_range_is_short(start_time: datetime | None, end_time: datetime | None) -> bool:
+    start_date = _market_date(start_time) if start_time is not None else None
+    end_date = _market_date(end_time) if end_time is not None else None
+    return (
+        start_date is not None
+        and end_date is not None
+        and end_date >= start_date
+        and end_date - start_date <= timedelta(days=7)
+    )
 
 
 class StockSDKProvider:
@@ -70,22 +113,26 @@ class StockSDKProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: str = "stock",  # noqa: ARG002
+        asset_type: str = "stock",
         on_chunk_done=None,
     ) -> pl.DataFrame:
         if not symbols:
             return pl.DataFrame()
         logger.info("stock-sdk daily 拉取开始(%d symbols)", len(symbols))
         frames: list[pl.DataFrame] = []
+        closed_day = _closed_daily_day(start_time, end_time)
         chunks = chunked(symbols, _BATCH)
         for i, chunk in enumerate(chunks):
             job = {
                 "op": "daily",
                 "symbols": chunk,
+                "asset_type": asset_type,
                 "adjust": "none",
                 "start": _yyyymmdd(start_time),
                 "end": _yyyymmdd(end_time),
             }
+            if closed_day is not None:
+                job["closed_day"] = closed_day
             try:
                 result = bridge.run_job(job, timeout=180)
             except bridge.StockSDKBridgeError as e:
@@ -100,6 +147,40 @@ class StockSDKProvider:
             if on_chunk_done:
                 on_chunk_done(i + 1, len(chunks))
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+
+    def iter_daily(
+        self,
+        symbols: list[str],
+        start_time: datetime | None,
+        end_time: datetime | None,
+        asset_type: str = "stock",
+        on_chunk_done: Callable[[int, int], None] | None = None,
+    ):
+        """Yield short-range daily chunks; retain the aggregate path for long history."""
+        if not symbols:
+            return
+        if not _daily_range_is_short(start_time, end_time) or len(symbols) <= _BATCH:
+            yield self.get_daily(
+                symbols,
+                start_time=start_time,
+                end_time=end_time,
+                asset_type=asset_type,
+                on_chunk_done=on_chunk_done,
+            )
+            return
+
+        total = (len(symbols) + _BATCH - 1) // _BATCH
+        for index, offset in enumerate(range(0, len(symbols), _BATCH), start=1):
+            frame = self.get_daily(
+                symbols[offset : offset + _BATCH],
+                start_time=start_time,
+                end_time=end_time,
+                asset_type=asset_type,
+                on_chunk_done=None,
+            )
+            yield frame
+            if on_chunk_done:
+                on_chunk_done(index, total)
 
     # ---- adj_factor ----
     def get_adj_factors(

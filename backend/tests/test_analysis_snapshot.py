@@ -19,7 +19,8 @@ def rows(day=date(2026, 10, 16), symbol=SYMBOL, close=.592):
 @pytest.fixture
 def context(monkeypatch):
     calls = []
-    provider = SimpleNamespace(get_daily=lambda symbols, **kwargs: (calls.append((symbols, kwargs)), rows())[1])
+    provider = SimpleNamespace(daily_price_basis='raw',
+        get_daily=lambda symbols, **kwargs: (calls.append((symbols, kwargs)), rows())[1])
     monkeypatch.setattr(service, "cn_now", lambda: datetime(2026, 10, 18, 12))
     monkeypatch.setattr(service.preferences, "get_daily_data_provider", lambda: "fake")
     monkeypatch.setattr(service.custom, "provider_has_dataset", lambda name, dataset: True)

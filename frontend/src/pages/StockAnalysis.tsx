@@ -1,7 +1,7 @@
 import { chartPrice } from '@/lib/chartPrice'
 import { SnapshotPanel, useResearchSnapshot } from '@/custom/research_tools/SnapshotPanel'
 import { useState, useEffect, useCallback } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, AlertTriangle } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
@@ -14,6 +14,7 @@ import { RecentStockTabs } from '@/components/RecentStockTabs'
 import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/stock-analysis/AnalysisKChart'
 import { AnalysisMinutePanel } from '@/components/stock-analysis/AnalysisMinutePanel'
 import { EtfSharesPanel } from '@/components/stock-analysis/EtfSharesPanel'
+import { ResearchReviewPanel } from '@/components/stock-analysis/ResearchReviewPanel'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
 import { TechnicalSummary } from '@/components/research/TechnicalSummary'
 import { api, type AnalysisSnapshot } from '@/lib/api'
@@ -62,6 +63,13 @@ export function StockAnalysis() {
   const [symbol, setSymbol] = useState<string>('')
   const [name, setName] = useState<string>('')
   const [checking, setChecking] = useState(false)
+  const [researchOptions, setResearchOptions] = usePageState('stockAnalysisResearch',
+    { review: false, horizon_sessions: 1 as 1 | 3 | 5 },
+    (value): value is { review: boolean; horizon_sessions: 1 | 3 | 5 } => {
+      if (!value || typeof value !== 'object') return false
+      const candidate = value as Record<string, unknown>
+      return typeof candidate.review === 'boolean' && [1, 3, 5].includes(candidate.horizon_sessions as number)
+    })
   const [confirmReport, setConfirmReport] = useState<{ id: string; created_at: string; focus: string } | null>(null)
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
   const [showPriceAlerts, setShowPriceAlerts] = useState(false)
@@ -138,7 +146,7 @@ export function StockAnalysis() {
   }
 
   const doAnalysis = async () => {
-    const r = await startAnalysis(symbol, resolvedName)
+    const r = await startAnalysis(symbol, resolvedName, '', researchOptions)
     if (r.error) toast(r.error, 'error')
   }
 
@@ -189,6 +197,30 @@ export function StockAnalysis() {
                 <Bell className="h-3.5 w-3.5" />
                 点位提醒
               </button>
+              <label className="inline-flex items-center gap-2 text-xs text-secondary">
+                <input type="checkbox" checked={researchOptions.review}
+                  onChange={event => setResearchOptions({ ...researchOptions, review: event.target.checked })} />
+                反方复核（额外1次AI）
+              </label>
+              <label className="inline-flex items-center gap-2 text-xs text-secondary">
+                复盘窗口
+                <select aria-label="研究复盘窗口" value={researchOptions.horizon_sessions}
+                  onChange={event => setResearchOptions({ ...researchOptions, horizon_sessions: Number(event.target.value) as 1 | 3 | 5 })}
+                  className="rounded-btn border border-border bg-surface px-2 py-1 text-foreground">
+                  <option value={1}>下一交易日收盘</option>
+                  <option value={3}>后3个交易日收盘</option>
+                  <option value={5}>后5个交易日收盘</option>
+                </select>
+              </label>
+              {knownAssetType?.assetType !== 'index' && (
+                <Link
+                  to={`/kronos?${new URLSearchParams({ symbol, name: resolvedName, period: 'daily' }).toString()}`}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn border border-purple-400/25 bg-purple-400/[0.08] text-purple-300 text-xs font-medium hover:bg-purple-400/[0.12] transition-colors"
+                >
+                  <LineChart className="h-3.5 w-3.5" />
+                  K线预测
+                </Link>
+              )}
             </>
           )}
         </div>
@@ -214,6 +246,7 @@ export function StockAnalysis() {
           </div>
           <HistorySidebar />
         </div>
+        <ResearchReviewPanel />
       </div>
 
       {/* 二次确认:已有历史报告 */}

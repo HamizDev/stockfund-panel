@@ -133,7 +133,7 @@ def load_snapshot(repo, capset, symbol: str, days: int, *,
         except Exception:  # Optional SDK/network errors retain the existing local fallback.
             pass
 
-    source, basis = "online", "unadjusted"
+    source, basis = 'online', ('unadjusted' if raw_daily_verified else 'provider_unverified')
     # The repository also contributes a newer valid local frame if the upstream
     # omits recent sessions. Never replace a newer chart with older provider rows.
     try:
@@ -216,6 +216,7 @@ def load_snapshot(repo, capset, symbol: str, days: int, *,
         "requested_at": now.isoformat(), "require_current_minute": require_current_minute,
         "minute_rows": minute_rows,
         "is_provisional": is_provisional,
+        'raw_reference_verified': (raw_daily_verified if source == 'online' else 'raw_close' in frame.columns),
         "checked_at": cn_now().isoformat(), "warning": warning,
     }
     metadata['freshness_error'] = freshness_error(metadata, now) if include_current else None

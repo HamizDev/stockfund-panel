@@ -3,7 +3,34 @@
 // Dev: Vite 按启动脚本解析出的 BACKEND_HOST/BACKEND_PORT 代理 /api
 // Prod:同源(FastAPI 托管前端 dist)
 
+import { parseKronosEvaluation, type KronosEvaluation } from '@/custom/kronos/evaluationTypes'
+import {
+  parseKronosCandidate,
+  parseKronosCandidatesResponse,
+  parseKronosComparison,
+  parseKronosComparisonList,
+  parseKronosComparisonRequest,
+  parseKronosComparisonSummary,
+  type KronosCandidate,
+  type KronosCandidatesResponse,
+  type KronosComparison,
+  type KronosComparisonList,
+  type KronosComparisonRequest,
+  type KronosComparisonSummary,
+  type KronosCreateCandidateRequest,
+} from '@/custom/kronos/comparisonTypes'
+import {
+  parseKronosJob,
+  parseKronosRequest,
+  parseKronosStatus,
+  type KronosJob,
+  type KronosJobRequest,
+  type KronosPeriod,
+  type KronosStatus,
+} from '@/custom/kronos/types'
+
 import { toast } from '@/components/Toast'
+import type { ResearchDecisionDetail, ResearchDecisionItem, ResearchDecisionList, ResearchOutcome } from './researchTypes'
 import type { ReportEvidence, ResearchSnapshot, LibraryRecord } from '@/custom/research_tools/types'
 import { canonicalFinancialSymbol } from '@/custom/global_markets/marketFormatters'
 import type { IndicatorCatalog, IndicatorSearch, IndicatorSearchParams, IndicatorSource } from '@/custom/indicator_library/types'
@@ -359,6 +386,7 @@ export interface StockLevels {
 }
 
 export interface AiStockReport {
+  research_id?: string | null
   evidence?: ReportEvidence
   id: string
   symbol: string
@@ -2519,6 +2547,128 @@ export interface SectorRotationUniverseItem {
 
 // ===== API surface =====
 export const api = {
+  kronosStatus: (signal?: AbortSignal): Promise<KronosStatus> => request<unknown>(
+    '/api/custom/kronos/status', { signal, quiet: true },
+  ).then(parseKronosStatus),
+  kronosEvaluation: (id: string, signal?: AbortSignal): Promise<KronosEvaluation> => request<unknown>(
+    `/api/custom/kronos/jobs/${encodeURIComponent(id)}/evaluation`, { signal, quiet: true },
+  ).then(value => parseKronosEvaluation(value, id)),
+  kronosCreateJob: (requestBody: KronosJobRequest, signal?: AbortSignal): Promise<KronosJob> => {
+    const validatedRequest = parseKronosRequest(requestBody)
+    return request<unknown>('/api/custom/kronos/jobs', {
+      method: 'POST',
+      body: JSON.stringify(validatedRequest),
+      signal,
+      quiet: true,
+    }).then(value => {
+      const job = parseKronosJob(value)
+      const sameRequest = job.request.symbol === validatedRequest.symbol
+        && job.request.name === validatedRequest.name
+        && job.request.model === validatedRequest.model
+        && job.request.period === validatedRequest.period
+        && job.request.lookback === validatedRequest.lookback
+        && job.request.horizon === validatedRequest.horizon
+        && job.request.samples === validatedRequest.samples
+      if (!sameRequest) throw new Error('Kronos 新建任务响应与提交参数不匹配')
+      return job
+    })
+  },
+  kronosJob: (id: string, signal?: AbortSignal): Promise<KronosJob> => request<unknown>(
+    `/api/custom/kronos/jobs/${encodeURIComponent(id)}`, { signal, quiet: true },
+  ).then(value => {
+    const job = parseKronosJob(value)
+    if (job.id !== id) throw new Error('Kronos 任务响应 ID 不匹配')
+    return job
+  }),
+  kronosCancelJob: (id: string, signal?: AbortSignal): Promise<KronosJob> => request<unknown>(
+    `/api/custom/kronos/jobs/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+      signal,
+      quiet: true,
+    },
+  ).then(value => {
+    const job = parseKronosJob(value)
+    if (job.id !== id) throw new Error('Kronos 取消响应 ID 不匹配')
+    return job
+  }),
+  kronosComparisons: (symbol: string, period: KronosPeriod, signal?: AbortSignal): Promise<KronosComparisonList> => {
+    const query = new URLSearchParams({ symbol, period })
+    return request<unknown>(`/api/custom/kronos/comparisons?${query}`, { signal, quiet: true }).then(value => {
+      const list = parseKronosComparisonList(value)
+      if (list.items.some(item => item.request.symbol !== symbol || item.request.period !== period)) {
+        throw new Error('Kronos 比较列表与请求标的或周期不匹配')
+      }
+      return list
+    })
+  },
+  kronosComparison: (id: string, signal?: AbortSignal): Promise<KronosComparison> => request<unknown>(
+    `/api/custom/kronos/comparisons/${encodeURIComponent(id)}`, { signal, quiet: true },
+  ).then(value => {
+    const comparison = parseKronosComparison(value)
+    if (comparison.id !== id) throw new Error('Kronos 比较响应 ID 不匹配')
+    return comparison
+  }),
+  kronosCreateComparison: (requestBody: KronosComparisonRequest, signal?: AbortSignal): Promise<KronosComparison> => {
+    const validatedRequest = parseKronosComparisonRequest(requestBody)
+    return request<unknown>('/api/custom/kronos/comparisons', {
+      method: 'POST',
+      body: JSON.stringify(validatedRequest),
+      signal,
+      quiet: true,
+    }).then(value => {
+      const comparison = parseKronosComparison(value)
+      const sameRequest = comparison.request.symbol === validatedRequest.symbol
+        && comparison.request.name === validatedRequest.name
+        && comparison.request.period === validatedRequest.period
+        && comparison.request.horizon === validatedRequest.horizon
+        && comparison.request.samples === validatedRequest.samples
+        && [...comparison.request.models].sort().join(',') === [...validatedRequest.models].sort().join(',')
+        && [...comparison.request.lookbacks].sort((a, b) => a - b).join(',') === [...validatedRequest.lookbacks].sort((a, b) => a - b).join(',')
+      if (!sameRequest) throw new Error('Kronos 比较响应与提交参数不匹配')
+      return comparison
+    })
+  },
+  kronosCancelComparison: (id: string, signal?: AbortSignal): Promise<KronosComparison> => request<unknown>(
+    `/api/custom/kronos/comparisons/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+      signal,
+      quiet: true,
+    },
+  ).then(value => {
+    const comparison = parseKronosComparison(value)
+    if (comparison.id !== id) throw new Error('Kronos 取消比较响应 ID 不匹配')
+    return comparison
+  }),
+  kronosComparisonSummary: (symbol: string, period: KronosPeriod, signal?: AbortSignal): Promise<KronosComparisonSummary> => {
+    const query = new URLSearchParams({ symbol, period })
+    return request<unknown>(`/api/custom/kronos/comparisons/summary?${query}`, { signal, quiet: true }).then(value => {
+      const summary = parseKronosComparisonSummary(value)
+      if (summary.groups.some(group => group.period !== period || (group.symbol !== undefined && group.symbol !== symbol))) {
+        throw new Error('Kronos 成绩汇总标的或周期与请求不匹配')
+      }
+      return summary
+    })
+  },
+  kronosCandidates: (signal?: AbortSignal): Promise<KronosCandidatesResponse> => request<unknown>(
+    '/api/custom/kronos/candidates', { signal, quiet: true },
+  ).then(parseKronosCandidatesResponse),
+  kronosCreateCandidate: (input: KronosCreateCandidateRequest, signal?: AbortSignal): Promise<KronosCandidate> => {
+    const body = {
+      comparison_id: input.comparison_id.trim(),
+      trial_id: input.trial_id.trim(),
+      label: input.label.trim(),
+    }
+    if (!body.comparison_id || !body.trial_id || !body.label) throw new Error('Kronos 候选配置需要比较、trial 和名称')
+    return request<unknown>('/api/custom/kronos/candidates', {
+      method: 'POST', body: JSON.stringify(body), signal, quiet: true,
+    }).then(parseKronosCandidate)
+  },
+  kronosRetireCandidate: (id: string, signal?: AbortSignal): Promise<KronosCandidate> => request<unknown>(
+    `/api/custom/kronos/candidates/${encodeURIComponent(id)}/retire`, {
+      method: 'POST', signal, quiet: true,
+    },
+  ).then(parseKronosCandidate),
+
   indicatorCatalog: (signal?: AbortSignal) => request<IndicatorCatalog>(
     '/api/custom/indicator-library/catalog', { signal, quiet: true }),
   indicatorSearch: (params: IndicatorSearchParams, signal?: AbortSignal) => request<IndicatorSearch>(
@@ -3994,6 +4144,9 @@ export const api = {
     request<LibraryRecord>('/api/custom/research-tools/library', { method: 'POST', body: JSON.stringify({ name, content }), quiet: true }),
 
   // ===== 个股分析 =====
+  researchDecisions: (signal?: AbortSignal) => request<ResearchDecisionList>('/api/stock-analysis/research/records', { signal, quiet: true }),
+  researchDecision: (id: string, signal?: AbortSignal) => request<ResearchDecisionDetail>(`/api/stock-analysis/research/records/${encodeURIComponent(id)}`, { signal, quiet: true }),
+  researchDecisionRefresh: (id: string) => request<ResearchOutcome>(`/api/stock-analysis/research/records/${encodeURIComponent(id)}/refresh`, { method: 'POST', quiet: true }),
   stockAnalysisSnapshot: async (symbol: string, days = 250, signal?: AbortSignal) => {
     const controller = new AbortController()
     const abort = () => controller.abort()
@@ -4015,6 +4168,7 @@ export const api = {
     request<{ reports: AiStockReport[] }>('/api/stock-analysis/reports'),
 
   stockAnalysisReportSave: (r: {
+    research_id?: string | null
     symbol: string; name?: string; focus?: string; content: string
     evidence?: ReportEvidence
     summary?: string; close?: number | null
@@ -4037,8 +4191,10 @@ export const api = {
    * AI 个股四维分析 — 流式调用(NDJSON,与财务分析同协议)。
    * meta 里额外带 levels(关键价位)供图表回放。
    */
-  async *stockAnalyzeStream(symbol: string, focus?: string): AsyncGenerator<{
-    type: 'meta' | 'delta' | 'error' | 'done' | 'ping' | 'evidence'
+  async *stockAnalyzeStream(symbol: string, focus?: string, options?: { review?: boolean; horizon_sessions?: 1 | 3 | 5; name?: string }): AsyncGenerator<{
+    type: 'meta' | 'delta' | 'error' | 'done' | 'ping' | 'evidence' | 'stage' | 'research'
+    research?: ResearchDecisionItem
+    asset_type?: 'stock' | 'etf' | 'index'
     evidence?: ReportEvidence
     symbol?: string
     summary?: string
@@ -4056,7 +4212,7 @@ export const api = {
     const res = await fetch('/api/stock-analysis/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol, focus: focus ?? '' }),
+      body: JSON.stringify({ symbol, focus: focus ?? '', ...options }),
     })
     if (!res.ok) {
       let detail = ''

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,6 +29,22 @@ def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None
         except OSError:
             pass
     os.replace(tmp, path)
+
+
+def atomic_write_text_exclusive(path: Path, text: str, *, mode: int = 0o600) -> None:
+    """Publish a research record without following a pre-existing temp link."""
+    temporary = path.with_name(f'.{path.name}.{uuid.uuid4().hex}.tmp')
+    created = False
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        created = True
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+            stream.write(text)
+            stream.flush()
+        os.replace(temporary, path)
+    finally:
+        if created:
+            temporary.unlink(missing_ok=True)
 
 
 def atomic_write_parquet(df: pl.DataFrame, path: Path) -> None:

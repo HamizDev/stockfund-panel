@@ -538,6 +538,15 @@ def _persist_daily_chunks(chunks, repo: KlineRepository) -> int:
             files = sorted(date_dir.glob("*.parquet"))
             if files:
                 repo.append_daily(pl.scan_parquet(files).collect(engine="streaming"))
+        if written:
+            try:
+                d = repo.store.data_dir.as_posix().replace("'", "''")
+                repo.db.execute(
+                    f"""CREATE OR REPLACE VIEW kline_daily AS
+                        SELECT * FROM read_parquet('{d}/kline_daily/**/*.parquet', union_by_name=true)"""
+                )
+            except Exception as e:
+                logger.warning("refresh view failed: %s", e)
     finally:
         shutil.rmtree(root, ignore_errors=True)
         with contextlib.suppress(OSError):
@@ -565,7 +574,6 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
     一个请求覆盖 ~5500 只股票,比 batch K-line 快几个数量级。
     返回写入的行数。
     """
-    from datetime import date as _date
 
     from app.tickflow.client import get_client
 

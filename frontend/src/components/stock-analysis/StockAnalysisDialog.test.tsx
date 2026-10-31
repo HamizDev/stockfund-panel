@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { StockAnalysisDialog } from './StockAnalysisDialog'
 import type { ActiveTask, HistoryReport } from '@/lib/stockAnalysisStore'
@@ -21,21 +22,26 @@ vi.mock('@/lib/stockAnalysisStore', () => ({
 
 let root: Root
 let host: HTMLDivElement
+let queryClient: QueryClient
 
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 })
 
 afterEach(async () => {
   await act(async () => root.unmount())
   host.remove()
+  queryClient.clear()
 })
 
 async function render(task: ActiveTask | HistoryReport, mode: 'active' | 'history' = 'history') {
-  await act(async () => root.render(<StockAnalysisDialog task={task} mode={mode} minimized={false} />))
+  await act(async () => root.render(<QueryClientProvider client={queryClient}>
+    <StockAnalysisDialog task={task} mode={mode} minimized={false} />
+  </QueryClientProvider>))
 }
 
 it('shows the recorded quote cutoff and marks provisional daily data', async () => {
