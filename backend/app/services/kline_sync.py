@@ -21,6 +21,7 @@ import polars as pl
 from app.data_providers.base import AssetType
 from app.indicators.pipeline import filter_halt_days
 from app.market_time import CN_TZ, cn_now, cn_today
+from app.parquet import scan_daily_parquet
 from app.services import minute_adjust, preferences
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
@@ -537,7 +538,7 @@ def _persist_daily_chunks(chunks, repo: KlineRepository) -> int:
         for date_dir in sorted(root.glob("date=*")):
             files = sorted(date_dir.glob("*.parquet"))
             if files:
-                repo.append_daily(pl.scan_parquet(files).collect(engine="streaming"))
+                repo.append_daily(scan_daily_parquet(files).collect(engine="streaming"))
         if written:
             try:
                 d = repo.store.data_dir.as_posix().replace("'", "''")

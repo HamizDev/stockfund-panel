@@ -42,7 +42,7 @@ from app.plugins.txquote.client import TxQuoteClient, TxQuoteError
 logger = logging.getLogger(__name__)
 
 # 只声明真实提供的数据集; 其余数据集 provider_has_dataset 返回 False → 回退
-_DATASETS = ("minute", "depth5")
+_DATASETS = ("minute", "depth5", "daily")
 
 # freq → 新浪 scale 映射。1m 走腾讯分时 (仅当日), 不在此表。
 _FREQ_TO_SINA_SCALE = {"5m": 5, "15m": 15, "30m": 30, "60m": 60}
@@ -85,7 +85,7 @@ def _to_float(value) -> float | None:
 
 
 class TxQuoteProvider:
-    """txquote 数据源。minute = 分钟K; depth5 = 五档盘口。"""
+    """txquote 数据源: 提供分钟K、五档盘口和有界原始日K备用。"""
 
     name = "txquote"
     builtin = True
@@ -107,6 +107,22 @@ class TxQuoteProvider:
             with contextlib.suppress(Exception):
                 self._client.close()
             self._client = None
+
+    daily_price_basis = "raw"
+
+    def get_daily(self, symbols, start_time, end_time, asset_type="stock", on_chunk_done=None):
+        """Bounded raw daily fallback; amount is unknown and remains null."""
+        from .research import daily
+
+        if not symbols:
+            return pl.DataFrame()
+        return daily(symbols, start_time, end_time, asset_type, on_chunk_done)
+
+    def get_trade_prints(self, symbol, *, max_pages=3):
+        """Optional read-only research contract; sampled prints, not Level-2."""
+        from .research import trade_prints
+
+        return trade_prints(symbol, max_pages=max_pages)
 
     def _get_client(self) -> TxQuoteClient:
         if self._client is None:

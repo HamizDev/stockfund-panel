@@ -5,9 +5,10 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from fastapi import APIRouter, Request
 
@@ -49,9 +50,15 @@ _table_cache: dict[str, dict | None] = {
 }
 _table_cache_ts: dict[str, float] = {k: 0.0 for k in _table_cache}
 _table_cache_lock = threading.Lock()
+_table_cache_valid: set[str] = set()
+_table_cache_generation: dict[str, int] = {k: 0 for k in _table_cache}
+_table_inflight: dict[str, threading.Event] = {}
 
 _last_finished_cache: dict[str, str | None] | None = None
 _last_finished_lock = threading.Lock()
+
+_storage_generation = 0
+_storage_inflight: threading.Event | None = None
 
 
 def invalidate_data_cache(table: str | None = None) -> None:
@@ -60,18 +67,25 @@ def invalidate_data_cache(table: str | None = None) -> None:
     table=None 时清所有表 cache + storage(粗粒度,用于 pipeline 完成/clear);
     指定 table 时只清那张表,不影响 storage(细粒度,用于单 stage 写完)。
     """
-    with _table_cache_lock:
-        if table is None:
-            global _storage_cache, _storage_cache_ts, _last_finished_cache
-            _storage_cache = None
-            _storage_cache_ts = 0.0
-            _last_finished_cache = None
+    global _storage_cache, _storage_cache_ts, _storage_generation, _last_finished_cache
+    if table is None:
+        with _table_cache_lock, _storage_lock:
             for k in _table_cache:
                 _table_cache[k] = None
                 _table_cache_ts[k] = 0.0
-        elif table in _table_cache:
+                _table_cache_valid.discard(k)
+                _table_cache_generation[k] = _table_cache_generation.get(k, 0) + 1
+            _storage_cache = None
+            _storage_cache_ts = 0.0
+            _storage_generation += 1
+        with _last_finished_lock:
+            _last_finished_cache = None
+    elif table in _table_cache:
+        with _table_cache_lock:
             _table_cache[table] = None
             _table_cache_ts[table] = 0.0
+            _table_cache_valid.discard(table)
+            _table_cache_generation[table] = _table_cache_generation.get(table, 0) + 1
 
 
 def invalidate_storage_cache() -> None:
@@ -80,25 +94,120 @@ def invalidate_storage_cache() -> None:
 
 
 def _get_table_stats(name: str, fetch: Callable[[], dict | None]) -> dict | None:
-    """走 TTL+事件 双重缓存。fetch 在锁外执行避免阻塞别的请求。"""
+    """Cache exact stats; coalesce cold reads and discard stale results after invalidation."""
     ttl = _TABLE_TTL_LARGE if name in _LARGE_TABLES else _TABLE_TTL
-    now = time.time()
-    with _table_cache_lock:
-        cached = _table_cache.get(name)
-        cached_ts = _table_cache_ts.get(name, 0.0)
-        if cached is not None and (now - cached_ts) < ttl:
-            return cached
+    while True:
+        now = time.monotonic()
+        with _table_cache_lock:
+            if name in _table_cache_valid:
+                cached_ts = _table_cache_ts.get(name, 0.0)
+                if (now - cached_ts) < ttl:
+                    return _table_cache.get(name)
 
-    fresh = fetch()
+            generation = _table_cache_generation.get(name, 0)
+            inflight = _table_inflight.get(name)
+            if inflight is None:
+                event = threading.Event()
+                _table_inflight[name] = event
+                leader = True
+            else:
+                event = inflight
+                leader = False
 
-    with _table_cache_lock:
-        _table_cache[name] = fresh
-        _table_cache_ts[name] = now
-    return fresh
+        if not leader:
+            event.wait()
+            continue
+
+        try:
+            started = time.monotonic()
+            fresh = fetch()
+            elapsed = time.monotonic() - started
+            if elapsed >= 0.5:
+                logger.info("data stats cold read %s: %.3fs", name, elapsed)
+        except BaseException:
+            with _table_cache_lock:
+                if _table_inflight.get(name) is event:
+                    _table_inflight.pop(name, None)
+                event.set()
+            raise
+
+        with _table_cache_lock:
+            if _table_inflight.get(name) is event:
+                _table_inflight.pop(name, None)
+            event.set()
+            if _table_cache_generation.get(name, 0) == generation:
+                _table_cache[name] = fresh
+                _table_cache_ts[name] = time.monotonic()
+                _table_cache_valid.add(name)
+                return fresh
+        # A sync/clear invalidated the snapshot while fetch ran; retry from the
+        # new generation rather than returning or caching the stale aggregate.
+
+
+def _partition_date_stats(directory: Path) -> tuple[str, str, int] | None:
+    """Use ISO date directory names: no full history Parquet scan."""
+    dates: list[str] = []
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if not entry.name.startswith("date=") or not entry.is_dir():
+                    continue
+                text = entry.name[5:]
+                try:
+                    parsed = date.fromisoformat(text)
+                except ValueError:
+                    continue
+                if parsed.isoformat() == text:
+                    dates.append(text)
+    except FileNotFoundError:
+        return None
+    if not dates:
+        return None
+    return min(dates), max(dates), len(dates)
+
+
+def _enriched_column_count(directory: Path, repo, view: str) -> int:
+    """Read a recent Parquet footer instead of describing years of partitions."""
+    newest: Path | None = None
+    newest_date = ""
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if not entry.name.startswith("date=") or not entry.is_dir():
+                    continue
+                text = entry.name[5:]
+                try:
+                    if date.fromisoformat(text).isoformat() != text:
+                        continue
+                except ValueError:
+                    continue
+                if text > newest_date:
+                    newest_date = text
+                    newest = Path(entry.path)
+    except FileNotFoundError:
+        return 0
+    if newest is not None:
+        try:
+            import polars as pl
+
+            parquet = next(newest.glob("*.parquet"), None)
+            if parquet is not None:
+                return len(pl.read_parquet_schema(parquet))
+        except Exception as e:
+            logger.debug("read enriched schema footer %s failed: %s", view, e)
+    try:
+        return len(repo.execute_all(f"DESCRIBE {view}"))
+    except Exception:
+        return 0
 
 
 def _safe_aggregate(repo, view: str) -> dict | None:
     """聚合视图基础统计;视图不存在或为空时返 None。"""
+    if view in {"kline_index_daily", "kline_index_enriched", "kline_etf_enriched"}:
+        try:
+            return _aggregate_parquet_columns(repo.store.data_dir / view)
+        except Exception as e:
+            logger.debug("projected aggregate %s unavailable: %s", view, e)
     try:
         row = repo.execute_one(
             f"""SELECT count(*) AS rows,
@@ -122,6 +231,47 @@ def _safe_aggregate(repo, view: str) -> dict | None:
     }
 
 
+def _aggregate_parquet_columns(
+    directory: Path, date_column: str = "date", period: tuple[str, str] | None = None,
+) -> dict | None:
+    """Exact counts from standard columns, without binding wide DuckDB views.
+
+    Schema projection also tolerates optional columns being added between
+    partitions. Missing or incompatible required columns retain the existing
+    legacy-view fallback in the callers.
+    """
+    from datetime import date
+
+    import polars as pl
+
+    from app.polars_guard import guarded_collect
+
+    if next(directory.glob("**/*.parquet"), None) is None:
+        raise FileNotFoundError(directory)
+    frame = pl.scan_parquet(
+        str(directory / "**" / "*.parquet"),
+        schema={"symbol": pl.String, date_column: pl.Date},
+        extra_columns="ignore",
+    )
+    if period is not None:
+        frame = frame.filter(pl.col(date_column).is_between(
+            date.fromisoformat(period[0]), date.fromisoformat(period[1]),
+        ))
+    row = guarded_collect(frame.select(
+        pl.len().alias("rows"),
+        pl.col(date_column).min().alias("earliest_date"),
+        pl.col(date_column).max().alias("latest_date"),
+        # SQL count(DISTINCT ...) excludes nulls; Polars n_unique includes them.
+        pl.col("symbol").drop_nulls().n_unique().alias("symbols_covered"),
+        pl.col(date_column).drop_nulls().n_unique().alias("trading_days"),
+    )).row(0, named=True)
+    if not row["rows"]:
+        return None
+    for key in ("earliest_date", "latest_date"):
+        row[key] = str(row[key]) if row[key] is not None else None
+    return row
+
+
 def _safe_aggregate_daily(repo, view: str = "kline_daily") -> dict | None:
     """日K轻量统计 — 零数据扫描。
 
@@ -129,24 +279,19 @@ def _safe_aggregate_daily(repo, view: str = "kline_daily") -> dict | None:
     标的数从 instruments 小表获取（~5000行，毫秒级）。
     """
     daily_dir = repo.store.data_dir / "kline_daily"
-    if not daily_dir.exists():
+    period = _partition_date_stats(daily_dir)
+    if period is None:
         return None
-    dates: list[str] = []
-    for d in daily_dir.iterdir():
-        if d.is_dir() and d.name.startswith("date="):
-            dates.append(d.name[5:])
-    if not dates:
-        return None
-    dates.sort()
+    first, last, days = period
 
     symbols = _count_instruments_symbols(repo)
 
     return {
         "rows": 0,
-        "earliest_date": dates[0],
-        "latest_date": dates[-1],
+        "earliest_date": first,
+        "latest_date": last,
         "symbols_covered": symbols,
-        "trading_days": len(dates),
+        "trading_days": days,
     }
 
 
@@ -158,34 +303,24 @@ def _safe_aggregate_enriched(repo) -> dict | None:
     标的数从 instruments 小表取。
     """
     # 字段数：读 schema，不碰数据
-    fields = 0
-    try:
-        cols = repo.execute_all("DESCRIBE kline_enriched")
-        fields = len(cols)
-    except Exception:  # noqa: BLE001
-        pass
+    enriched_dir = repo.store.data_dir / "kline_daily_enriched"
+    fields = _enriched_column_count(enriched_dir, repo, "kline_enriched")
 
     # 日期范围：从分区目录名获取，不扫数据
-    enriched_dir = repo.store.data_dir / "kline_daily_enriched"
-    if not enriched_dir.exists():
+    period = _partition_date_stats(enriched_dir)
+    if period is None:
         return None
-    dates: list[str] = []
-    for d in enriched_dir.iterdir():
-        if d.is_dir() and d.name.startswith("date="):
-            dates.append(d.name[5:])
-    if not dates:
-        return None
-    dates.sort()
+    first, last, days = period
 
     symbols = _count_instruments_symbols(repo)
 
     return {
         "rows": 0,
         "fields": fields,
-        "earliest_date": dates[0],
-        "latest_date": dates[-1],
+        "earliest_date": first,
+        "latest_date": last,
         "symbols_covered": symbols,
-        "trading_days": len(dates),
+        "trading_days": days,
     }
 
 
@@ -232,12 +367,9 @@ def _safe_aggregate_index_daily(repo) -> dict | None:
 
 def _safe_aggregate_index_enriched(repo) -> dict | None:
     """指数 enriched 统计。指数数据量较小，直接读取 parquet 元数据统计真实行数。"""
-    fields = 0
-    try:
-        cols = repo.execute_all("DESCRIBE kline_index_enriched")
-        fields = len(cols)
-    except Exception:  # noqa: BLE001
-        pass
+    fields = _enriched_column_count(
+        repo.store.data_dir / "kline_index_enriched", repo, "kline_index_enriched",
+    )
     stats = _safe_aggregate(repo, "kline_index_enriched")
     if not stats:
         return None
@@ -302,12 +434,9 @@ def _safe_aggregate_etf_instruments(repo) -> dict | None:
 
 def _safe_aggregate_etf_enriched(repo) -> dict | None:
     """ETF enriched 统计 — 独立 kline_etf_enriched。"""
-    fields = 0
-    try:
-        cols = repo.execute_all("DESCRIBE kline_etf_enriched")
-        fields = len(cols)
-    except Exception:  # noqa: BLE001
-        pass
+    fields = _enriched_column_count(
+        repo.store.data_dir / "kline_etf_enriched", repo, "kline_etf_enriched",
+    )
     stats = _safe_aggregate(repo, "kline_etf_enriched")
     if not stats:
         return None
@@ -316,6 +445,12 @@ def _safe_aggregate_etf_enriched(repo) -> dict | None:
 
 def _safe_aggregate_etf_daily(repo) -> dict | None:
     """ETF 日K统计 — 优先独立 kline_etf_daily，兼容旧 index 存储。"""
+    try:
+        projected = _aggregate_parquet_columns(repo.store.data_dir / "kline_etf_daily")
+        if projected is not None:
+            return projected
+    except Exception as e:
+        logger.debug("projected ETF aggregate unavailable: %s", e)
     queries = [
         """SELECT count(*) AS rows,
                   min(date) AS earliest,
@@ -354,12 +489,26 @@ def _safe_aggregate_adj_factor(repo) -> dict | None:
     """adj_factor 视图统计,日期范围对齐日 K 覆盖区间。"""
     try:
         # 取日 K 的日期范围作为过滤条件
-        dr = repo.execute_one(
-            "SELECT min(date), max(date) FROM kline_daily"
-        )
-        if not dr or not dr[0]:
-            return None
-        d_min, d_max = dr[0], dr[1]
+        period = _partition_date_stats(repo.store.data_dir / "kline_daily")
+        if period is not None:
+            d_min, d_max, _ = period
+        else:
+            # Backward-compatible fallback for legacy nonpartitioned stores.
+            dr = repo.execute_one("SELECT min(date), max(date) FROM kline_daily")
+            if not dr or not dr[0]:
+                return None
+            d_min, d_max = dr[0], dr[1]
+        try:
+            projected = _aggregate_parquet_columns(
+                repo.store.data_dir / "adj_factor", "trade_date", (str(d_min), str(d_max)),
+            )
+            if projected is None:
+                return None
+            # Historical API semantics report the daily coverage bounds here,
+            # rather than min/max of the filtered adjustment-factor rows.
+            return {**projected, "earliest_date": str(d_min), "latest_date": str(d_max)}
+        except Exception as e:
+            logger.debug("projected adjustment aggregate unavailable: %s", e)
         row = repo.execute_one(
             """SELECT count(*) AS rows,
                       count(DISTINCT symbol) AS symbols,
@@ -389,25 +538,16 @@ def _safe_aggregate_minute(repo) -> dict | None:
     无需 count(*) / count(DISTINCT ...) 等昂贵查询。
     """
     minute_dir = repo.store.data_dir / "kline_minute"
-    if not minute_dir.exists():
+    period = _partition_date_stats(minute_dir)
+    if period is None:
         return None
-
-    # 从 date=YYYY-MM-DD 目录名提取交易日
-    dates: list[str] = []
-    for d in minute_dir.iterdir():
-        if d.is_dir() and d.name.startswith("date="):
-            dates.append(d.name[5:])
-
-    if not dates:
-        return None
-
-    dates.sort()
+    first, last, days = period
     return {
         "rows": 0,  # 不再查询行数
-        "earliest_date": dates[0],
-        "latest_date": dates[-1],
+        "earliest_date": first,
+        "latest_date": last,
         "symbols_covered": 0,  # 不再查询标的数
-        "trading_days": len(dates),
+        "trading_days": days,
     }
 
 
@@ -485,6 +625,7 @@ def _scan_dir_recursive(entry: os.DirEntry) -> tuple[int, int]:
 def _compute_storage(data_dir: Path) -> dict:
     """单次遍历计算 storage 统计，避免多次 rglob。"""
     import os
+    from concurrent.futures import ThreadPoolExecutor
 
     # 只统计关心的子目录
     subdirs = {
@@ -502,26 +643,35 @@ def _compute_storage(data_dir: Path) -> dict:
         "instruments": data_dir / "instruments",
         "ext_data": data_dir / "ext_data",
     }
+    # Independent roots can overlap cold filesystem I/O. Single-flight in
+    # _get_storage bounds this to one small pool rather than one task per file.
+    other_dirs = ["pools", "backtest_results", "screener_results", "ai_cache"]
+    scanned_dirs = {**subdirs, **{name: data_dir / name for name in other_dirs}}
+    fin_dir = data_dir / "financials"
+    if fin_dir.exists():
+        scanned_dirs["financials"] = fin_dir
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="storage-stat") as pool:
+        scanned = dict(zip(
+            scanned_dirs,
+            pool.map(_scan_dir_stats, scanned_dirs.values()),
+            strict=True,
+        ))
+
     stats = {}
     total_size = 0
-    for key, d in subdirs.items():
-        fc, sz = _scan_dir_stats(d)
+    for key in subdirs:
+        fc, sz = scanned[key]
         total_size += sz
         stats[f"{key}_files"] = fc
         stats[f"{key}_size_mb"] = sz
 
     # total: 再加上其他零散目录 (financials 有下方专属明细统计, 不在此列)
-    other_dirs = ["pools", "backtest_results", "screener_results", "ai_cache"]
     for name in other_dirs:
-        d = data_dir / name
-        if d.exists():
-            _, s = _scan_dir_stats(d)
-            total_size += s
+        total_size += scanned[name][1]
 
     # financials 单独统计 (明细与 total 各计入一次, 不得与其他目录循环重复累加)
-    fin_dir = data_dir / "financials"
-    if fin_dir.exists():
-        fc, sz = _scan_dir_stats(fin_dir)
+    if "financials" in scanned:
+        fc, sz = scanned["financials"]
         stats["financials_files"] = fc
         stats["financials_size_mb"] = sz
         total_size += sz
@@ -550,17 +700,49 @@ def _next_cron_run(scheduler, job_id: str) -> str | None:
 
 
 def _get_storage(data_dir: Path) -> dict:
-    """返回缓存的 storage 统计；走独立 TTL，stage 写完不触发重算。"""
-    global _storage_cache, _storage_cache_ts
-    now = time.time()
-    with _storage_lock:
-        if _storage_cache is not None and (now - _storage_cache_ts) < _STORAGE_TTL:
-            return _storage_cache
-    fresh = _compute_storage(data_dir)
-    with _storage_lock:
-        _storage_cache = fresh
-        _storage_cache_ts = now
-    return fresh
+    """返回缓存的 storage 统计; 冷缓存共用一次扫描并遵守全量失效代次。"""
+    global _storage_cache, _storage_cache_ts, _storage_inflight
+    while True:
+        now = time.monotonic()
+        with _storage_lock:
+            if _storage_cache is not None and (now - _storage_cache_ts) < _STORAGE_TTL:
+                return _storage_cache
+
+            generation = _storage_generation
+            if _storage_inflight is None:
+                event = threading.Event()
+                _storage_inflight = event
+                leader = True
+            else:
+                event = _storage_inflight
+                leader = False
+
+        if not leader:
+            event.wait()
+            continue
+
+        try:
+            started = time.monotonic()
+            fresh = _compute_storage(data_dir)
+            elapsed = time.monotonic() - started
+            if elapsed >= 0.5:
+                logger.info("data stats cold read storage: %.3fs", elapsed)
+        except BaseException:
+            with _storage_lock:
+                if _storage_inflight is event:
+                    _storage_inflight = None
+                event.set()
+            raise
+
+        with _storage_lock:
+            if _storage_inflight is event:
+                _storage_inflight = None
+            event.set()
+            if _storage_generation == generation:
+                _storage_cache = fresh
+                _storage_cache_ts = time.monotonic()
+                return fresh
+        # Full invalidation happened during the scan; discard and recalculate.
 
 
 def _last_finished(job_label: str) -> str | None:
@@ -585,8 +767,75 @@ def _last_finished(job_label: str) -> str | None:
     return cache.get(job_label)
 
 
+@router.get("/quick-status")
+def quick_status(request: Request) -> dict:
+    """Small data-page preview; avoids exact historical row aggregates."""
+    repo = request.app.state.repo
+    directory = repo.store.data_dir
+
+    def partition(name: str, fields: int | None = None) -> dict | None:
+        period = _partition_date_stats(directory / name)
+        if period is None:
+            return None
+        first, last, count = period
+        item = {
+            "earliest_date": first,
+            "latest_date": last,
+            "trading_days": count,
+        }
+        if fields is not None:
+            item["fields"] = fields
+        return item
+
+    instruments = _safe_aggregate_instruments(repo)
+    index_instruments = _safe_aggregate_index_instruments(repo)
+    etf_instruments = _safe_aggregate_etf_instruments(repo)
+    with _table_cache_lock:
+        adj_snapshot = _table_cache.get("adj_factor")
+        finance_snapshot = _table_cache.get("financials")
+    with _storage_lock:
+        storage_snapshot = _storage_cache
+    return {
+        "instruments": instruments,
+        "daily": partition("kline_daily"),
+        "enriched": partition(
+            "kline_daily_enriched",
+            _enriched_column_count(directory / "kline_daily_enriched", repo, "kline_enriched"),
+        ),
+        "index_instruments": index_instruments,
+        "index_daily": partition("kline_index_daily"),
+        "index_enriched": partition("kline_index_enriched"),
+        "etf_instruments": etf_instruments,
+        "etf_daily": partition("kline_etf_daily"),
+        "etf_enriched": partition("kline_etf_enriched"),
+        "minute": _safe_aggregate_minute(repo),
+        "adj_factor": adj_snapshot,
+        "financials": finance_snapshot,
+        "storage": storage_snapshot,
+        "indicators_ready": getattr(request.app.state, "indicators_ready", True),
+        "partial": True,
+    }
+
+
 @router.get("/status")
 def status(request: Request) -> dict:
+    # Start cold filesystem I/O while exact table aggregates are being read.
+    # _get_storage rechecks its generation before publishing the snapshot.
+    with _storage_lock:
+        cold_storage = (
+            _storage_cache is None
+            or time.monotonic() - _storage_cache_ts >= _STORAGE_TTL
+        )
+    if not cold_storage:
+        return _status_snapshot(request)
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="status-storage") as pool:
+        pool.submit(_get_storage, request.app.state.repo.store.data_dir)
+        return _status_snapshot(request)
+
+
+def _status_snapshot(request: Request) -> dict:
     repo = request.app.state.repo
     scheduler = getattr(request.app.state, "scheduler", None)
     data_dir = repo.store.data_dir
@@ -594,13 +843,25 @@ def status(request: Request) -> dict:
     return {
         "daily":       _get_table_stats("daily",       lambda: _safe_aggregate_daily(repo)),
         "enriched":    _get_table_stats("enriched",    lambda: _safe_aggregate_enriched(repo)),
-    "index_daily":       _get_table_stats("index_daily",       lambda: _safe_aggregate_index_daily(repo)),
-    "index_enriched":    _get_table_stats("index_enriched",    lambda: _safe_aggregate_index_enriched(repo)),
-    "index_instruments": _get_table_stats("index_instruments", lambda: _safe_aggregate_index_instruments(repo)),
-    "etf_daily":         _get_table_stats("etf_daily",         lambda: _safe_aggregate_etf_daily(repo)),
-    "etf_enriched":      _get_table_stats("etf_enriched",      lambda: _safe_aggregate_etf_enriched(repo)),
-    "etf_instruments":   _get_table_stats("etf_instruments",   lambda: _safe_aggregate_etf_instruments(repo)),
-    "minute":      _get_table_stats("minute",      lambda: _safe_aggregate_minute(repo)),
+        "index_daily": _get_table_stats(
+            "index_daily", lambda: _safe_aggregate_index_daily(repo),
+        ),
+        "index_enriched": _get_table_stats(
+            "index_enriched", lambda: _safe_aggregate_index_enriched(repo),
+        ),
+        "index_instruments": _get_table_stats(
+            "index_instruments", lambda: _safe_aggregate_index_instruments(repo),
+        ),
+        "etf_daily": _get_table_stats(
+            "etf_daily", lambda: _safe_aggregate_etf_daily(repo),
+        ),
+        "etf_enriched": _get_table_stats(
+            "etf_enriched", lambda: _safe_aggregate_etf_enriched(repo),
+        ),
+        "etf_instruments": _get_table_stats(
+            "etf_instruments", lambda: _safe_aggregate_etf_instruments(repo),
+        ),
+        "minute": _get_table_stats("minute", lambda: _safe_aggregate_minute(repo)),
         "adj_factor":  _get_table_stats("adj_factor",  lambda: _safe_aggregate_adj_factor(repo)),
         "instruments": _get_table_stats("instruments", lambda: _safe_aggregate_instruments(repo)),
         "financials":  _get_table_stats("financials",  lambda: _safe_aggregate_financials(repo)),
@@ -613,7 +874,9 @@ def status(request: Request) -> dict:
         "next_pipeline_run":    _next_cron_run(scheduler, "daily_pipeline"),
         "last_instruments_run": _last_finished("instruments"),
         "last_pipeline_run":    _last_finished("pipeline"),
-        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "checked_at": datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
         # 指标缓存就绪标志 (启动时 enriched 异步预热, 完成前为 false)
         "indicators_ready": getattr(request.app.state, "indicators_ready", True),
     }

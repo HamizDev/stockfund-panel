@@ -8,18 +8,21 @@ import json
 import re
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from itertools import islice
 
 from app.market_time import cn_now
 
-from .comparison_store import ResearchStore, digest
+from .comparison_store import MAX_BYTES, ResearchStore, digest
 from .evaluation import mature
 from .limits import MAX_COMPARISON_RECORDS, MAX_SAVED_JOBS
+from .paths import read_record_bytes, research_path
 from .provenance import runtime_profile
 from .service import BusyError, PreparationCancelledError, validate_forecast
 
 BATCH_ACTIVE = {'preparing', 'running'}
+SCORE_CACHE_VERSION = 3
 
 
 def validate_matrix(request):
@@ -41,6 +44,8 @@ class ComparisonManager:
     def __init__(self, jobs, evaluator, profile_loader=runtime_profile):
         self.jobs, self.evaluator, self.profile_loader = jobs, evaluator, profile_loader
         self.store = ResearchStore(jobs.runtime, 'comparisons', limit=MAX_COMPARISON_RECORDS)
+        self.score_store = ResearchStore(jobs.runtime, 'score_cache', limit=MAX_COMPARISON_RECORDS)
+        self.score_lock = threading.Lock()
         self.lock = threading.Lock()
         self.active = None
         self.cancelled = threading.Event()
@@ -251,18 +256,116 @@ class ComparisonManager:
         return self._list_views(symbol, period, True)
 
     def iter_details(self, symbol=None, period=None):
-        # Each file is read once; scores choose the earliest paired origin
-        # independently of this bounded filesystem traversal order.
-        for identity in self.store.identities():
-            try:
-                batch = self.store.read(identity)
-                request = batch['request']
-                if ((symbol and request['symbol'] != symbol) or (period and request['period'] != period)
-                        or 'base' not in request.get('models', [])):
-                    continue
-                yield self._view(batch, True)
-            except (ValueError, LookupError, KeyError, TypeError):
+        # Bounded local I/O only: providers and GPU jobs are never started here.
+        # Serialize concurrent scoreboard requests instead of duplicating scans.
+        with self.score_lock, ThreadPoolExecutor(max_workers=4, thread_name_prefix='kronos-scores') as executor:
+            identities = self.store.identities()
+            for detail in executor.map(self._score_record, identities, [symbol] * len(identities),
+                                       [period] * len(identities)):
+                if detail is not None:
+                    yield detail
+
+    def _score_record(self, identity, symbol, period):
+        try:
+            batch = self.store.read(identity)
+            request = batch['request']
+            if ((symbol and request.get('symbol') != symbol) or (period and request.get('period') != period)
+                    or 'base' not in request.get('models', [])):
+                return None
+            evidence, cached = self._score_cache(batch)
+            if cached is not None:
+                return cached
+            detail = self._score_detail(batch)
+            if self._score_cacheable(detail):
+                self._write_score_cache(batch, evidence, detail)
+            return detail
+        except (OSError, ValueError, LookupError, KeyError, TypeError):
+            return None
+
+    def _score_detail(self, batch):
+        return self._view(batch, True)
+
+    def _score_cache(self, batch):
+        # A missing score record is still valid evidence; only unverifiable
+        # source files prevent fingerprint-bound caching.
+        try:
+            evidence = self._score_evidence(batch)
+        except (ValueError, KeyError, TypeError):
+            return None, None
+        try:
+            cached = self.score_store.read(batch['id'])
+        except LookupError:
+            return evidence, None
+        except (OSError, ValueError, KeyError, TypeError):
+            return evidence, None
+        cached_detail = cached.get('detail')
+        try:
+            if (cached.get('format_version') == SCORE_CACHE_VERSION and cached.get('evidence_sha256') == evidence
+                    and isinstance(cached_detail, dict) and cached.get('detail_sha256') == digest(cached_detail)
+                    and self._score_cacheable(cached_detail)):
+                return evidence, cached_detail
+        except (ValueError, KeyError, TypeError):
+            pass
+        return evidence, None
+
+    @staticmethod
+    def _score_cacheable(detail):
+        return (detail['state'] == 'complete' and bool(detail['trials'])
+                and all(trial['state'] == 'complete' and not trial.get('error')
+                        and trial.get('job') is not None
+                        and (trial.get('evaluation') or {}).get('state') == 'complete'
+                        for trial in detail['trials']))
+
+    def _score_evidence(self, batch):
+        files = {}
+        for trial in batch.get('trials', []):
+            identity = trial.get('job_id')
+            if not identity:
                 continue
+            for scope in ('results', 'evaluations'):
+                path = research_path(self.jobs.runtime, scope, identity + '.json')
+                if not path.is_file():
+                    files[f'{scope}:{identity}'] = None
+                else:
+                    files[f'{scope}:{identity}'] = hashlib.sha256(read_record_bytes(path, MAX_BYTES)).hexdigest()
+        return digest({'version': SCORE_CACHE_VERSION, 'batch': batch, 'files': files})
+
+    def _write_score_cache(self, batch, evidence, detail):
+        if evidence is None:
+            return
+        try:
+            # A concurrent evaluation or atomic job replacement must not seal a
+            # mixed snapshot. The next request will retry changed evidence.
+            if self._score_evidence(self.store.read(batch['id'])) != evidence:
+                return
+            compact = self._compact_score_detail(detail)
+            self.score_store.write({'schema_version': 1, 'id': batch['id'], 'format_version': SCORE_CACHE_VERSION,
+                                    'evidence_sha256': evidence, 'detail_sha256': digest(compact),
+                                    'detail': compact})
+        except (OSError, ValueError, LookupError, KeyError, TypeError):
+            return
+
+    @staticmethod
+    def _compact_score_detail(detail):
+        # Keep every input used by summarize(), including the actual path used
+        # to prove paired origins. Full chart windows remain in their originals.
+        compact = {key: copy.deepcopy(detail[key]) for key in ('id', 'state', 'request', 'created_at')}
+        compact['snapshot'] = {key: detail['snapshot'][key] for key in
+                               ('input_as_of', 'price_basis', 'implementation_sha256')}
+        compact['trials'] = []
+        for trial in detail['trials']:
+            row = {key: trial[key] for key in ('model', 'lookback', 'state', 'timely')}
+            result, evaluation = trial['job']['result'], trial['evaluation']
+            row['job'] = {'state': trial['job']['state'], 'result': {
+                'worker_metadata': {key: result['worker_metadata'][key] for key in
+                                    ('model_sha256', 'tokenizer_sha256')},
+                'metrics': {key: result['metrics'][key] for key in ('elapsed_seconds', 'cuda_peak_reserved_mb')}}}
+            row['evaluation'] = {key: copy.deepcopy(evaluation[key]) for key in
+                                 ('state', 'expected', 'matched', 'metrics')}
+            row['evaluation']['points'] = [{key: point[key] for key in ('time', 'actual_close')}
+                                           for point in evaluation['points']]
+            compact['trials'].append(row)
+        return compact
 
     def _list_views(self, symbol, period, detail):
         items, unavailable = [], 0

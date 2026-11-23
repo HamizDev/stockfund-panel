@@ -75,6 +75,7 @@ def status() -> dict:
                          'full_minute': preferences.get_full_minute_data_provider()},
             'policies': {'realtime': ['stocksdk', 'fuyao'],
                          'daily': ['stocksdk', 'tickflow'],
+                         'etf_daily_bounded': ['stocksdk', 'tickflow', 'txquote'],
                          'minute_1m': ['txquote', 'stocksdk'],
                          'global_chart_hosts': ['query1.finance.yahoo.com', 'query2.finance.yahoo.com']}}
 
@@ -244,7 +245,14 @@ class _Provider:
         partial = []
         missing = list(dict.fromkeys(symbols))
         expected = _daily_session(end_time)
-        for source in ('stocksdk', 'tickflow'):
+        # Only a small explicit ETF query may use the page-level raw fallback.
+        # Full-market synchronization keeps the established batch sources.
+        if (asset_type == 'etf' and len(missing) <= 4
+                and all(re.fullmatch(r'\d{6}\.(SH|SZ)', symbol) for symbol in missing)):
+            candidates = ('stocksdk', 'tickflow', 'txquote')
+        else:
+            candidates = ('stocksdk', 'tickflow')
+        for source in candidates:
             requested = list(missing)
             fetched = []
 
@@ -253,6 +261,8 @@ class _Provider:
                     from app.data_providers.tickflow_provider import TickFlowProvider
 
                     frame = TickFlowProvider().get_daily(requested, start_time, end_time, asset_type)
+                elif source == 'txquote':
+                    frame = _raw(source).get_daily(requested, start_time, end_time, asset_type)
                 else:
                     frame = self._primary.get_daily(requested, start_time=start_time,
                         end_time=end_time, asset_type=asset_type, on_chunk_done=on_chunk_done)

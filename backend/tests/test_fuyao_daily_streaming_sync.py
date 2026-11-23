@@ -87,6 +87,28 @@ def test_sync_discards_staging_when_streaming_fails(monkeypatch, repo):
     assert not (repo.store.data_dir / ".daily_sync_staging").exists()
 
 
+@pytest.mark.parametrize('snapshot_first', [False, True])
+def test_streamed_daily_chunks_accept_mixed_quote_timestamp_columns(monkeypatch, repo, snapshot_first):
+    prior = _daily('000003.SZ', date(2020, 1, 2))
+    repo.append_daily(prior)
+    chunks = [
+        _daily('000001.SZ', date(2020, 1, 2)),
+        _daily('000002.SZ', date(2020, 1, 2)).with_columns(
+            quote_ts=pl.lit(1577948400000, dtype=pl.Int64)),
+    ]
+    provider = _StreamingProvider(list(reversed(chunks)) if snapshot_first else chunks)
+    _route_fuyao(monkeypatch, provider)
+    written = kline_sync.sync_and_persist_daily_batch(
+        ['000001.SZ', '000002.SZ'], repo, object(),
+        start_date=datetime(2020, 1, 1), end_date=datetime(2020, 1, 2),
+    )
+    stored = pl.read_parquet(repo.store.data_dir / 'kline_daily/date=2020-01-02/part.parquet').sort('symbol')
+    assert written == 2
+    assert stored['symbol'].to_list() == ['000001.SZ', '000002.SZ', '000003.SZ']
+    assert stored['quote_ts'].to_list() == [None, 1577948400000, None]
+    assert stored.filter(pl.col('symbol') == '000003.SZ').select(prior.columns).equals(prior)
+
+
 def test_sync_sweeps_only_stale_staging(monkeypatch, repo):
     staging = repo.store.data_dir / ".daily_sync_staging"
     stale = staging / "stale"

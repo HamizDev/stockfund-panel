@@ -94,7 +94,7 @@ def test_validate_lot_rules_and_errors():
         {"lead_days": -1},
         {"remind_date": "2026/09/01"},
         {"buy_date": "bad"},
-        {"target_pct": 0, "stop_pct": 0, "remind_date": None},
+        {"target_pct": 0, "stop_pct": 0, "remind_date": None, "qty": 0},
     ):
         with pytest.raises(ValueError):
             lots_domain.validate_lot({**_lot(), **overrides})
@@ -144,6 +144,21 @@ def test_sync_lot_writes_lot_rules_and_reloads_once(tmp_path, monkeypatch):
     assert price["conditions"][0] == {"field": "close", "op": ">=", "value": 1650.0}
     assert date_rule is not None and date_rule["remind_date"] == "2026-09-01"
     assert len(reloaded) == 1
+
+
+def test_upsert_holding_without_reminders(tmp_path, monkeypatch):
+    request = _make_request(tmp_path, _EngineStub())
+    _patch_channels(monkeypatch)
+    monkeypatch.setattr(lots_api, "_reload_engine", lambda _request: None)
+    monkeypatch.setattr(request.app.state.repo, "resolve_asset_type", lambda _symbol: "etf")
+
+    saved = lots_api.upsert_lot(lots_api.LotModel(symbol="510300.SH", qty=100, cost_price=4.018), request)["lot"]
+
+    assert lots_domain.load_all(tmp_path) == [saved]
+    assert (saved["qty"], saved["cost_price"], saved["buy_date"]) == (100, 4.018, None)
+    assert lots_api.list_lots(request)["lots"] == [{**saved, "asset_type": "etf"}]
+    assert monitor_rules.load_one(tmp_path, f"{saved['id']}_p") is None
+    assert monitor_rules.load_one(tmp_path, f"{saved['id']}_d") is None
 
 
 def test_sync_lot_removes_rules_when_monitor_point_removed(tmp_path, monkeypatch):

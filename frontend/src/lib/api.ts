@@ -1232,6 +1232,7 @@ export interface MonitorRule {
 export interface Lot {
   id: string
   symbol: string
+  asset_type?: 'stock' | 'etf' | 'index'
   qty: number
   cost_price: number
   buy_date?: string | null
@@ -3825,7 +3826,8 @@ export const api = {
       `/api/pipeline/jobs?limit=${limit}`,
     ),
 
-  dataStatus: () => request<DataStatus>('/api/data/status'),
+  dataStatus: () => request<DataStatus>('/api/data/status', { quiet: true }),
+  dataQuickStatus: () => request<DataQuickStatus>('/api/data/quick-status', { quiet: true, timeoutMs: 15_000 }),
   dataClear: () => request<{ deleted_files: number }>('/api/data/clear', { method: 'POST' }),
   refreshCache: () => request<{ ok: boolean }>('/api/data/refresh-cache', { method: 'POST' }),
   enrichedSchema: (table: string) => request<EnrichedField[]>(`/api/data/schema/${table}`),
@@ -4861,7 +4863,13 @@ export interface DataStatus {
   last_instruments_run: string | null
   checked_at: string
   indicators_ready?: boolean
+  partial?: boolean
 }
+
+type DatePreviewTable = 'daily' | 'enriched' | 'index_daily' | 'index_enriched' | 'etf_daily' | 'etf_enriched'
+type DataQuickStatus = Partial<Omit<DataStatus, DatePreviewTable | 'storage' | 'partial'>>
+  & Partial<Record<DatePreviewTable, Partial<TableStats> | null>>
+  & { storage: DataStatus['storage'] | null; partial: true }
 
 export interface EnrichedField {
   name: string

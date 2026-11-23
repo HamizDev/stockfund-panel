@@ -13,6 +13,43 @@ from .resources import RESOURCES
 def build_router() -> APIRouter:
     router = APIRouter(prefix="/api/custom/global-markets", tags=["global-markets"])
 
+    @router.get('/cn/trade-prints')
+    def trade_prints(request: Request, symbol: str = Query(..., pattern=r'^\d{6}\.(SH|SZ)$'),
+                     max_pages: int = Query(1, ge=1, le=3)) -> dict:
+        """Return a bounded ordinary-print sample; it is never represented as Level-2."""
+        from app.data_providers import custom
+
+        if request.app.state.repo.resolve_asset_type(symbol) not in {'stock', 'etf'}:
+            raise HTTPException(422, '普通分笔仅支持沪深股票与ETF')
+        try:
+            provider = custom.get_provider('txquote', use_failover=False)
+            method = getattr(provider, 'get_trade_prints', None)
+            if method is None:
+                raise ValueError('当前插件不提供普通分笔研究能力')
+            return method(symbol, max_pages=max_pages)
+        except (ValueError, LookupError) as error:
+            raise HTTPException(503, str(error)) from None
+
+    @router.get('/cn/etf-integrity')
+    def etf_integrity(request: Request,
+                      symbols: str = Query(..., min_length=1, max_length=100),
+                      start: str | None = None, end: str | None = None) -> dict:
+        """Read-only ETF daily-partition gap report; never repairs stored data."""
+        from datetime import date
+
+        import polars as pl
+
+        from app.services.etf_integrity_reader import report
+
+        try:
+            return report(request.app.state.repo, symbols.split(','),
+                          date.fromisoformat(start) if start else None,
+                          date.fromisoformat(end) if end else None)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
+        except (OSError, pl.exceptions.PolarsError):
+            raise HTTPException(503, 'ETF历史分区暂不可读取, 未修改数据') from None
+
     @router.get('/financials')
     def company_financials(market: Literal['hk', 'us'],
                            symbol: str = Query(..., min_length=1, max_length=20),

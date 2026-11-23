@@ -8,7 +8,7 @@ display_name: "txquote"
 runtime: none
 entry: app.plugins.txquote.provider:TxQuoteProvider
 check: app.plugins.txquote.provider:availability
-datasets: [minute, depth5]
-description: "腾讯/新浪公开行情: 五档盘口(腾讯 q=, 买1-5/卖1-5, 量为手)、股票分钟K(腾讯1m与新浪5/15/30/60m)、沪深ETF原生分钟OHLC(腾讯1/5/15/30/60m, 不复权, 每次最多320根)。ETF分钟成交额不可用(amount为空), 不以换手率或价量乘积代替。无需Key; 公开页面接口的可用性可能变化。"
+datasets: [minute, depth5, daily]
+description: "腾讯/新浪公开行情: 五档盘口(腾讯 q=, 买1-5/卖1-5, 量为手)、股票分钟K(腾讯1m与新浪5/15/30/60m)、沪深ETF原生分钟OHLC(腾讯1/5/15/30/60m, 不复权, 每次最多320根)。另提供限量原始日K备用(每次最多20只、四年、成交额未知)，及可选普通合并分笔研究接口(非Level-2、最多3页)。公开日K/分笔请求共享每秒1次的来源预算，403/429会停止并冷却。无需Key; 公开页面接口的可用性可能变化。"
 install_hint: "无需安装, 直接可用"
 homepage: "https://qt.gtimg.cn"

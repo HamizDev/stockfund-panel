@@ -42,6 +42,49 @@ def test_daily_batch_groups_index_symbols(repo, monkeypatch):
     assert "000001.SH" in out["data"]
 
 
+def test_manual_etf_sync_uses_dedicated_etf_writer(repo, monkeypatch):
+    from app.api import kline as kline_api
+    from app.services import index_sync
+
+    calls = []
+    capset = object()
+    monkeypatch.setattr(repo, "resolve_asset_type", lambda _symbol: "etf")
+    monkeypatch.setattr(
+        kline_api.kline_sync,
+        "sync_and_persist_daily_batch",
+        lambda *_args, **_kwargs: pytest.fail("ETF must not enter the stock daily writer"),
+    )
+    monkeypatch.setattr(
+        index_sync,
+        "sync_and_persist_etf_daily",
+        lambda actual_repo, actual_capset, **kwargs: (
+            calls.append((actual_repo, actual_capset, kwargs)) or 12
+        ),
+    )
+    state = type("S", (), {"repo": repo, "capabilities": capset})()
+    request = type("R", (), {"app": type("A", (), {"state": state})()})()
+
+    result = kline_api.sync_symbol(request, symbol="510300.SH", days=30)
+
+    assert result == {"symbol": "510300.SH", "rows_written": 12}
+    assert calls == [(repo, capset, {"count": 30, "symbols_override": ["510300.SH"]})]
+
+
+def test_manual_etf_sync_reports_empty_batch(repo, monkeypatch):
+    from app.api import kline as kline_api
+    from app.services import index_sync
+
+    monkeypatch.setattr(repo, "resolve_asset_type", lambda _symbol: "etf")
+    monkeypatch.setattr(index_sync, "sync_and_persist_etf_daily", lambda *_args, **_kwargs: 0)
+    state = type("S", (), {"repo": repo, "capabilities": object()})()
+    request = type("R", (), {"app": type("A", (), {"state": state})()})()
+
+    result = kline_api.sync_symbol(request, symbol="510300.SH", days=30)
+
+    assert result["rows_written"] == 0
+    assert result["zero_row_symbols"] == ["510300.SH"]
+
+
 # 钉死的北京日期, 不会碰巧等于跑测试那天的 date.today()
 _BJ = _dt.date(2026, 3, 2)
 

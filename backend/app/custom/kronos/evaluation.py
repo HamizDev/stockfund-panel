@@ -71,6 +71,13 @@ def payload(job):
     if requested.tzinfo is None:
         raise ValueError('预测生成时间缺少时区。')
     requested = requested.astimezone(CN_TZ).replace(tzinfo=None, second=0, microsecond=0)
+    if result['period'] == '1m' and prior > requested:
+        raise ValueError('预测输入时点晚于请求时点，不能作为事前成绩。')
+    if result['period'] == 'daily':
+        if prior.date() > requested.date():
+            raise ValueError('日K输入日期晚于请求日期，不能作为事前成绩。')
+        if prior.date() == requested.date() and requested.time() < time(15, 30):
+            raise ValueError('日K输入日期在请求时点尚未收盘，不能作为事前成绩。')
     completed = datetime.fromisoformat(result.get('completed_at') or '')
     if completed.tzinfo is None:
         raise ValueError('预测完成时间缺失或缺少时区，不能核验事前成绩。')
@@ -126,7 +133,9 @@ def score(job, actuals: dict, now: datetime, signature=None, evaluated_at=None):
         'mape': math.fsum(value / count for value in relative) if count else None,
         'baseline_mae': math.fsum(value / count for value in baseline) if count else None,
         'direction_matches': matches, 'direction_total': count,
-        'direction_accuracy': matches / count if count else None, 'flat_actual_count': flat}
+        'direction_accuracy': matches / count if count else None,
+        'baseline_direction_accuracy': flat / count if count else None,
+        'coverage': count / len(points), 'flat_actual_count': flat}
     state = 'complete' if count == len(points) else 'partial' if count else 'pending' if pending == len(points) else 'unavailable'
     message = ('全部预测时点已对照完成。' if state == 'complete' else '等待对应真实行情完成。'
                if state == 'pending' else '仅统计已核对时点；缺报价不计为预测错误。')

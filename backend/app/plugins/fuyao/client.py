@@ -1,6 +1,6 @@
 """扶摇(同花顺金融数据 API) HTTP 客户端。
 
-职责: 认证、统一信封解包、快照分页、单标的日K、市场 dump 下载。不知道 provider / services 层。
+职责: 认证、统一信封解包、快照分页、单标的/批量日K、市场 dump 下载。不知道 provider / services 层。
 文档: https://fuyao.aicubes.cn/docs — REST + X-api-key, 响应信封 {code, message, data}。
 
 时间字段口径: 所有 *ms 字段(含 start/end 入参与 date_ms/ex_date_ms 出参)均为
@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from pathlib import Path
@@ -19,6 +20,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://fuyao.aicubes.cn"
+HISTORICAL_BATCH_LIMIT = 10
 
 # 单页 6000 覆盖全市场(实测 ~5600 含北交所, 2026-08 服务端不截断 limit=6000),
 # 一次请求拉完; 分页循环兜底未来标的扩容或服务端改为截断的场景。
@@ -29,6 +31,21 @@ _PAGE_INTERVAL_S = 0.15  # 页间隔, 降低触发限频 (code=4001) 的概率
 
 class FuyaoError(Exception):
     """扶摇接口错误(配置缺失 / 网络失败 / 信封 code != 0)。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: int | str | None = None,
+        api_message: object = None,
+        path: str | None = None,
+        http_status: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.api_message = api_message
+        self.path = path
+        self.http_status = http_status
 
 
 class FuyaoClient:
@@ -55,14 +72,26 @@ class FuyaoClient:
         except httpx.HTTPError as e:
             raise FuyaoError(f"网络请求失败: {e}") from e
         if resp.status_code != 200:
-            raise FuyaoError(f"HTTP {resp.status_code}: {path}")
+            raise FuyaoError(
+                f"HTTP {resp.status_code}: {path}",
+                path=path,
+                http_status=resp.status_code,
+            )
         try:
             payload = resp.json()
         except ValueError as e:
             raise FuyaoError(f"响应不是 JSON: {path}") from e
+        if not isinstance(payload, dict):
+            raise FuyaoError(f"响应信封结构错误: {path}", path=path)
         code = payload.get("code")
         if code not in (0, "0", None):
-            raise FuyaoError(f"扶摇接口错误 code={code}: {payload.get('message', '')} ({path})")
+            api_message = payload.get("message")
+            raise FuyaoError(
+                f"扶摇接口错误 code={code}: {api_message or ''} ({path})",
+                code=code,
+                api_message=api_message,
+                path=path,
+            )
         return payload.get("data") or {}
 
     # ---- 快照 ----
@@ -226,8 +255,146 @@ class FuyaoClient:
                 "end": int(end_ms),
             },
         )
+        if not isinstance(data, dict):
+            raise FuyaoError(
+                f"单标的历史日K响应结构异常: {thscode}",
+                path="/api/a-share/prices/historical",
+            )
         rows = data.get("item")
         return rows if isinstance(rows, list) else []
+
+    @staticmethod
+    def _validate_historical_rows(
+        thscode: str, rows: object, start_ms: int, end_ms: int
+    ) -> list[dict]:
+        """Validate the raw daily bar contract shared by batch and single fallbacks."""
+        if not isinstance(rows, list):
+            raise FuyaoError(f"历史日K记录列表格式异常: {thscode}")
+        required = {
+            "date_ms",
+            "open_price",
+            "high_price",
+            "low_price",
+            "close_price",
+            "volume",
+            "turnover",
+        }
+        seen_dates: set[int] = set()
+        for bar in rows:
+            if not isinstance(bar, dict) or not required.issubset(bar):
+                raise FuyaoError(f"历史日K记录缺少必要字段: {thscode}")
+            timestamp = bar["date_ms"]
+            if (
+                isinstance(timestamp, bool)
+                or not isinstance(timestamp, int)
+                or not start_ms <= timestamp <= end_ms
+                or (timestamp + 28_800_000) % 86_400_000 != 0
+                or timestamp in seen_dates
+            ):
+                raise FuyaoError(f"历史日K日期无效、重复或超出请求窗口: {thscode}")
+            seen_dates.add(timestamp)
+
+            values: dict[str, float] = {}
+            for field in (
+                "open_price",
+                "high_price",
+                "low_price",
+                "close_price",
+                "volume",
+                "turnover",
+            ):
+                value = bar[field]
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise FuyaoError(f"历史日K数值字段无效: {thscode} {field}")
+                try:
+                    numeric = float(value)
+                except (OverflowError, TypeError, ValueError) as exc:
+                    raise FuyaoError(f"历史日K数值字段无效: {thscode} {field}") from exc
+                if not math.isfinite(numeric):
+                    raise FuyaoError(f"历史日K数值字段非有限: {thscode} {field}")
+                values[field] = numeric
+
+            prices = [
+                values["open_price"],
+                values["high_price"],
+                values["low_price"],
+                values["close_price"],
+            ]
+            if any(price < 0 for price in prices):
+                raise FuyaoError(f"历史日K价格为负: {thscode}")
+            halted = (
+                values["open_price"] == 0
+                and values["high_price"] == 0
+                and values["low_price"] == 0
+                and values["close_price"] >= 0
+                and values["volume"] == 0
+                and values["turnover"] == 0
+            )
+            if any(price == 0 for price in prices) and not halted:
+                raise FuyaoError(f"历史日K零价格字段不一致: {thscode}")
+            if not halted and (
+                values["high_price"] < max(values["open_price"], values["close_price"])
+                or values["low_price"] > min(values["open_price"], values["close_price"])
+                or values["low_price"] > values["high_price"]
+            ):
+                raise FuyaoError(f"历史日K OHLC关系无效: {thscode}")
+            if values["volume"] < 0 or values["turnover"] < 0:
+                raise FuyaoError(f"历史日K量额为负: {thscode}")
+        return rows
+
+    def historical_kline_batch(
+        self, thscodes: list[str], start_ms: int, end_ms: int
+    ) -> dict[str, list[dict]]:
+        """Fetch raw daily bars for up to ten symbols, preserving empty groups.
+
+        The service defaults this endpoint to forward-adjusted prices, so both
+        request parameters and response metadata must confirm the raw daily
+        contract before any rows are returned. Missing groups remain missing;
+        the provider may then query only those symbols through the single-stock
+        endpoint.
+        """
+        if not thscodes:
+            return {}
+        if len(thscodes) > HISTORICAL_BATCH_LIMIT:
+            raise FuyaoError(f"批量历史日K每次最多{HISTORICAL_BATCH_LIMIT}个代码")
+        if end_ms < start_ms:
+            raise FuyaoError("批量历史日K请求窗口无效")
+
+        data = self._get(
+            "/api/a-share/prices/historical-batch",
+            {
+                "thscodes": ",".join(thscodes),
+                "interval": "1d",
+                "adjust": "none",
+                "start": int(start_ms),
+                "end": int(end_ms),
+            },
+        )
+        if (
+            not isinstance(data, dict)
+            or data.get("interval") != "1d"
+            or data.get("adjust") != "none"
+        ):
+            raise FuyaoError("批量历史日K响应未确认不复权日线口径")
+        groups = data.get("item")
+        if not isinstance(groups, list):
+            raise FuyaoError("批量历史日K缺少有效分组")
+
+        wanted = set(thscodes)
+        out: dict[str, list[dict]] = {}
+        for group in groups:
+            if not isinstance(group, dict):
+                raise FuyaoError("批量历史日K分组格式异常")
+            symbol, bars = group.get("thscode"), group.get("item")
+            if (
+                not isinstance(symbol, str)
+                or symbol not in wanted
+                or symbol in out
+                or not isinstance(bars, list)
+            ):
+                raise FuyaoError("批量历史日K返回未知、重复或无效分组")
+            out[symbol] = self._validate_historical_rows(symbol, bars, start_ms, end_ms)
+        return out
 
     # ---- 财务 ----
     # 端点均单标的(thscode 不接受逗号)。取数模式二选一: limit=最近N期 或 start/end 区间,

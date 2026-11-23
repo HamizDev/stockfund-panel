@@ -10,7 +10,7 @@ import type { KronosResult } from './types'
 
 const HISTORY_SERIES_NAME = '真实历史K线'
 const FORECAST_OHLC_SERIES_NAME = '预测OHLC'
-const FORECAST_CLOSE_SERIES_NAME = '预测收盘'
+const CLOSE_ONLY_SERIES_NAME = '仅预测收盘（无OHLC）'
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, character => ({
@@ -22,24 +22,24 @@ function escapeHtml(value: string): string {
   })[character]!)
 }
 
-function formatTooltipRows(raw: unknown, result: KronosResult, assetType: KronosAssetType | undefined, forecastStartIndex: number | null): string {
+function formatTooltipRows(raw: unknown, result: KronosResult, assetType: KronosAssetType | undefined): string {
   const rows: any[] = Array.isArray(raw) ? raw : [raw]
   const firstRow = rows[0]
   const axisValue = firstRow?.axisValue
   const time = typeof axisValue === 'string' ? formatKronosTime(axisValue, result.period) : ''
   const prices = rows.flatMap((row: any) => {
-    if (row?.seriesName === FORECAST_CLOSE_SERIES_NAME
-      && forecastStartIndex !== null
-      && typeof row?.dataIndex === 'number'
-      && row.dataIndex < forecastStartIndex) {
-      return []
-    }
-
     const label = escapeHtml(String(row?.seriesName ?? ''))
     if (row?.seriesType === 'candlestick' && Array.isArray(row.value) && row.value.length >= 4) {
       const [open, close, low, high] = row.value.slice(-4)
       if ([open, close, low, high].every((price: unknown) => typeof price === 'number' && Number.isFinite(price))) {
         return [`${label}: 开 ${formatKronosPrice(open, assetType)} 高 ${formatKronosPrice(high, assetType)} 低 ${formatKronosPrice(low, assetType)} 收 ${formatKronosPrice(close, assetType)}`]
+      }
+      return []
+    }
+    if (row?.seriesType === 'scatter') {
+      const closeValue = Array.isArray(row.value) ? row.value.at(-1) : row.value
+      if (row.seriesName === CLOSE_ONLY_SERIES_NAME && typeof closeValue === 'number' && Number.isFinite(closeValue)) {
+        return [`${label}: 收 ${formatKronosPrice(closeValue, assetType)}`]
       }
       return []
     }
@@ -116,7 +116,8 @@ export function buildKronosChartOption(
     },
   ]
 
-  if (hasForecast && forecastMarks && model.forecastMode === 'ohlc') {
+  const hasForecastCandles = model.forecastOhlc.some(value => value !== null)
+  if (hasForecastCandles && forecastMarks) {
     series.push({
       name: FORECAST_OHLC_SERIES_NAME,
       type: 'candlestick',
@@ -134,24 +135,37 @@ export function buildKronosChartOption(
       },
       ...forecastMarks,
     })
-  } else if (hasForecast && forecastMarks && model.forecastMode === 'close_only') {
+  }
+
+  const closeOnlyValues = result.forecast_mode === 'close_only' ? model.forecastClose : model.forecastCloseOnly
+  const hasCloseOnlyPoints = closeOnlyValues.some(value => value !== null)
+  if (hasCloseOnlyPoints) {
     series.push({
-      name: FORECAST_CLOSE_SERIES_NAME,
-      type: 'line',
-      data: model.forecastClose,
-      showSymbol: true,
+      name: CLOSE_ONLY_SERIES_NAME,
+      type: 'scatter',
+      data: closeOnlyValues.map((value, index) => value === null ? '-' : [model.categories[index], value]),
       symbol: 'circle',
-      symbolSize: 4,
-      connectNulls: false,
-      lineStyle: { width: 2, color: '#A855F7', type: 'dashed' },
-      itemStyle: { color: '#A855F7' },
-      ...forecastMarks,
+      symbolSize: 8,
+      animation: false,
+      z: 4,
+      itemStyle: {
+        color: 'rgba(168,85,247,0)',
+        borderColor: '#A855F7',
+        borderWidth: 1.6,
+      },
+      emphasis: {
+        itemStyle: { borderWidth: 2.2 },
+      },
+      ...(!hasForecastCandles && forecastMarks ? forecastMarks : {}),
     })
   }
 
   const legendData = [HISTORY_SERIES_NAME]
-  if (hasForecast) {
-    legendData.push(model.forecastMode === 'ohlc' ? FORECAST_OHLC_SERIES_NAME : FORECAST_CLOSE_SERIES_NAME)
+  if (hasForecastCandles) {
+    legendData.push(FORECAST_OHLC_SERIES_NAME)
+  }
+  if (hasCloseOnlyPoints) {
+    legendData.push(CLOSE_ONLY_SERIES_NAME)
   }
 
   return {
@@ -169,7 +183,7 @@ export function buildKronosChartOption(
       backgroundColor: 'rgba(24,24,27,0.95)',
       borderColor: 'rgba(255,255,255,0.1)',
       textStyle: { color: '#E4E4E7', fontSize: 11 },
-      formatter: (raw: unknown) => formatTooltipRows(raw, result, assetType, model.forecastStartIndex),
+      formatter: (raw: unknown) => formatTooltipRows(raw, result, assetType),
     },
     xAxis: {
       type: 'category',

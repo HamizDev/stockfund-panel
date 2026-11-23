@@ -27,7 +27,7 @@ def digest(value) -> str:
 
 class ResearchStore:
     def __init__(self, runtime: Path, name: str, limit=20):
-        assert name in {'comparisons', 'candidates', 'rolling'}
+        assert name in {'comparisons', 'candidates', 'rolling', 'score_cache'}
         self.runtime, self.folder, self.limit = runtime, runtime / name, limit
         self.lock = threading.RLock()
 

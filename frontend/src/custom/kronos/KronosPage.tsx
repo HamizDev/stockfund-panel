@@ -8,6 +8,7 @@ import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { KronosChart } from './KronosChart'
+import { availableDailyWindow } from './dataWindow'
 import { KronosEvaluation } from './KronosEvaluation'
 import { KronosTrainingCoverage } from './KronosTrainingCoverage'
 import {
@@ -197,6 +198,7 @@ export function KronosPage() {
   const visibleJob = matchingJob ? trackedJob : undefined
   const activeOtherJob = trackedJob && !matchingJob && isKronosJobActive(trackedJob) ? trackedJob : undefined
   const status = statusQuery.data
+  const availableWindow = availableDailyWindow(visibleJob)
   const canStart = Boolean(selection && status?.ready && !status.busy
     && !isKronosJobActive(trackedJob)
     && status.models.includes(view.model) && (view.period !== '1m' || view.lookback <= 240)
@@ -423,7 +425,14 @@ export function KronosPage() {
               <SectionCard className="border-bear/25 bg-bear/5">
                 <div className="flex items-start gap-2 text-xs text-bear">
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <div><div className="font-medium">预测任务失败</div><div className="mt-1 break-words">{visibleJob.error || visibleJob.message || '服务未返回错误说明'}</div></div>
+                  <div className="space-y-1">
+                    <div className="font-medium">预测任务失败</div>
+                    <div className="break-words">{visibleJob.error || visibleJob.message || '服务未返回错误说明'}</div>
+                    {availableWindow != null && (
+                      <button type="button" className="rounded border border-accent/30 px-2 py-1 text-xs text-accent hover:bg-accent/10"
+                        onClick={() => setParam('lookback', availableWindow)}>改用 {availableWindow} 根历史</button>
+                    )}
+                  </div>
                 </div>
               </SectionCard>
             )}
@@ -497,6 +506,7 @@ function CompleteResult({ job, assetType }: { job: KronosJob; assetType?: Kronos
   const hasChartData = result.history.length > 0 || result.forecast.length > 0
   const firstForecast = result.forecast[0]?.time
   const lastForecast = result.forecast[result.forecast.length - 1]?.time
+  const dailyCandles = result.period === 'daily' ? result.forecast.filter(bar => 'open' in bar).length : null
   const crossSession = result.period === '1m' && firstForecast && lastForecast
     && (firstForecast.slice(0, 10) !== result.input_as_of.slice(0, 10)
       || lastForecast.slice(0, 10) !== result.input_as_of.slice(0, 10))
@@ -540,7 +550,7 @@ function CompleteResult({ job, assetType }: { job: KronosJob; assetType?: Kronos
               {KRONOS_CLOSE_ONLY_WARNING}
             </div>
             <p className="mt-1 text-[10px] leading-4 text-secondary">
-              预测开盘价、最高价和最低价不满足 K 线约束，已省略，未修正或用于绘图。
+              {result.period === 'daily' ? '空心点表示仅有有效收盘价的预测时点。' : '分钟走势展示有效的预测收盘价。'}
             </p>
           </div>
         )}
@@ -559,7 +569,7 @@ function CompleteResult({ job, assetType }: { job: KronosJob; assetType?: Kronos
             <div className="mb-1 flex flex-wrap items-center justify-between gap-1 text-[10px] text-muted">
               <span>{result.period === '1m'
                 ? '历史分时走势 + 预测收盘价路径'
-                : result.forecast_mode === 'close_only' ? '历史蜡烛K线 + 预测收盘价路径' : '历史K线 + 预测K线'} · 时间为北京时间</span>
+                : `完整预测蜡烛 ${dailyCandles}/${result.forecast.length}${dailyCandles !== result.forecast.length ? ' · 空心点为预测收盘' : ''}`} · 时间为北京时间</span>
               <span className="inline-flex items-center gap-1 text-purple-400"><span className="w-5 border-t border-dashed border-purple-400" />预测情景</span>
             </div>
             <KronosChart result={result} assetType={assetType} />

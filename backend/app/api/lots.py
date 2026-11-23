@@ -99,7 +99,9 @@ def sync_lot(request: Request, lot: dict) -> None:
 
 @router.get("")
 def list_lots(request: Request):
-    return {"lots": lots_domain.load_all(_data_dir(request))}
+    lots = lots_domain.load_all(_data_dir(request))
+    asset_types = {symbol: _resolve_asset_type(request, symbol) for symbol in {lot["symbol"] for lot in lots}}
+    return {"lots": [{**lot, "asset_type": asset_types[lot["symbol"]]} for lot in lots]}
 
 
 @router.get("/review")

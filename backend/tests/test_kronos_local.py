@@ -91,7 +91,7 @@ def test_stale_raw_daily_is_not_used(tmp_path, monkeypatch, calendar):
     monkeypatch.setattr(data.custom, 'get_provider', lambda _: SimpleNamespace(get_daily=lambda *_a, **_k: pl.DataFrame([row(date(2026, 10, 23))])))
     values, warnings = data._daily(repo, '515880.SH', 'etf', 1, datetime(2026, 10, 26, 14, tzinfo=CN_TZ))
     assert values[-1]['time'] == '2026-10-23'
-    assert any('在线重新取数' in item for item in warnings)
+    assert any('自动在线补取并校验' in item for item in warnings)
 
 
 def test_enriched_is_never_used_as_raw(tmp_path):
@@ -263,6 +263,19 @@ def test_runner_keeps_valid_ohlc():
     original = {'open': 1., 'high': 1.2, 'low': .8, 'close': 1.1}
     bars, mode, warnings = _next_runner().encode_forecast([original], ['2026-10-27'])
     assert mode == 'ohlc' and bars == [{'time': '2026-10-27', **original}] and not warnings
+
+
+def test_runner_keeps_valid_candles_when_one_forecast_is_close_only():
+    valid = {'open': 1., 'high': 1.2, 'low': .8, 'close': 1.1}
+    invalid = {**valid, 'high': .9}
+    stamps = ['2026-10-27', '2026-10-28']
+    bars, mode, warnings = _next_runner().encode_forecast([valid, invalid], stamps)
+
+    assert mode == 'partial_ohlc'
+    assert bars == [{'time': stamps[0], **valid}, {'time': stamps[1], 'close': 1.1}]
+    value = valid_forecast()
+    value.update(forecast=bars, forecast_mode=mode, warnings=warnings)
+    service.validate_forecast(value, stamps)
 
 
 @pytest.mark.parametrize('bad', [float('nan'), float('inf'), 0., -1.])

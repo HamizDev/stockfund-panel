@@ -1,7 +1,7 @@
 export type KronosModel = 'small' | 'base'
 export type KronosPeriod = 'daily' | '1m'
 export type KronosJobState = 'preparing' | 'running' | 'complete' | 'failed' | 'cancelled'
-export type KronosForecastMode = 'ohlc' | 'close_only'
+export type KronosForecastMode = 'ohlc' | 'partial_ohlc' | 'close_only'
 
 export const KRONOS_CLOSE_ONLY_WARNING = '仅展示收盘价预测路径'
 
@@ -339,17 +339,36 @@ function parseOptionalDate(value: unknown): string | null | undefined {
 function parseForecastBars(value: unknown, mode: KronosForecastMode): KronosForecastBar[] {
   if (mode === 'ohlc') {
     const bars = parseBars(value, 'forecast')
-    bars.forEach((bar, index) => {
-      const { open, high, low, close } = bar
-      if ([open, high, low, close].some(price => price <= 0)
-        || high < Math.max(open, close) || low > Math.min(open, close) || low > high) {
-        throw new Error(`Kronos forecast[${index}] OHLC关系无效`)
-      }
-    })
+    bars.forEach(validateForecastOhlc)
     return bars
   }
 
   if (!Array.isArray(value)) throw new Error('Kronos forecast 响应格式无效')
+  if (mode === 'partial_ohlc') {
+    let invalidOhlcCount = 0
+    const bars = value.map((item, index) => {
+      const row = record(item, `forecast[${index}]`)
+      const hasCompleteOhlc = ['open', 'high', 'low', 'close'].every(key => key in row)
+      if (hasCompleteOhlc) {
+        const bar = parseBars([row], `forecast[${index}]`)[0]
+        validateForecastOhlc(bar, index)
+        return bar
+      }
+
+      invalidOhlcCount += 1
+      const keys = Object.keys(row)
+      if (keys.length !== 2 || keys.some(key => key !== 'time' && key !== 'close')) {
+        throw new Error(`Kronos forecast[${index}] partial_ohlc 缺失OHLC时只允许time/close`)
+      }
+      return {
+        time: text(row.time, `forecast[${index}].time`),
+        close: positiveNumber(row.close, `forecast[${index}].close`),
+      }
+    })
+    if (invalidOhlcCount === 0) throw new Error('Kronos partial_ohlc 必须至少包含一根OHLC无效K线')
+    return bars
+  }
+
   return value.map((item, index) => {
     const row = record(item, `forecast[${index}]`)
     const keys = Object.keys(row)
@@ -361,6 +380,14 @@ function parseForecastBars(value: unknown, mode: KronosForecastMode): KronosFore
       close: positiveNumber(row.close, `forecast[${index}].close`),
     }
   })
+}
+
+function validateForecastOhlc(bar: KronosBar, index: number): void {
+  const { open, high, low, close } = bar
+  if ([open, high, low, close].some(price => price <= 0)
+    || high < Math.max(open, close) || low > Math.min(open, close) || low > high) {
+    throw new Error(`Kronos forecast[${index}] OHLC关系无效`)
+  }
 }
 
 function parseResult(value: unknown, request: KronosJobRequest): KronosResult {
@@ -375,6 +402,8 @@ function parseResult(value: unknown, request: KronosJobRequest): KronosResult {
   let forecastMode: KronosForecastMode
   if (input.forecast_mode === undefined || input.forecast_mode === 'ohlc') {
     forecastMode = 'ohlc'
+  } else if (input.forecast_mode === 'partial_ohlc') {
+    forecastMode = 'partial_ohlc'
   } else if (input.forecast_mode === 'close_only') {
     forecastMode = 'close_only'
   } else {
@@ -384,6 +413,13 @@ function parseResult(value: unknown, request: KronosJobRequest): KronosResult {
   if (forecastMode === 'close_only'
     && !warnings.some(warning => warning.includes(KRONOS_CLOSE_ONLY_WARNING))) {
     throw new Error('Kronos close_only 预测缺少收盘价路径说明')
+  }
+  if (forecastMode === 'partial_ohlc' && !warnings.some(warning =>
+    warning.includes('根OHLC关系无效')
+      && warning.includes('日K对应位置留空')
+      && warning.includes('不修正或补造开高低价')
+      && warning.includes('收盘价仅保留供误差核对'))) {
+    throw new Error('Kronos partial_ohlc 预测缺少OHLC缺口说明')
   }
   const prevClose = parseOptionalPrevClose(input.prev_close)
   const prevCloseDate = parseOptionalDate(input.prev_close_date)

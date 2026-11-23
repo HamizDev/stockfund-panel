@@ -203,6 +203,16 @@ def test_client_raises_on_error_code(monkeypatch):
         c.snapshot_page()
 
 
+def test_client_error_keeps_api_code_message_and_path(monkeypatch):
+    _patch_http(monkeypatch, {"code": 1002, "message": "Unknown thscode", "data": None})
+    c = fc.FuyaoClient(api_key="k")
+    with pytest.raises(fc.FuyaoError) as caught:
+        c.historical_kline("000001.SZ", 1, 2)
+    assert caught.value.code == 1002
+    assert caught.value.api_message == "Unknown thscode"
+    assert caught.value.path == "/api/a-share/prices/historical"
+
+
 # ---- 字段名兼容与服务端时间戳 ----
 
 
@@ -611,8 +621,20 @@ class _FakeHistClient:
     def historical_kline(self, thscode, start_ms, end_ms, adjust="none"):
         self.calls.append({"thscode": thscode, "start": start_ms, "end": end_ms, "adjust": adjust})
         if thscode in self.errors:
-            raise fc.FuyaoError("扶摇接口错误 code=4001: 频率超限")
+            raise fc.FuyaoError(
+                "扶摇接口错误 code=4001: 频率超限",
+                code=4001,
+                api_message="频率超限",
+                path="/api/a-share/prices/historical",
+            )
         return [b for b in self.bars.get(thscode, []) if start_ms <= b["date_ms"] <= end_ms]
+
+    def historical_kline_batch(self, thscodes, start_ms, end_ms):
+        raise fc.FuyaoError(
+            "测试环境未部署批量历史端点",
+            path="/api/a-share/prices/historical-batch",
+            http_status=404,
+        )
 
     def dump_download_url(self, dump_kind):
         raise fc.FuyaoError("测试环境无 dump")
@@ -733,12 +755,15 @@ def test_daily_api_deep_window_splits_into_10y_chunks(monkeypatch):
         assert b["start"] == a["end"] + 1  # 连续且不重叠
 
 
-def test_daily_api_soft_fail_per_symbol(monkeypatch):
-    """单标的失败软跳过, 不阻断其余标的。"""
+def test_daily_api_rate_limit_is_not_treated_as_partial_success(monkeypatch):
+    """批量端点不可用后,单票限流必须终止本批而不是留下部分成功。"""
     bars = {"000001.SZ": [_bar(date(2026, 8, 27), 11.05)]}
     provider = _hist_provider(monkeypatch, _FakeHistClient(bars, error_syms=("600519.SH",)))
-    df = provider.get_daily(["600519.SH", "000001.SZ"], datetime(2026, 8, 1), datetime(2026, 8, 28))
-    assert df["symbol"].unique().to_list() == ["000001.SZ"]
+    with pytest.raises(fc.FuyaoError, match="4001") as caught:
+        provider.get_daily(
+            ["600519.SH", "000001.SZ"], datetime(2026, 8, 1), datetime(2026, 8, 28)
+        )
+    assert caught.value.code == 4001
 
 
 def test_iter_daily_api_is_bounded_by_symbol_batch(monkeypatch):
@@ -799,13 +824,16 @@ def _recent_daily_dump() -> pl.DataFrame:
     return _daily10_dump(rows)
 
 
+_DUMP_TEST_SYMBOLS = [f"{i:06d}.SZ" for i in range(1, 12)]
+
+
 def test_daily_recent_window_uses_dump_without_api_calls(monkeypatch):
     """近端窗口: 一次 dump 覆盖全部标的, 不打单标的接口; volume 股→手; 停牌行过滤。"""
     provider = _hist_provider(monkeypatch, _FakeHistClient({}))
     provider._dump_memo[fp._DAILY10_DUMP_KIND] = _recent_daily_dump()
     progress = []
     df = provider.get_daily(
-        ["000001.SZ"],
+        _DUMP_TEST_SYMBOLS,
         datetime(2026, 8, 26),
         datetime(2026, 8, 28),
         on_chunk_done=lambda c, t: progress.append((c, t)),
@@ -824,7 +852,7 @@ def test_daily_dump_stale_falls_back_to_api(monkeypatch):
     bars = {"000001.SZ": [_bar(date(2026, 8, 27), 11.05)]}
     provider = _hist_provider(monkeypatch, _FakeHistClient(bars))
     provider._dump_memo[fp._DAILY10_DUMP_KIND] = _recent_daily_dump()  # max=08-28
-    provider.get_daily(["000001.SZ"], datetime(2026, 8, 24), datetime(2026, 9, 4))  # 09-04 周五
+    provider.get_daily(_DUMP_TEST_SYMBOLS, datetime(2026, 8, 24), datetime(2026, 9, 4))  # 09-04 周五
     assert provider._get_client().calls != []
 
 
@@ -832,7 +860,7 @@ def test_daily_dump_weekend_end_covered(monkeypatch):
     """end 为周末且紧随 dump 末端 → 自然缺口, 仍走 dump。"""
     provider = _hist_provider(monkeypatch, _FakeHistClient({}))
     provider._dump_memo[fp._DAILY10_DUMP_KIND] = _recent_daily_dump()  # max=周五 08-28
-    df = provider.get_daily(["000001.SZ"], datetime(2026, 8, 26), datetime(2026, 8, 30))  # 周日
+    df = provider.get_daily(_DUMP_TEST_SYMBOLS, datetime(2026, 8, 26), datetime(2026, 8, 30))  # 周日
     assert provider._get_client().calls == []
     assert not df.is_empty()
 
@@ -843,14 +871,14 @@ def test_daily_dump_rejects_non_raw_adjustment(monkeypatch):
     provider = _hist_provider(monkeypatch, _FakeHistClient({}))
     provider._dump_memo[fp._DAILY10_DUMP_KIND] = dump
     assert provider.get_daily(
-        ["000001.SZ"], datetime(2026, 8, 26), datetime(2026, 8, 28)
+        _DUMP_TEST_SYMBOLS, datetime(2026, 8, 26), datetime(2026, 8, 28)
     ).is_empty()
 
 
 def test_daily_old_window_bypasses_dump(monkeypatch):
     """深窗口且 dump 不可用 → 单标的接口兜底。"""
     provider = _hist_provider(monkeypatch, _FakeHistClient({"000001.SZ": []}))
-    df = provider.get_daily(["000001.SZ"], datetime(2020, 1, 1), datetime(2026, 8, 28))
+    df = provider.get_daily(_DUMP_TEST_SYMBOLS, datetime(2020, 1, 1), datetime(2026, 8, 28))
     assert df.is_empty()
     assert provider._get_client().calls  # 走了单标的接口
 
@@ -905,7 +933,7 @@ def test_daily_deep_window_uses_big_dump(monkeypatch, tmp_path):
     provider = _bigdump_provider(monkeypatch, tmp_path, rows)
     progress = []
     df = provider.get_daily(
-        ["000001.SZ"],
+        _DUMP_TEST_SYMBOLS,
         datetime(2026, 1, 5),
         datetime(2026, 8, 14),
         on_chunk_done=lambda c, t: progress.append((c, t)),
@@ -924,7 +952,7 @@ def test_iter_daily_big_dump_reads_bounded_record_batches(monkeypatch, tmp_path)
     provider = _bigdump_provider(monkeypatch, tmp_path, rows)
     monkeypatch.setattr(fp, "_DAILY_DUMP_BATCH_ROWS", 2)
     chunks = list(provider.iter_daily(
-        ["000001.SZ"], datetime(2026, 1, 1), datetime(2026, 1, 5)
+        _DUMP_TEST_SYMBOLS, datetime(2026, 1, 1), datetime(2026, 1, 5)
     ))
     assert [chunk.height for chunk in chunks] == [2, 2, 1]
     assert [d for chunk in chunks for d in chunk["date"].to_list()] == [
@@ -942,10 +970,10 @@ def test_iter_daily_splits_older_history_from_big_dump(monkeypatch, tmp_path):
     )
     provider._client = _FakeHistClient({"000001.SZ": [_bar(date(2019, 12, 31), 9.0)]})
     rows = pl.concat(list(provider.iter_daily(
-        ["000001.SZ"], datetime(2019, 12, 30), datetime(2020, 1, 2)
+        _DUMP_TEST_SYMBOLS, datetime(2019, 12, 30), datetime(2020, 1, 2)
     )))
     assert rows["date"].to_list() == [date(2019, 12, 31), date(2020, 1, 2)]
-    assert len(provider._get_client().calls) == 1
+    assert len(provider._get_client().calls) == len(_DUMP_TEST_SYMBOLS)
 
 
 def test_daily_big_dump_tail_filled_by_10d(monkeypatch, tmp_path):
@@ -983,7 +1011,7 @@ def test_daily_big_dump_tail_filled_by_10d(monkeypatch, tmp_path):
         },
     ]
     provider = _bigdump_provider(monkeypatch, tmp_path, big_rows, ten_memo=_daily10_dump(ten_rows))
-    df = provider.get_daily(["000001.SZ"], datetime(2026, 8, 10), datetime(2026, 8, 28))
+    df = provider.get_daily(_DUMP_TEST_SYMBOLS, datetime(2026, 8, 10), datetime(2026, 8, 28))
     assert df["date"].to_list() == [
         date(2026, 8, 10),
         date(2026, 8, 14),
@@ -1005,7 +1033,7 @@ def test_daily_big_dump_weekend_end_needs_no_tail(monkeypatch, tmp_path):
     )
 
     df = provider.get_daily(
-        ["000001.SZ"], datetime(2026, 8, 1), datetime(2026, 8, 30)
+        _DUMP_TEST_SYMBOLS, datetime(2026, 8, 1), datetime(2026, 8, 30)
     )
 
     assert df["date"].to_list() == [date(2026, 8, 1), date(2026, 8, 28)]
@@ -1041,7 +1069,7 @@ def test_daily_big_dump_midgap_falls_back(monkeypatch, tmp_path):
         },
     ]
     provider = _bigdump_provider(monkeypatch, tmp_path, big_rows, ten_memo=_daily10_dump(ten_rows))
-    df = provider.get_daily(["000001.SZ"], datetime(2026, 8, 1), datetime(2026, 8, 28))
+    df = provider.get_daily(_DUMP_TEST_SYMBOLS, datetime(2026, 8, 1), datetime(2026, 8, 28))
     assert df.is_empty()  # 兜底走单标的接口(fake 为空) → 不返回缺口拼接数据
 
 
@@ -1064,7 +1092,7 @@ def test_daily_big_dump_start_before_dmin_falls_back(monkeypatch, tmp_path):
     monkeypatch.setattr(
         fp, "fuyao_client", type("M", (), {"FuyaoClient": lambda **kw: _FakeHistClient(bars)})
     )
-    df = provider.get_daily(["000001.SZ"], datetime(2015, 1, 1), datetime(2015, 12, 31))
+    df = provider.get_daily(_DUMP_TEST_SYMBOLS, datetime(2015, 1, 1), datetime(2015, 12, 31))
     assert df.height == 1 and df["close"][0] == 9.0  # 单标的兜底成功
 
 
@@ -1464,15 +1492,18 @@ def test_release_of_extracts_from_presigned_url():
 
 
 def test_test_dataset_daily_preview(monkeypatch):
-    # 试拉窗口只有最近 30 天，样例日期需随测试运行时间移动。
-    first_day = date.today() - timedelta(days=7)
-    second_day = first_day + timedelta(days=1)
-    bars = {"000001.SZ": [_bar(first_day, 11.05), _bar(second_day, 11.65)]}
+    class _FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 8, 31, tzinfo=tz)
+
+    monkeypatch.setattr(fp, "datetime", _FrozenDateTime)
+    bars = {"000001.SZ": [_bar(date(2026, 8, 27), 11.05), _bar(date(2026, 8, 28), 11.65)]}
     provider = _hist_provider(monkeypatch, _FakeHistClient(bars))
     out = provider.test_dataset("daily", ["000001.SZ"])
     assert out["provider"] == "fuyao" and out["dataset"] == "daily"
     assert out["rows"] == 2
-    assert out["preview"][0]["date"] == first_day.isoformat()  # date → ISO 字符串
+    assert out["preview"][0]["date"] == "2026-08-27"  # date → ISO 字符串
 
 
 def test_test_dataset_adj_factor_preview(monkeypatch):

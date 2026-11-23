@@ -5,8 +5,8 @@ export interface KronosChartModel {
   categories: string[]
   historyOhlc: (KronosOhlcValue | null)[]
   forecastOhlc: (KronosOhlcValue | null)[]
+  forecastCloseOnly: (number | null)[]
   forecastClose: (number | null)[]
-  forecastMode: KronosResult['forecast_mode']
   historyCount: number
   forecastStartIndex: number | null
   forecastStartTime: string | null
@@ -20,6 +20,8 @@ export type KronosOhlcValue = [open: number, close: number, low: number, high: n
 /** Align real bars and forecast data to one category axis without inventing missing OHLC values. */
 export function buildKronosChartModel(result: KronosResult): KronosChartModel {
   const history = result.history
+  // Keep truthful close values visible for legacy close-only and partial OHLC records.
+  // A close-only value never becomes a synthetic candle.
   const forecast = result.forecast
   const categories = [...history.map(row => row.time), ...forecast.map(row => row.time)]
   const historyOhlc: (KronosOhlcValue | null)[] = [
@@ -29,24 +31,27 @@ export function buildKronosChartModel(result: KronosResult): KronosChartModel {
   const forecastOhlc: (KronosOhlcValue | null)[] = [
     ...history.map(() => null),
     ...forecast.map(row => {
-      if (result.forecast_mode !== 'ohlc' || !('open' in row)) return null
+      if (!('open' in row)) return null
       return [row.open, row.close, row.low, row.high] as KronosOhlcValue
     }),
   ]
-  const forecastClose: (number | null)[] = result.forecast_mode === 'close_only'
-    ? [...history.map(() => null), ...forecast.map(row => row.close)]
-    : categories.map(() => null)
-  if (result.forecast_mode === 'close_only' && history.length > 0 && forecast.length > 0) {
-    forecastClose[history.length - 1] = history[history.length - 1].close
-  }
+  const forecastCloseOnly: (number | null)[] = [
+    ...history.map(() => null),
+    ...forecast.map(row => result.forecast_mode === 'partial_ohlc' && !('open' in row) ? row.close : null),
+  ]
+
+  const forecastClose: (number | null)[] = [
+    ...history.map(() => null),
+    ...forecast.map(row => row.close),
+  ]
 
   const forecastStartIndex = forecast.length > 0 ? history.length : null
   return {
     categories,
     historyOhlc,
     forecastOhlc,
+    forecastCloseOnly,
     forecastClose,
-    forecastMode: result.forecast_mode,
     historyCount: history.length,
     forecastStartIndex,
     forecastStartTime: forecast[0]?.time ?? null,

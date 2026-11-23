@@ -71,12 +71,22 @@ export function Data() {
   const settings = useSettings()
 
   const status = useDataStatus({
+    staleTime: 60_000,
     refetchInterval: (query) => {
       const data = query.state.data
       // 指标异步预热中 或 有活跃 job → 加快轮询到 2s
       if (activeJobId || data?.indicators_ready === false) return 2_000
       return 30_000
     },
+  })
+
+  // Lightweight local metadata paints the cards while exact full statistics load.
+  const quickStatus = useQuery({
+    queryKey: QK.dataQuickStatus,
+    queryFn: api.dataQuickStatus,
+    enabled: !status.data,
+    staleTime: 120_000,
+    retry: false,
   })
 
   // 市场环境(regime) 覆盖画像 —— 走独立接口(/api/regime/coverage), 不在 data/status 内。
@@ -178,6 +188,7 @@ export function Data() {
     mutationFn: () => api.syncIndexDaily(indexSyncDays),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.dataStatus })
+      qc.invalidateQueries({ queryKey: QK.dataQuickStatus })
       qc.invalidateQueries({ queryKey: QK.indexQuotes })
       qc.invalidateQueries({ queryKey: ['index-daily'] })
     },
@@ -284,6 +295,7 @@ export function Data() {
   useEffect(() => {
     if (job.data && (job.data.status === 'succeeded' || job.data.status === 'failed')) {
       qc.invalidateQueries({ queryKey: QK.dataStatus })
+      qc.invalidateQueries({ queryKey: QK.dataQuickStatus })
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
       // 同步任务结束后 regime 覆盖范围可能变化, 一并刷新画像
       qc.invalidateQueries({ queryKey: QK.regimeCoverage })
@@ -313,11 +325,13 @@ export function Data() {
     }
   }, [history.data?.active_id])
 
-  const s = status.data
+  const s = status.data ?? quickStatus.data
   const isLoading = status.isLoading
+  const cardsLoading = !s && (isLoading || quickStatus.isLoading)
+  const showPreview = s?.partial === true
   const isRunning = job.data?.status === 'running' || job.data?.status === 'pending'
   const isStarting = startSync.isPending
-  const hasData = !!(s?.instruments?.rows || s?.daily?.rows)
+  const hasData = !!(s?.instruments?.rows || s?.daily?.rows || s?.daily?.trading_days)
   // none 档(无 key / 无效 key) → 禁用立即同步 (同步依赖付费档的批量端点)
   const isNoKey = settings.data?.mode === 'none'
   const indexOverviewStats = s ? {
@@ -337,7 +351,7 @@ export function Data() {
   } : null
   const etfEligibleSymbols = s?.etf_instruments?.market_data_eligible ?? s?.etf_instruments?.rows ?? 0
   const etfAuxiliarySymbols = s?.etf_instruments?.auxiliary_symbols ?? 0
-  const etfOverviewLabel = s
+  const etfOverviewLabel = showPreview ? `日K覆盖待统计 · 行情候选 ${etfEligibleSymbols}` : s
     ? `日K ${s.etf_daily?.symbols_covered ?? 0} / 行情候选 ${etfEligibleSymbols}${etfAuxiliarySymbols ? ` · 辅助代码 ${etfAuxiliarySymbols}` : ''}`
     : undefined
   const indexOverviewLabel = s ? '日 · 维表 · 日K · 指标' : undefined
@@ -414,7 +428,7 @@ export function Data() {
             hint="盘前同步 · 元数据快照"
             stats={s?.instruments}
             isInstrument
-            loading={isLoading}
+            loading={cardsLoading}
             active={activeCard === 'instruments'}
             done={doneStages.has('instruments')}
             skipped={skippedCards.has('instruments')}
@@ -431,7 +445,7 @@ export function Data() {
             title="日 K"
             hint="增量同步 · 全市场"
             stats={s?.daily}
-            loading={isLoading}
+            loading={cardsLoading}
             active={activeCard === 'daily'}
             done={doneStages.has('daily')}
             skipped={skippedCards.has('daily')}
@@ -440,6 +454,7 @@ export function Data() {
             capLimits={mergedCaps}
             customProvider={routeProviderDisplay(matrix.data, 'daily')}
             auto
+            subLabel={showPreview ? '日 · 本地分区 · 精确行数待统计' : undefined}
             onShowFields={() => setSchemaTable('daily')}
             onSettings={hasData ? () => setOpenSettings(v => v === 'daily' ? null : 'daily') : undefined}
             settingsOpen={openSettings === 'daily'}
@@ -451,7 +466,7 @@ export function Data() {
             title="除权因子"
             hint="增量同步 · 全市场"
             stats={s?.adj_factor}
-            loading={isLoading}
+            loading={cardsLoading || (showPreview && !s?.adj_factor && isLoading)}
             active={activeCard === 'adj_factor'}
             done={doneStages.has('adj_factor')}
             skipped={skippedCards.has('adj_factor')}
@@ -469,7 +484,7 @@ export function Data() {
             title="Enriched"
             hint="复权 OHLCV + 技术指标"
             stats={s?.enriched}
-            loading={isLoading}
+            loading={cardsLoading}
             active={activeCard === 'enriched'}
             done={doneStages.has('enriched')}
             skipped={skippedCards.has('enriched')}
@@ -490,7 +505,7 @@ export function Data() {
             title="指数"
             hint="CN_Index · 独立存储"
             stats={indexOverviewStats}
-            loading={isLoading}
+            loading={cardsLoading}
             active={activeCard === 'index_daily'}
             done={doneStages.has('index_daily')}
             skipped={skippedCards.has('index_daily')}
@@ -515,7 +530,7 @@ export function Data() {
             title="ETF"
             hint="场内基金 · 独立存储"
             stats={etfOverviewStats}
-            loading={isLoading}
+            loading={cardsLoading}
             tierKey="etf"
             capLimits={mergedCaps}
             customProvider={routeProviderDisplay(matrix.data, 'daily')}
@@ -535,7 +550,7 @@ export function Data() {
             title="分钟 K"
             hint="全市场同步"
             stats={s?.minute}
-            loading={isLoading}
+            loading={cardsLoading}
             active={activeCard === 'minute'}
             done={doneStages.has('minute')}
             skipped={skippedCards.has('minute')}
@@ -556,7 +571,7 @@ export function Data() {
             title="财务数据"
             hint="财报 / 指标 / 历史股本"
             stats={s?.financials ? { rows: s.financials.rows } : null}
-            loading={isLoading}
+            loading={cardsLoading || (showPreview && !s?.financials && isLoading)}
             tierKey="financials"
             capLimits={mergedCaps}
             customProvider={routeProviderDisplay(matrix.data, 'financial')}
@@ -598,7 +613,7 @@ export function Data() {
         subtitle="本地数据画像 · 同步状态 · 历史记录"
         right={
           <div className="flex items-center gap-3">
-            {!hasData && !isLoading && (
+            {!hasData && Boolean(status.data) && (
               <span className="text-xs text-accent animate-pulse">首次使用请点击右侧按钮同步数据</span>
             )}
             <button
@@ -691,6 +706,11 @@ export function Data() {
       />
 
       <div className="mx-auto px-8 py-6 space-y-6 max-w-6xl">
+        {status.isError && (
+          <p role="status" className="rounded-card border border-border bg-surface px-3 py-2 text-xs text-warning">
+            {showPreview ? '完整统计读取失败，显示已有摘要。' : '完整统计读取失败，可稍后重试。'}
+          </p>
+        )}
         {/* 无 Key 提示 —— 非阻断: 历史日K走免费通道, 实时等能力取决于所选数据源 */}
         {isNoKey && (
           <div className="flex items-center gap-2 rounded-card border border-border bg-elevated/40 px-3 py-2 text-xs">
@@ -877,7 +897,7 @@ export function Data() {
               {isLoading ? (
                 <Skeleton w="w-12" />
               ) : (
-                <span className="font-mono text-xs text-muted">{s ? `${s.storage.total_size_mb} MB` : '—'}</span>
+                <span className="font-mono text-xs text-muted">{s?.storage ? `${s.storage.total_size_mb} MB` : '—'}</span>
               )}
             </div>
             <div className="space-y-2">
@@ -892,18 +912,18 @@ export function Data() {
                   </div>
                 ))
               ) : [
-                { label: '个股维表', files: s?.storage.instruments_files, size: s?.storage.instruments_size_mb },
-                { label: '日 K',     files: s?.storage.daily_files,       size: s?.storage.daily_size_mb },
-                { label: '除权因子', files: s?.storage.adj_factor_files,  size: s?.storage.adj_factor_size_mb },
-                { label: 'Enriched', files: s?.storage.enriched_files,    size: s?.storage.enriched_size_mb },
-                { label: '分钟 K',   files: s?.storage.minute_files,      size: s?.storage.minute_size_mb },
-                { label: '财务数据', files: s?.storage.financials_files,   size: s?.storage.financials_size_mb },
+                { label: '个股维表', files: s?.storage?.instruments_files, size: s?.storage?.instruments_size_mb },
+                { label: '日 K',     files: s?.storage?.daily_files,       size: s?.storage?.daily_size_mb },
+                { label: '除权因子', files: s?.storage?.adj_factor_files,  size: s?.storage?.adj_factor_size_mb },
+                { label: 'Enriched', files: s?.storage?.enriched_files,    size: s?.storage?.enriched_size_mb },
+                { label: '分钟 K',   files: s?.storage?.minute_files,      size: s?.storage?.minute_size_mb },
+                { label: '财务数据', files: s?.storage?.financials_files,  size: s?.storage?.financials_size_mb },
               ].map((item) => (
                 <div key={item.label} className="flex items-center justify-between text-[11px]">
                   <span className="text-muted">{item.label}</span>
                   <div className="flex items-center gap-3">
-                    <span className="font-mono text-secondary">{item.files ?? 0} 文件</span>
-                    <span className="font-mono text-muted w-16 text-right">{(item.size ?? 0).toFixed(1)} MB</span>
+                    <span className="font-mono text-secondary">{item.files == null ? '—' : `${item.files} 文件`}</span>
+                    <span className="font-mono text-muted w-16 text-right">{item.size == null ? '—' : `${item.size.toFixed(1)} MB`}</span>
                   </div>
                 </div>
               ))}
@@ -912,9 +932,9 @@ export function Data() {
                 <div className="flex items-center justify-between text-[11px] border-t border-border/50 pt-2 mt-1">
                   <span className="text-muted">扩展数据</span>
                   <div className="flex items-center gap-3">
-                    <span className="font-mono text-secondary">{s?.storage.ext_data_files ?? extConfigs.data.items.length} 文件</span>
+                    <span className="font-mono text-secondary">{s?.storage?.ext_data_files ?? extConfigs.data.items.length} 文件</span>
                     <span className="font-mono text-muted w-16 text-right">
-                      {s?.storage.ext_data_size_mb != null ? `${s.storage.ext_data_size_mb.toFixed(1)} MB` : '—'}
+                      {s?.storage?.ext_data_size_mb != null ? `${s.storage.ext_data_size_mb.toFixed(1)} MB` : '—'}
                     </span>
                   </div>
                 </div>

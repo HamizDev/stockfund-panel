@@ -5,8 +5,8 @@
 
 实现数据集:
   - realtime     A 股全市场快照 (分页)
-  - daily        A 股日K, 原始价; 近端窗口走 daily-k-10d 全市场 dump(1 次请求),
-                 深窗口走单标的 historical 接口(≤10 年/次自动分片)
+  - daily        A 股原始日K; 少量标的优先批量接口,全市场仍走 10d/10 年 dump,
+                 dump 缺口由批量接口补齐,仅漏组或端点不可用时单票补查
   - adj_factor   A 股除权因子; adjustment-factors 事件 dump + 自家原始日K前收盘,
                  按交易所公式推导单事件比值, 涨跌停自检
   - financial    财务五表(股本除外): 三表多期序列 + 指标单期, 字段映射为 TickFlow
@@ -43,7 +43,7 @@ import pyarrow.parquet as pq
 from app.data_providers.normalizer import DAILY_COLS, normalize_daily
 from app.indicators.pipeline import filter_halt_days
 from app.plugins.fuyao import client as fuyao_client
-from app.plugins.fuyao.client import FuyaoClient, FuyaoError
+from app.plugins.fuyao.client import HISTORICAL_BATCH_LIMIT, FuyaoClient, FuyaoError
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +71,20 @@ _RECENT_DUMP_DAYS = 12  # 窗口跨度 ≤ 此天数时优先走 10d dump(覆盖
 _PREV_CLOSE_BACKDAYS = 30  # 推导因子时向前找"除权日前收盘"的回看天数(容忍长期停牌)
 _DAILY_DUMP_BATCH_ROWS = 100_000
 _HIST_SYMBOL_BATCH = 50
+_HIST_SMALL_SYMBOL_LIMIT = HISTORICAL_BATCH_LIMIT
+_HISTORICAL_BATCH_PATH = "/api/a-share/prices/historical-batch"
+_HISTORICAL_SINGLE_PATH = "/api/a-share/prices/historical"
 _DAILY_DUMP_COLUMNS = [
     "thscode", "adjusted", "date_ms", "open_price", "high_price", "low_price",
     "close_price", "volume", "turnover",
 ]
+
+
+def _is_auth_or_rate_limit_error(err: FuyaoError) -> bool:
+    """Recognize only structured upstream auth/rate-limit failures."""
+    return err.http_status in (401, 403, 429) or err.code in (
+        1001, "1001", 4001, "4001", 401, "401", 403, "403", 429, "429"
+    )
 
 
 def get_api_key() -> str:
@@ -382,6 +392,8 @@ class FuyaoProvider:
         try:
             path = self._ensure_dump_path(_DAILY_DUMP_KIND, "daily_k")
         except FuyaoError as e:
+            if _is_auth_or_rate_limit_error(e):
+                raise
             logger.warning("扶摇 10 年 dump 不可用, 回退单标的接口: %s", e)
             return None
         dmin, _ = _dump_date_range(path)
@@ -492,12 +504,12 @@ class FuyaoProvider:
     ) -> pl.DataFrame:
         """A 股日K → 内部契约。原始价(adjust=none 锁定)、volume 股→手(floor /100)。
 
-        取数三档(逐级降级, 全部失败才空手而归):
-        - 近端窗口(跨度 ≤12 天): daily-k-10d dump(约 1MB), 1 次请求覆盖全部标的;
-        - 深窗口: daily-k 10 年全量 dump(约 172MB, 缓存覆盖起点即复用, 不追新 release),
+        - ≤10 只优先股票批量历史接口,避免小查询下载全市场整包;
+        - 更大范围的近端窗口(跨度 ≤12 天): daily-k-10d dump(约 1MB);
+        - 更大范围的深窗口: daily-k 10 年全量 dump(约 172MB, 缓存覆盖起点即复用, 不追新 release),
           末端缺口由 10d dump 补尾 — 全市场深回填从"逐票 34 分钟"降为"一次下载+秒级筛选";
-        - 兜底: 单标的 historical 接口(窗口早于 dump 覆盖 / dump 不可用; 10 年自动分片,
-          逐标的节流 + 进度回调)。
+        - dump 缺口或不可用时走批量接口,仅缺失分组或批端点不可用时单票补查;
+          历史窗口按不重叠的 10 年片查询。权限、限频和其他接口错误直接抛出。
         """
         chunks = [
             df
@@ -523,12 +535,14 @@ class FuyaoProvider:
         """分批产出日K,供历史同步逐批落盘,避免全市场结果累积在内存。"""
         if not symbols or asset_type != "stock":
             return
+        symbols = list(dict.fromkeys(symbols))
         end_dt = end_time or datetime.now()
         start_dt = start_time or (end_dt - timedelta(days=365))
         start_d, end_d = start_dt.date(), end_dt.date()
         symset = set(symbols)
+        prefer_api = len(symbols) <= _HIST_SMALL_SYMBOL_LIMIT
 
-        if (end_d - start_d).days <= _RECENT_DUMP_DAYS:
+        if not prefer_api and (end_d - start_d).days <= _RECENT_DUMP_DAYS:
             try:
                 dump = self._ensure_dump(_DAILY10_DUMP_KIND, "daily_k_10d")
                 if _dump_covers(dump, start_d, end_d):
@@ -539,9 +553,11 @@ class FuyaoProvider:
                         yield df
                     return
             except FuyaoError as e:
+                if _is_auth_or_rate_limit_error(e):
+                    raise
                 logger.warning("扶摇 10d dump 不可用: %s", e)
 
-        dump_info = self._daily_dump_info()
+        dump_info = None if prefer_api else self._daily_dump_info()
         sources: list[tuple[str, date, date]] = []
         if dump_info:
             _, dump_min, dump_max = dump_info
@@ -558,7 +574,11 @@ class FuyaoProvider:
                         ten["date_ms"].cast(pl.Int64) + _SH_MS, time_unit="ms"
                     ).dt.date()
                     ten_min, ten_max = ten_dates.min(), ten_dates.max()
-                except (FuyaoError, KeyError):
+                except FuyaoError as e:
+                    if _is_auth_or_rate_limit_error(e):
+                        raise
+                    ten_min = ten_max = None
+                except KeyError:
                     ten_min = ten_max = None
                 if (
                     ten_min is not None
@@ -609,13 +629,7 @@ class FuyaoProvider:
                     for i in range(0, len(symbols), _HIST_SYMBOL_BATCH)
                 ]
                 for batch in batches:
-                    rows: list[dict] = []
-                    for symbol in batch:
-                        rows.extend(_kline_rows(
-                            symbol,
-                            self._historical_bars(symbol, source_start, source_end),
-                        ))
-                        time.sleep(_HIST_INTERVAL_S)
+                    rows = self._historical_batch_rows(batch, source_start, source_end)
                     df = normalize_daily(rows, source=self.name)
                     done += 1
                     if on_chunk_done:
@@ -637,6 +651,8 @@ class FuyaoProvider:
             path = self._ensure_dump_path(_DAILY_DUMP_KIND, "daily_k")
             dmin, dmax = _dump_date_range(path)
         except FuyaoError as e:
+            if _is_auth_or_rate_limit_error(e):
+                raise
             logger.warning("扶摇 10 年 dump 不可用, 回退单标的接口: %s", e)
             return None
         return (path, dmin, dmax) if dmin is not None and dmax is not None else None
@@ -706,6 +722,118 @@ class FuyaoProvider:
         out = filter_halt_days(out)
         cols = [c for c in DAILY_COLS if c in out.columns]
         return out.select(cols).sort(["symbol", "date"]) if not out.is_empty() else out.select(cols)
+
+    @staticmethod
+    def _is_unknown_historical_symbol(err: FuyaoError, symbol: str) -> bool:
+        """Only the exact single-stock not-found envelope means this source lacks a symbol."""
+        return (
+            err.code in (1002, "1002")
+            and isinstance(err.api_message, str)
+            and err.api_message.strip() == f"Unknown thscode: {symbol}"
+            and err.path == _HISTORICAL_SINGLE_PATH
+        )
+
+    @staticmethod
+    def _is_historical_batch_unavailable(err: FuyaoError) -> bool:
+        """Only an explicit unsupported endpoint status may trigger bounded single calls."""
+        return (
+            err.path == _HISTORICAL_BATCH_PATH
+            and err.http_status in (404, 405, 501)
+        )
+
+    @staticmethod
+    def _with_historical_context(err: FuyaoError, message: str) -> FuyaoError:
+        return FuyaoError(
+            f"{message}: {err}",
+            code=err.code,
+            api_message=err.api_message,
+            path=err.path,
+            http_status=err.http_status,
+        )
+
+    def _historical_batch_rows(
+        self, symbols: list[str], start_d: date, end_d: date
+    ) -> list[dict]:
+        """Fetch raw daily bars in ≤10-symbol/≤10-year requests.
+
+        Empty groups are authoritative and do not trigger another request.
+        A missing group or explicit unsupported batch endpoint gets one bounded
+        single-stock lookup per affected symbol. An exact single-stock unknown
+        symbol response is isolated; all other errors abort this source batch.
+        """
+        if not symbols:
+            return []
+
+        client = self._get_client()
+        out: list[dict] = []
+        start, end = _ms_of_date(start_d), _ms_of_date(end_d)
+        request_made = False
+        batch_available = True
+        unknown_symbols: set[str] = set()
+        while start <= end:
+            chunk_end = min(end, start + _HIST_MAX_SPAN_MS - 1)
+            for offset in range(0, len(symbols), HISTORICAL_BATCH_LIMIT):
+                batch = symbols[offset:offset + HISTORICAL_BATCH_LIMIT]
+                active_batch = [symbol for symbol in batch if symbol not in unknown_symbols]
+                if not active_batch:
+                    grouped = {}
+                elif batch_available:
+                    if request_made:
+                        time.sleep(_HIST_INTERVAL_S)
+                    try:
+                        grouped = client.historical_kline_batch(active_batch, start, chunk_end)
+                    except FuyaoError as err:
+                        request_made = True
+                        if not self._is_historical_batch_unavailable(err):
+                            raise self._with_historical_context(
+                                err, f"扶摇批量日K请求失败 {active_batch[0]}"
+                            ) from err
+                        batch_available = False
+                        logger.warning("扶摇批量日K端点不可用,回退单标的接口: %s", err)
+                        grouped = {}
+                    else:
+                        request_made = True
+                        if (
+                            not isinstance(grouped, dict)
+                            or any(
+                                symbol not in active_batch or not isinstance(bars, list)
+                                for symbol, bars in grouped.items()
+                            )
+                        ):
+                            raise FuyaoError("扶摇批量日K分组结构异常")
+                else:
+                    grouped = {}
+
+                for symbol in batch:
+                    if symbol in unknown_symbols:
+                        continue
+                    if symbol in grouped:
+                        bars = FuyaoClient._validate_historical_rows(
+                            symbol, grouped[symbol], start, chunk_end
+                        )
+                    else:
+                        if request_made:
+                            time.sleep(_HIST_INTERVAL_S)
+                        try:
+                            bars = client.historical_kline(
+                                symbol, start, chunk_end, adjust="none"
+                            )
+                        except FuyaoError as err:
+                            request_made = True
+                            if self._is_unknown_historical_symbol(err, symbol):
+                                unknown_symbols.add(symbol)
+                                logger.info("扶摇不覆盖未知股票 %s,跳过该标的", symbol)
+                                continue
+                            raise self._with_historical_context(
+                                err, f"扶摇单标的日K补查失败 {symbol}"
+                            ) from err
+                        request_made = True
+                        bars = FuyaoClient._validate_historical_rows(
+                            symbol, bars, start, chunk_end
+                        )
+                    out.extend(_kline_rows(symbol, bars))
+            start = chunk_end + 1
+        return out
 
     def _historical_bars(self, symbol: str, start_d: date, end_d: date) -> list[dict]:
         """按 ≤10 年窗口分片拉取单标的原始日K。中途失败软返回已得行, 不抛出。"""

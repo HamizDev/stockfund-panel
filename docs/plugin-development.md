@@ -326,6 +326,12 @@ uv run --extra dev python -m ruff check app/plugins/<your_plugin>/ tests/test_<y
   - `bridge.py` — Python↔Node 桥接 + availability 检测
   - `bridge.mjs` — Node 端(并发池、重试、SDK 解析)
   - `provider.py` — Provider 实现(归一化、分批、错误降级)
+- **`backend/app/plugins/txquote/`** — 腾讯/新浪公开页面行情适配器, 无官方 API 稳定性保证
+  - 新增 `daily` 仅作为原始 OHLC 备用；成交额不可用时保持空值，不拿复权日线替代。
+  - 主源失败自动补齐仅限明确请求的至多 4 只 ETF；全市场股票/ETF同步不调用此逐标的备用源。
+  - ETF 分笔为抽样普通合并分笔，最多 3 页，响应必须标为不完整且 `is_level2=false`，不能解释为完整逐笔或 Level-2。
+  - 日K/分笔共用来源级每秒 1 次预算；HTTP 403/429 触发冷却，不轮换主机或绕过限流。
+  - `tests/test_public_market_research.py`、`tests/test_research_routes_and_fallback.py` 覆盖单位、范围、限流和只读诊断；不访问真实网络。
 
 ## 路由机制(无需关心, 仅参考)
 

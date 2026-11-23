@@ -126,6 +126,7 @@ export const QK = {
 
   // Data / Pipeline
   dataStatus:           ['data-status'] as const,
+  dataQuickStatus:      ['data-quick-status'] as const,
   pipelineJobs:         ['pipeline-jobs'] as const,
   pipelineJob:          (id: string) => ['pipeline-job', id] as const,
   extData:              ['ext-data'] as const,

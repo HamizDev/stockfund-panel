@@ -78,22 +78,26 @@ def validate_input(payload: dict) -> tuple[str, list, list, int]:
 
 
 def encode_forecast(rows: list[dict], future: list[str]) -> tuple[list[dict], str, list[str]]:
-    """Never repair or expose invalid OHLC; a valid close path may stand alone."""
+    """Retain each valid candle; omit only invalid O/H/L without repairing prices."""
     if len(rows) != len(future) or not rows:
         raise ValueError('Model returned an incomplete forecast')
-    complete = True
+    valid = []
     for row in rows:
         prices = [row.get(key) for key in ('open', 'high', 'low', 'close')]
         if not all(type(value) in (int, float) and math.isfinite(value) and value > 0 for value in prices):
             raise ValueError('Model returned non-finite or non-positive forecast prices')
         op, hi, lo, cl = prices
-        complete = complete and hi >= max(op, cl) and lo <= min(op, cl) and hi >= lo
-    keys = ('open', 'high', 'low', 'close') if complete else ('close',)
-    bars = [{'time': stamp, **{key: float(row[key]) for key in keys}}
-            for stamp, row in zip(future, rows, strict=True)]
-    warnings = [] if complete else [
-        '模型预测的开高低关系不满足K线约束，本次仅展示收盘价预测路径；未修正或展示其开高低预测。']
-    return bars, 'ohlc' if complete else 'close_only', warnings
+        valid.append(hi >= max(op, cl) and lo <= min(op, cl) and hi >= lo)
+    bars = [{'time': stamp, **{key: float(row[key]) for key in
+             (('open', 'high', 'low', 'close') if ok else ('close',))}}
+            for stamp, row, ok in zip(future, rows, valid, strict=True)]
+    invalid = valid.count(False)
+    if not invalid:
+        return bars, 'ohlc', []
+    if invalid == len(rows):
+        return bars, 'close_only', ['模型预测的开高低关系不满足K线约束。仅展示收盘价预测路径。未修正开高低价。']
+    return bars, 'partial_ohlc', [
+        f'模型预测有{invalid}根OHLC关系无效。日K对应位置留空。收盘价仅保留供误差核对。']
 
 
 def predict(payload: dict) -> dict:

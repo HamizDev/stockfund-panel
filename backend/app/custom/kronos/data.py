@@ -148,10 +148,19 @@ def _daily(repo, symbol: str, asset_type: str, count: int, now: datetime):
     frame = online_raw_daily(symbol, asset_type, cutoff - timedelta(days=count * 2 + 180), cutoff)
     if 'date' in frame.columns:
         frame = frame.filter(pl.col('date') <= cutoff)
+    if {'symbol', 'date'}.issubset(frame.columns):
+        frame = frame.filter(pl.col('symbol') == symbol)
+    if 0 < frame.height < count:
+        available = _rows(frame, symbol, 'date', frame.height)
+        if available[-1]['time'] != cutoff.isoformat():
+            raise ValueError(f'已自动在线补取，但日K仅截至{available[-1]["time"]}，缺少最近已收盘交易日{cutoff}，预测未启动。')
+        raise ValueError(
+            f'已自动在线补取并校验；只有{len(available)}根可用K线，所选窗口需要{count}根。'
+            f'返回范围：{available[0]["time"]}至{available[-1]["time"]}；不会补造上市前或缺失行情。')
     rows = _rows(frame, symbol, 'date', count)
     if rows[-1]['time'] != cutoff.isoformat():
         raise ValueError(f'日K仅截至{rows[-1]["time"]}，缺少最近已收盘交易日{cutoff}，预测未启动。')
-    return rows, [warning, '本地原始日线未满足窗口要求，本次已在线重新取数核验。']
+    return rows, [warning, f'本地原始日线未满足窗口要求，本次已自动在线补取并校验{len(rows)}根，范围{rows[0]["time"]}至{rows[-1]["time"]}。']
 
 
 def current_minute_frame(repo, capset, symbol: str, asset_type: str, now: datetime, *,

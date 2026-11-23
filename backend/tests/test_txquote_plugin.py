@@ -186,10 +186,10 @@ def test_provider_minute_empty_symbols(monkeypatch):
 def test_provider_datasets():
     from app.plugins.txquote.provider import _DATASETS
 
-    assert set(_DATASETS) == {"minute", "depth5"}
+    assert set(_DATASETS) == {"minute", "depth5", "daily"}
     p = TxQuoteProvider()
     assert p.name == "txquote"
-    assert set(p.config.datasets) == {"minute", "depth5"}
+    assert set(p.config.datasets) == {"minute", "depth5", "daily"}
 
 
 # ---------- fetch_day_minute (近5日 1 分钟K) ----------

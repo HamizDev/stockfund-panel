@@ -5,7 +5,7 @@ import { ArrowUpRight, CalendarClock, Pencil, Plus, Search, Trash2 } from 'lucid
 import { api, type Lot } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
-import { fmtPct, fmtPrice, priceColorClass } from '@/lib/format'
+import { fmtPct, priceColorClass } from '@/lib/format'
 import { PageHeader } from '@/components/PageHeader'
 import { Modal } from '@/components/Modal'
 import { DatePicker } from '@/components/DatePicker'
@@ -14,6 +14,7 @@ import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { toNavItems } from '@/lib/listNav'
 import { boardTag } from '@/components/stock-table/primitives'
 import { HoldingsDailyReview, holdingsReviewSignature } from '@/components/HoldingsDailyReview'
+import { formatLotPrice } from './lotsPrice'
 
 const emptyDraft = (): Lot => ({
   id: '',
@@ -115,7 +116,7 @@ export function Lots() {
 
   return (
     <div className="flex flex-col h-full">
-      <PageHeader title="持仓提醒" subtitle="记录个股 / ETF 买入批次, 自动生成止盈止损 / 到期监控规则" />
+      <PageHeader title="持仓提醒" subtitle="登记个股 / ETF 持仓，可选止盈止损或到期提醒" />
       <div className="flex-1 min-h-0 px-5 py-4">
         <div className="mx-auto max-w-5xl space-y-4">
           {lotsLoaded && (
@@ -151,7 +152,7 @@ export function Lots() {
           ) : lots.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border px-6 py-12 text-center">
               <div className="text-sm text-muted">还没有批次</div>
-              <div className="mt-1 text-[11px] text-muted/70">记录一笔买入后, 系统会按成本价 ± 止盈/止损% 生成价格监控; 填了到期日则自动生成到期提醒。这里只用于生成提醒, 不是持仓记账。</div>
+              <div className="mt-1 text-[11px] text-muted/70">填写数量和成本即可登记持仓。填写止盈、止损或到期日后才会生成提醒。</div>
             </div>
           ) : (
             <div className="overflow-hidden rounded-xl border border-border bg-surface/40 shadow-sm">
@@ -187,8 +188,8 @@ export function Lots() {
                           </button>
                         </td>
                         <td className="px-2 py-2.5 text-right font-mono text-secondary">{lot.qty}</td>
-                        <td className="px-2 py-2.5 text-right font-mono text-foreground">{lot.cost_price}</td>
-                        <td className="px-2 py-2.5 text-right font-mono text-secondary">{lastPrices[lot.symbol] != null ? fmtPrice(lastPrices[lot.symbol]) : '—'}</td>
+                        <td className="px-2 py-2.5 text-right font-mono text-foreground">{formatLotPrice(lot.cost_price, lot.asset_type)}</td>
+                        <td className="px-2 py-2.5 text-right font-mono text-secondary">{lastPrices[lot.symbol] != null ? formatLotPrice(lastPrices[lot.symbol], lot.asset_type) : '—'}</td>
                         <td className="px-2 py-2.5 text-right"><CostPnL close={lastPrices[lot.symbol]} cost={lot.cost_price} /></td>
                         <td className="px-2 py-2.5 text-right font-mono text-bull">{lot.target_pct > 0 ? `${lot.target_pct}%` : '—'}</td>
                         <td className="px-2 py-2.5 text-right font-mono text-bear">{lot.stop_pct > 0 ? `${lot.stop_pct}%` : '—'}</td>
@@ -317,8 +318,8 @@ function LotDialog({ lot, onClose }: { lot: Lot; onClose: () => void }) {
     if ((vals.qty ?? 0) < 0 || (vals.target_pct ?? 0) < 0 || (vals.stop_pct ?? 0) < 0 || (vals.lead_days ?? 0) < 0) {
       return setError('数量 / 百分比 / 提前天数不能为负数')
     }
-    if (!((vals.target_pct ?? 0) > 0 || (vals.stop_pct ?? 0) > 0 || draft.remind_date)) {
-      return setError('止盈% / 止损% / 到期日 至少设置一项')
+    if (!((vals.qty ?? 0) > 0 || (vals.target_pct ?? 0) > 0 || (vals.stop_pct ?? 0) > 0 || draft.remind_date)) {
+      return setError('只登记持仓时请输入数量；只设置提醒时请填写一项提醒')
     }
     save.mutate(vals)
   }
@@ -327,7 +328,7 @@ function LotDialog({ lot, onClose }: { lot: Lot; onClose: () => void }) {
     <Modal onClose={onClose} ariaLabel={lot.id ? '编辑批次' : '新增批次'} panelClassName="w-[92vw] max-w-md bg-surface border border-border rounded-card shadow-xl">
       <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
         <span className="text-sm font-medium text-foreground">{lot.id ? '编辑批次' : '新增批次'}</span>
-        <span className="text-[10px] text-muted">保存后自动同步监控规则</span>
+        <span className="text-[10px] text-muted">提醒可选</span>
       </div>
       <div className="space-y-3 px-4 py-4">
         {/* 标的 */}

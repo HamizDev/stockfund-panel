@@ -44,15 +44,18 @@ def validate_forecast(value: dict, targets: list[str]) -> None:
             or len(value['forecast']) != len(targets)):
         raise ValueError('预测结果的时间窗口不匹配，结果未采用。')
     mode = value.get('forecast_mode', 'ohlc')
-    if not isinstance(mode, str) or mode not in {'ohlc', 'close_only'}:
+    if not isinstance(mode, str) or mode not in {'ohlc', 'close_only', 'partial_ohlc'}:
         raise ValueError('预测结果模式无效。')
     if mode == 'close_only' and (not isinstance(value.get('warnings'), list)
             or not any(isinstance(item, str) and '仅展示收盘价预测路径' in item for item in value['warnings'])):
         raise ValueError('仅收盘价预测缺少说明，结果未采用。')
+    if mode == 'partial_ohlc' and (not isinstance(value.get('warnings'), list)
+            or not any(isinstance(item, str) and 'OHLC关系无效' in item and '留空' in item for item in value['warnings'])):
+        raise ValueError('部分预测蜡烛缺少异常说明，结果未采用。')
     for row, target in zip(value['forecast'], targets, strict=True):
         if not isinstance(row, dict) or row.get('time') != target:
             raise ValueError('预测结果时间不匹配。')
-        if mode == 'close_only':
+        if mode == 'close_only' or (mode == 'partial_ohlc' and set(row) == {'time', 'close'}):
             if set(row) != {'time', 'close'}:
                 raise ValueError('仅收盘价模式不得包含开高低价。')
             close = row['close']

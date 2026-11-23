@@ -64,8 +64,8 @@ def validate_lot(lot: dict) -> None:
                 _date.fromisoformat(raw)
             except ValueError:
                 raise ValueError(f"{label} 必须是 YYYY-MM-DD: {raw!r}") from None
-    if not (lot.get("target_pct", 0) > 0 or lot.get("stop_pct", 0) > 0 or lot.get("remind_date")):
-        raise ValueError("止盈% / 止损% / 到期日 至少设置一项 (否则无监控点)")
+    if not (lot.get("qty", 0) > 0 or lot.get("target_pct", 0) > 0 or lot.get("stop_pct", 0) > 0 or lot.get("remind_date")):
+        raise ValueError("只登记持仓时数量必须大于 0。只设置提醒时至少填写一项提醒。")
 
 
 def normalize_lot(lot: dict) -> dict:

@@ -9,8 +9,14 @@ from pydantic import ValidationError
 from app.custom.assistant.prompt import build_system_prompt
 from app.custom.fund import analyzer
 from app.custom.fund import routes as fund_routes
+from app.services import (
+    concept_rotation_analyzer,
+    financial_analyzer,
+    market_recap,
+    news_service,
+    stock_analyzer,
+)
 from app.services import holdings_review as review
-from app.services import stock_analyzer
 
 
 @pytest.mark.parametrize('prompt', [
@@ -89,3 +95,13 @@ def test_fund_candidate_prompt_uses_neutral_research_labels():
     assert '研究核验标签' in prompt
     assert '证据支持、证据分歧、风险需复核、资料不足待核实' in prompt
     assert '不输出申购、赎回、买卖、加减仓或持有等操作结论' in prompt
+
+
+@pytest.mark.parametrize(('prompt', 'restriction'), [
+    (financial_analyzer._SYSTEM_PROMPT, '不包含任何投资建议或买卖指令'),
+    (market_recap._SYSTEM_PROMPT, '不包含任何买卖或操作建议'),
+    (concept_rotation_analyzer._build_system_prompt('industry'), '不包含任何买卖或操作建议'),
+    (news_service.SYSTEM_PROMPT, '不输出买卖、加减仓、持有等操作结论'),
+])
+def test_public_report_modes_keep_neutral_research_boundary(prompt, restriction):
+    assert restriction in prompt
