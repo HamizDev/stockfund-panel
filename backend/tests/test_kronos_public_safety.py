@@ -103,9 +103,13 @@ def test_late_minute_prediction_is_not_a_before_the_fact_score():
 
 
 def test_public_routes_have_no_personal_collection_or_trading_endpoints():
-    names = [route.path for route in routes.build_router().routes]
+    registered = routes.build_router().routes
+    coverage = '/api/custom/kronos/training/coverage'
+    names = [route.path for route in registered]
     assert '/api/custom/kronos/comparisons' in names
-    assert all(not any(word in name for word in ('training', 'historical', 'rolling', 'replay')) for name in names)
+    assert [route.methods for route in registered if route.path == coverage] == [{'GET'}]
+    assert all(not any(word in name for word in ('training', 'historical', 'rolling', 'replay'))
+               for name in names if name != coverage)
 
 
 def test_missing_runtime_does_not_create_or_start_an_account(tmp_path):

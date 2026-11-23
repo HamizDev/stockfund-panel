@@ -65,12 +65,19 @@ function pctClass(v: number | null | undefined) {
   return x > 0 ? 'text-bull' : 'text-bear'
 }
 
-function quoteAge(ms?: number | null) {
-  if (ms == null) return '—'
-  if (ms < 1000) return `${Math.round(ms)}ms`
-  const s = Math.round(ms / 1000)
-  if (s < 60) return `${s}s`
-  return `${Math.floor(s / 60)}m${s % 60}s`
+const quoteClock = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+})
+
+function quoteTime(ms?: number | null) {
+  if (ms == null || !Number.isFinite(ms) || ms <= 0 || ms > 8.64e15) return '—'
+  return quoteClock.format(ms)
 }
 
 function compactCount(v: number | null | undefined) {
@@ -787,10 +794,12 @@ function ChinaDashboard() {
   const strongDown = data.breadth.strong_down ?? 0
   const latestDate = ds?.enriched?.latest_date ?? null
   const currentDate = selectedDate ?? data.as_of ?? ''
-  const freshness = marketFreshness(data.quote_status ?? {}, !!selectedDate && selectedDate !== latestDate)
+  const historical = Boolean(selectedDate)
+  const quoteStatus = data.quote_status ?? {}
+  const freshness = marketFreshness(quoteStatus, historical)
   // 实时模式: none / watchlist / full_market。
   // watchlist 模式仅自选 ≤5 只实时, 看板呈现的大盘数据实为盘后快照, 需提示避免误读。
-  const quoteMode = data.quote_status?.mode as ('none' | 'watchlist' | 'full_market') | undefined
+  const quoteMode = quoteStatus.mode as ('none' | 'watchlist' | 'full_market') | undefined
 
   return (
     <div className="min-h-full bg-base p-1.5">
@@ -854,11 +863,17 @@ function ChinaDashboard() {
           ) : (
             <span className="font-mono text-secondary">—</span>
           )}
-          <span title="本机最近取数距今，不等于上游行情时间" className="flex items-center gap-1"><Timer className="h-3 w-3" />{quoteAge(data.quote_status?.quote_age_ms)}</span>
           <span title={freshness.note} className={freshness.live ? 'text-accent' : 'text-warning'}>{freshness.label}</span>
-          <span title="配置的拉取周期，取数和计算均可能增加延迟">{data.quote_status?.interval_s ?? '—'}秒/轮</span>
-          {data.quote_status?.source_timestamp_ms && <span title="本轮最新来源时间；不是全部标的的共同时间">源 {new Date(data.quote_status.source_timestamp_ms).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}</span>}
-          {data.quote_status?.cycle_duration_ms != null && <span title="上一轮取数、计算与写盘总耗时">处理 {(data.quote_status.cycle_duration_ms / 1000).toFixed(1)}秒</span>}
+          {!historical && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 tabular-nums">
+              <span title="最近一轮中最新的来源报价时间（北京时间），各标的时间可能不同">
+                行情时间 <span className="text-secondary">{quoteTime(quoteStatus.source_timestamp_ms)}</span>
+              </span>
+              <span title="本机最近取数时间（北京时间）" className="flex items-center gap-1">
+                <Timer aria-hidden="true" className="h-3 w-3" />取数时间 <span className="text-secondary">{quoteTime(quoteStatus.last_fetch_ms)}</span>
+              </span>
+            </div>
+          )}
           <button
             onClick={handleRefresh}
             disabled={manualFetching}
@@ -870,7 +885,7 @@ function ChinaDashboard() {
       </div>
 
       {/* 自选实时模式提示: 大盘看板为盘后数据, 仅自选股实时。避免用户误读为全市场实时。 */}
-      {quoteMode === 'watchlist' && (
+      {!historical && quoteMode === 'watchlist' && (
         <div className="mb-1.5 flex items-start gap-2 rounded-card border border-amber-500/30 bg-amber-500/8 px-3 py-1.5 text-[11px] leading-relaxed">
           <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
           <div className="min-w-0 flex-1 text-secondary">

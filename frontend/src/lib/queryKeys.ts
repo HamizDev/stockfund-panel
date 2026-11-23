@@ -11,6 +11,8 @@ import type { GlobalMarket, GlobalMarketChartInterval } from '@/custom/global_ma
 
 export const QK = {
   kronosStatus: ['kronos-status'] as const,
+  kronosTrainingCoverage: (symbol?: string, assetType?: 'stock' | 'etf') =>
+    ['kronos-training-coverage', symbol, assetType] as const,
   kronosJob: (id: string) => ['kronos-job', id] as const,
   kronosEvaluation: (id: string) => ['kronos-evaluation', id] as const,
   kronosComparisons: (symbol: string, period: 'daily' | '1m') => ['kronos-comparisons', symbol, period] as const,

@@ -3,6 +3,7 @@ import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { useQuoteStream, useQuoteStreamStatus } from '@/lib/useQuoteStream'
+import { marketFreshness } from '@/lib/marketFreshness'
 import { alertsTotalPollingOptions } from '@/lib/alertPolling'
 import { ToastContainer, toast } from '@/components/Toast'
 import { AlertToastContainer } from '@/components/AlertToast'
@@ -524,16 +525,19 @@ export function Layout() {
     ? (findDataSource(dataSources, realtimeProvider)?.display_name || realtimeProvider)
     : null
   const realtimeToggleDisabled = toggleQuote.isPending || isPaused
-  const realtimeActive = realtimeEnabled && isRunning && isTrading
+  const freshness = marketFreshness(quoteStatus ?? {}, false)
+  const realtimeActive = realtimeEnabled && freshness.live && !toggleQuote.isPending
   const realtimeStatusLabel = toggleQuote.isPending
     ? '正在更新'
     : isPaused
       ? '同步期间暂停'
-      : realtimeActive
-        ? `轮询 ${quoteStatus?.interval_s ?? 60}秒`
-        : realtimeEnabled
-          ? (isTrading ? '正在连接' : '等待交易时段')
-          : '已关闭'
+      : realtimeEnabled
+        ? !isTrading
+          ? '等待交易时段'
+          : !isRunning
+            ? '正在连接'
+            : realtimeActive ? `轮询 ${quoteStatus?.interval_s ?? 60}秒` : freshness.label
+        : '已关闭'
   const realtimeStatusClass = realtimeActive
     ? 'text-accent'
     : realtimeEnabled || isPaused

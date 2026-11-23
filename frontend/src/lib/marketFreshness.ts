@@ -1,6 +1,6 @@
 type QuoteStatus = {
   enabled?: boolean; running?: boolean; paused?: boolean; is_trading_hours?: boolean
-  quote_age_ms?: number | null; interval_s?: number; mode?: string; market_phase?: string
+  quote_age_ms?: number | null; interval_s?: number; mode?: string
   source_age_ms?: number | null
 }
 
@@ -17,9 +17,14 @@ export function marketFreshness(status: QuoteStatus, historical: boolean) {
     return { label: '时间待核对', live: false, note: '未取得可核对的行情更新时间，不能确认实时性' }
   }
   const interval = typeof status.interval_s === 'number' && Number.isFinite(status.interval_s) && status.interval_s > 0 ? status.interval_s : 60
-  const sourceAge = typeof status.source_age_ms === 'number' && Number.isFinite(status.source_age_ms) ? status.source_age_ms : 0
-  if (Math.max(status.quote_age_ms, sourceAge) > Math.max(30_000, interval * 2_000)) {
+  const sourceAge = status.source_age_ms
+  const sourceTimeKnown = sourceAge != null && Number.isFinite(sourceAge) && sourceAge >= 0
+  const staleAfter = Math.max(30_000, interval * 2_000)
+  if (status.quote_age_ms > staleAfter || (sourceTimeKnown && sourceAge > staleAfter)) {
     return { label: '行情延迟', live: false, note: '报价时间已超过更新周期，请检查数据源连接' }
+  }
+  if (!sourceTimeKnown) {
+    return { label: '来源时间待核对', live: false, note: '本机已取数，来源报价时间暂不可核验' }
   }
   if (status.mode === 'watchlist') return { label: '局部实时', live: true, note: '仅部分标的实时更新，其余数据可能来自盘后缓存' }
   if (status.mode !== 'full_market') return { label: '缓存行情', live: false, note: '未确认实时覆盖模式，显示最近可用数据' }

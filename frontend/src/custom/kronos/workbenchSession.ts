@@ -1,6 +1,6 @@
 import type { KronosModel, KronosPeriod } from './types'
 
-export type KronosWorkbenchTab = 'single' | 'comparison' | 'summary' | 'candidates'
+export type KronosWorkbenchTab = 'single' | 'comparison' | 'summary' | 'training' | 'candidates'
 
 export interface KronosWorkbenchScope {
   symbol: string
@@ -25,7 +25,15 @@ export interface KronosSessionStorage {
 
 export const KRONOS_WORKBENCH_SESSION_KEY = 'kronos-workbench:v1'
 
-const TABS = new Set<KronosWorkbenchTab>(['single', 'comparison', 'summary', 'candidates'])
+const TABS = new Set<KronosWorkbenchTab>(['single', 'comparison', 'summary', 'training', 'candidates'])
+
+export function kronosTabFromSearch(search: string): KronosWorkbenchTab | null {
+  const params = new URLSearchParams(search)
+  const tab = params.get('tab') as KronosWorkbenchTab | null
+  if (tab && TABS.has(tab)) return tab
+  return /^[0-9a-f]{32}$/.test(params.get('job') ?? '') ? 'single' : null
+}
+
 const MODELS = new Set<KronosModel>(['base'])
 const PERIODS = new Set<KronosPeriod>(['daily', '1m'])
 const LOOKBACKS = new Set([60, 120, 240, 400, 512])

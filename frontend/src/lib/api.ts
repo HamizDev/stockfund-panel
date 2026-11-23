@@ -2547,6 +2547,18 @@ export interface SectorRotationUniverseItem {
 
 // ===== API surface =====
 export const api = {
+  kronosTrainingCoverage: (symbol: string, assetType: 'stock' | 'etf', signal?: AbortSignal) => {
+    const params = new URLSearchParams({ symbol, asset_type: assetType })
+    return request<{
+      symbol: string
+      asset_type: 'stock' | 'etf'
+      target_days: number
+      complete_days: number
+      from_date: string
+      through_date: string
+      dates: string[]
+    }>(`/api/custom/kronos/training/coverage?${params}`, { signal, quiet: true })
+  },
   kronosStatus: (signal?: AbortSignal): Promise<KronosStatus> => request<unknown>(
     '/api/custom/kronos/status', { signal, quiet: true },
   ).then(parseKronosStatus),

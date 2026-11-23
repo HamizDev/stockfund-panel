@@ -9,6 +9,7 @@ import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { KronosChart } from './KronosChart'
 import { KronosEvaluation } from './KronosEvaluation'
+import { KronosTrainingCoverage } from './KronosTrainingCoverage'
 import {
   KRONOS_HORIZONS,
   KRONOS_LOOKBACKS,
@@ -22,6 +23,7 @@ import {
 } from './state'
 import { formatKronosTime } from './chartModel'
 import {
+  kronosTabFromSearch,
   readKronosWorkbenchSession,
   updateKronosWorkbenchSession,
   type KronosWorkbenchTab,
@@ -39,6 +41,7 @@ const KRONOS_TABS: Array<{ id: KronosWorkbenchTab; label: string }> = [
   { id: 'single', label: '单次预测' },
   { id: 'comparison', label: '配置对比' },
   { id: 'summary', label: '成绩汇总' },
+  { id: 'training', label: '训练进度' },
   { id: 'candidates', label: '候选模型' },
 ]
 
@@ -82,11 +85,15 @@ export function KronosPage() {
   const [, setSearchParams] = useSearchParams()
   const [view, setView] = useState<KronosViewState>(() => readKronosViewState(location.search))
   const [initialWorkbenchSession] = useState(readKronosWorkbenchSession)
-  const [activeTab, setActiveTab] = useState<KronosWorkbenchTab>(() => initialWorkbenchSession.activeTab)
+  const [activeTab, setActiveTab] = useState<KronosWorkbenchTab>(() => kronosTabFromSearch(location.search) ?? initialWorkbenchSession.activeTab)
   const queryClient = useQueryClient()
   const previousWorkbenchScope = useRef(initialWorkbenchSession.scope)
 
   useEffect(() => writeKronosViewState(view), [view])
+  useEffect(() => {
+    const tab = kronosTabFromSearch(location.search)
+    if (tab) setActiveTab(tab)
+  }, [location.search])
 
   useEffect(() => {
     const currentScope = view.selection ? { symbol: view.selection.symbol, period: view.period } : null
@@ -215,7 +222,9 @@ export function KronosPage() {
       ...(type === 'stock' || type === 'etf' ? { assetType: type } : {}),
     }
     setView(current => ({ ...current, selection: selected }))
-    setSearchParams(kronosSearchParams(selected, view.period), { replace: true })
+    const params = kronosSearchParams(selected, view.period)
+    params.set('tab', activeTab)
+    setSearchParams(params, { replace: true })
   }
 
   const startPrediction = () => {
@@ -255,12 +264,15 @@ export function KronosPage() {
       />
 
       <main className="space-y-3 p-3 sm:p-4">
-        <div role="tablist" aria-label="Kronos工作区" className="flex w-full gap-1 overflow-x-auto rounded-md border border-border/40 bg-surface/70 p-1">
+        <div role="tablist" aria-label="Kronos工作区" className="flex w-full flex-wrap gap-1 rounded-md border border-border/40 bg-surface/70 p-1">
           {KRONOS_TABS.map(tab => (
             <button key={tab.id} type="button" role="tab" aria-selected={activeTab === tab.id}
               onClick={() => {
                 setActiveTab(tab.id)
                 updateKronosWorkbenchSession({ activeTab: tab.id })
+                const params = new URLSearchParams(location.search)
+                params.set('tab', tab.id)
+                setSearchParams(params, { replace: true })
               }}
               className={cn('shrink-0 rounded px-3 py-2 text-[11px] font-medium transition-colors',
                 activeTab === tab.id ? 'bg-accent text-white' : 'text-secondary hover:bg-elevated hover:text-foreground')}>
@@ -470,6 +482,7 @@ export function KronosPage() {
             onPeriodChange={nextPeriod => setParam('period', nextPeriod)}
           />
         )}
+        {activeTab === 'training' && <KronosTrainingCoverage selection={selection} assetType={assetType} onSelect={handleSelect} />}
         {activeTab === 'candidates' && <KronosCandidatePanel />}
       </main>
     </div>

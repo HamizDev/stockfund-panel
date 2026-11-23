@@ -1,10 +1,11 @@
 
 """Routes inherit the panel's existing authentication. POST starts only prediction."""
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from . import training_coverage
 from .candidates import CandidateCatalog
 from .comparison_scores import summarize
 from .comparisons import ComparisonManager, validate_matrix
@@ -101,6 +102,17 @@ def build_router():
     @router.get('/status')
     def status():
         return MANAGER.status()
+
+    @router.get('/training/coverage')
+    def training_coverage_status(
+        request: Request,
+        response: Response,
+        symbol: Annotated[str, Query(pattern=r'^\d{6}\.(SH|SZ|BJ)$')],
+        asset_type: Literal['stock', 'etf'],
+    ):
+        response.headers['Cache-Control'] = 'no-store'
+        return research_call(training_coverage.summarize, request.app.state.repo,
+                              symbol, asset_type)
 
 
 
